@@ -18,6 +18,7 @@ use std::str;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
+use models;
 use chrono;
 use diesel;
 use diesel::prelude::*;
@@ -25,7 +26,6 @@ use diesel::connection::TransactionManager;
 use diesel::sqlite::SqliteConnection;
 use errors::DieselError;
 use hash;
-use capnp;
 use filetime::FileTime;
 
 use std::sync::{Mutex, MutexGuard};
@@ -35,7 +35,6 @@ use time::Duration;
 use std::path::PathBuf;
 use util::PeriodicTimer;
 use tags::Tag;
-use root_capnp;
 
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub enum Data {
@@ -67,7 +66,7 @@ pub struct Info {
     pub group_id: Option<u64>,
 
     pub byte_length: Option<u64>,
-    pub hat_snapshot_ts: i64,
+    pub snapshot_ts_utc: i64,
 }
 
 impl Entry {
@@ -89,6 +88,43 @@ impl Entry {
         self.info.modified_ts_secs.is_some()
             && ((self.parent_id, &self.info.name, self.info.modified_ts_secs)
                 == (them.parent_id, &them.info.name, them.info.modified_ts_secs))
+    }
+}
+
+impl From<models::FileInfo> for Info {
+    fn from(info: models::FileInfo) -> Info {
+        fn none_if_zero(x: u64) -> Option<u64> {
+            if x == 0 {
+                None
+            } else {
+                Some(x)
+            }
+        }
+
+        Info {
+            name: info.name,
+            created_ts_secs: none_if_zero(info.created_ts as u64),
+            modified_ts_secs: none_if_zero(info.modified_ts as u64),
+            accessed_ts_secs: none_if_zero(info.accessed_ts as u64),
+            permissions: match info.permissions {
+                models::Permissions::None => None,
+                models::Permissions::Mode(mode) => Some(fs::Permissions::from_mode(mode)),
+            },
+            byte_length: if info.byte_length == 0 {
+                None
+            } else {
+                Some(info.byte_length as u64)
+            },
+            user_id: match info.owner {
+                models::Owner::None => None,
+                models::Owner::UserGroup(ref ug) => Some(ug.user_id as u64),
+            },
+            group_id: match info.owner {
+                models::Owner::None => None,
+                models::Owner::UserGroup(ref ug) => Some(ug.group_id as u64),
+            },
+            snapshot_ts_utc: info.snapshot_ts_utc,
+        }
     }
 }
 
@@ -115,71 +151,31 @@ impl Info {
             group_id: meta.map(|m| m.st_gid() as u64),
 
             byte_length: meta.map(|m| m.len()),
-            hat_snapshot_ts: chrono::Utc::now().timestamp(),
+            snapshot_ts_utc: chrono::Utc::now().timestamp(),
         }
     }
 
-    pub fn read(msg: root_capnp::file_info::Reader) -> Result<Info, capnp::Error> {
-        fn none_if_zero(x: u64) -> Option<u64> {
-            if x == 0 {
-                None
-            } else {
-                Some(x)
-            }
-        }
-        let owner = match msg.get_owner().which()? {
-            root_capnp::file_info::owner::None(()) => None,
-            root_capnp::file_info::owner::UserGroup(res) => {
-                let ug = res?;
-                Some((ug.get_user_id(), ug.get_group_id()))
-            }
+    pub fn to_model(&self) -> models::FileInfo {
+        let owner = match (self.user_id, self.group_id) {
+            (Some(user_id), Some(group_id)) => models::Owner::UserGroup(models::UserGroup {
+                user_id: user_id as i64,
+                group_id: group_id as i64,
+            }),
+            _ => models::Owner::None,
         };
-        Ok(Info {
-            name: msg.get_name()?.to_vec(),
-            created_ts_secs: none_if_zero(msg.get_created_timestamp_secs()),
-            modified_ts_secs: none_if_zero(msg.get_modified_timestamp_secs()),
-            accessed_ts_secs: none_if_zero(msg.get_accessed_timestamp_secs()),
-            permissions: match msg.get_permissions().which()? {
-                root_capnp::file_info::permissions::None(()) => None,
-                root_capnp::file_info::permissions::Mode(m) => Some(fs::Permissions::from_mode(m)),
+        models::FileInfo {
+            name: self.name.clone(),
+            created_ts: self.created_ts_secs.unwrap_or(0) as i64,
+            modified_ts: self.modified_ts_secs.unwrap_or(0) as i64,
+            accessed_ts: self.accessed_ts_secs.unwrap_or(0) as i64,
+            permissions: match self.permissions {
+                None => models::Permissions::None,
+                Some(ref perm) => models::Permissions::Mode(perm.mode()),
             },
-
-            user_id: owner.as_ref().map(|&(uid, _)| uid),
-            group_id: owner.as_ref().map(|&(_, gid)| gid),
-
-            byte_length: Some(msg.get_byte_length()),
-
-            hat_snapshot_ts: msg.get_utc_timestamp(),
-        })
-    }
-    pub fn populate_msg(&self, mut msg: root_capnp::file_info::Builder) {
-        msg.borrow().set_name(&self.name);
-
-        msg.borrow()
-            .set_created_timestamp_secs(self.created_ts_secs.unwrap_or(0));
-        msg.borrow()
-            .set_modified_timestamp_secs(self.modified_ts_secs.unwrap_or(0));
-        msg.borrow()
-            .set_accessed_timestamp_secs(self.accessed_ts_secs.unwrap_or(0));
-        msg.borrow().set_byte_length(self.byte_length.unwrap_or(0));
-
-        match (self.user_id, self.group_id) {
-            (Some(uid), Some(gid)) => {
-                let mut ug = msg.borrow().get_owner().init_user_group();
-                ug.set_user_id(uid);
-                ug.set_group_id(gid);
-            }
-            _ => {
-                msg.borrow().get_owner().set_none(());
-            }
+            byte_length: self.byte_length.unwrap_or(0) as i64,
+            owner: owner,
+            snapshot_ts_utc: self.snapshot_ts_utc,
         }
-
-        match self.permissions {
-            Some(ref p) => msg.borrow().get_permissions().set_mode(p.mode()),
-            None => msg.borrow().get_permissions().set_none(()),
-        }
-
-        msg.borrow().set_utc_timestamp(self.hat_snapshot_ts);
     }
 }
 
@@ -350,7 +346,7 @@ impl InternalKeyIndex {
                     user_id: data.user_id.map(|x| x as u64),
                     group_id: data.group_id.map(|x| x as u64),
                     byte_length: None,
-                    hat_snapshot_ts: 0,
+                    snapshot_ts_utc: 0,
                 },
             }))
         } else {
@@ -407,7 +403,7 @@ impl InternalKeyIndex {
                             user_id: data.user_id.map(|x| x as u64),
                             group_id: data.group_id.map(|x| x as u64),
                             byte_length: None,
-                            hat_snapshot_ts: 0,
+                            snapshot_ts_utc: 0,
                         },
                     },
                     data.hash_ref
