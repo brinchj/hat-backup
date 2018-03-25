@@ -347,7 +347,7 @@ impl<B: StoreBackend> Family<B> {
         let mut path = output_dir;
         for (entry, _ref, read_fn_opt) in self.list_from_key_store(dir_id)? {
             // Extend directory with filename:
-            path.push(str::from_utf8(&entry.info.name[..]).unwrap());
+            path.push(&entry.info.name);
 
             match entry.data {
                 key::Data::DirPlaceholder => {
@@ -425,7 +425,7 @@ impl<B: StoreBackend> Family<B> {
         let mut top_tree = self.key_store.hash_tree_writer(blob::LeafType::TreeList);
         self.commit_to_tree(&mut top_tree, None, top_hash_fn)?;
 
-        let info = key::Info::new(self.name.clone().into_bytes(), None);
+        let info = key::Info::new(self.name.clone(), None);
         Ok(top_tree.hash(Some(&info))?)
     }
 

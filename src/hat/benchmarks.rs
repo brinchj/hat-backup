@@ -48,7 +48,7 @@ impl UniqueBlockFiller {
 
     /// Fill the buffer with 1KB unique blocks of data.
     /// Each block is unique for the given id and among the other blocks.
-    fn fill_bytes(&mut self, buf: &mut [u8]) {
+    fn fill_ascii(&mut self, buf: &mut [u8]) {
         for block in buf.chunks_mut(1024) {
             if block.len() < 4 {
                 // Last block is too short to make unique.
@@ -57,11 +57,15 @@ impl UniqueBlockFiller {
             let mut n = self.0.lock().unwrap();
 
             block[0] = *n as u8;
-            block[1] = (*n >> 8) as u8;
-            block[2] = (*n >> 16) as u8;
-            block[3] = (*n >> 24) as u8;
+            block[1] = (*n >> 7) as u8;
+            block[2] = (*n >> 14) as u8;
+            block[3] = (*n >> 21) as u8;
             *n += 1;
         }
+    }
+
+    fn fill_chars(&mut self, buf: &mut String) {
+        self.fill_ascii(unsafe { buf.as_mut_vec() });
     }
 }
 
@@ -87,7 +91,7 @@ impl io::Read for UniqueBlockReader {
             Ok(0)
         } else {
             self.filesize -= self.blocksize as i32;
-            self.filler.fill_bytes(&mut buf[..self.blocksize]);
+            self.filler.fill_ascii(&mut buf[..self.blocksize]);
             Ok(self.blocksize)
         }
     }
@@ -97,12 +101,12 @@ fn insert_files(bench: &mut Bencher, filesize: i32, unique: bool, commit: bool) 
     let (hat, family) = setup_family();
 
     let mut filler = UniqueBlockFiller::new(0);
-    let mut name = vec![0; 8];
+    let mut name = "abcdefgh".to_string();
 
     let mut file_reader = UniqueBlockReader::new(filler.clone(), 128 * 1024, filesize);
 
     bench.iter(|| {
-        filler.fill_bytes(&mut name);
+        filler.fill_chars(&mut name);
 
         file_reader.reset_filesize(filesize);
         if !unique {

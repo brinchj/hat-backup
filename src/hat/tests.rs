@@ -40,7 +40,7 @@ fn setup_family() -> (
     (backend, hat, fam)
 }
 
-pub fn entry(name: Vec<u8>) -> key::Entry {
+pub fn entry(name: String) -> key::Entry {
     key::Entry::new(None, name, key::Data::FilePlaceholder, None)
 }
 
@@ -58,7 +58,7 @@ fn snapshot_files<B: StoreBackend>(
                 // Reached the filename part of the string.
                 break;
             }
-            let mut e = entry(current.bytes().collect());
+            let mut e = entry(current.to_string());
             e.parent_id = parent.clone();
 
             parent = dirs.entry((parent, current))
@@ -68,7 +68,7 @@ fn snapshot_files<B: StoreBackend>(
         }
         if current.len() > 0 {
             // We have a file to insert.
-            let mut e = entry(current.bytes().collect());
+            let mut e = entry(current.to_string());
             e.parent_id = parent.clone();
             family.snapshot_direct(e, false, Some(FileIterator::from_bytes(contents)))?;
         }
@@ -156,7 +156,7 @@ fn snapshot_commit_many_empty_directories() {
     let (_, mut hat, mut fam) = setup_family();
 
     for i in 0..3000 {
-        fam.snapshot_direct(entry(format!("name-{}", i).bytes().collect()), true, None)
+        fam.snapshot_direct(entry(format!("name-{}", i)), true, None)
             .unwrap();
     }
 

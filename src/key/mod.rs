@@ -185,15 +185,15 @@ impl<B: StoreBackend> Store<B> {
     }
 }
 
-fn file_size_warning(name: &[u8], wanted: u64, got: u64) {
+fn file_size_warning(name: &str, wanted: u64, got: u64) {
     if wanted < got {
         println!(
-            "Warning: File grew while reading it: {:?} (wanted {}, got {})",
+            "Warning: File grew while reading it: {} (wanted {}, got {})",
             name, wanted, got
         )
     } else if wanted > got {
         println!(
-            "Warning: Could not read whole file (or it shrank): {:?} (wanted {}, got {})",
+            "Warning: Could not read whole file (or it shrank): {} (wanted {}, got {})",
             name, wanted, got
         )
     }

@@ -35,7 +35,7 @@ fn insert_1_key_x_128000_zeros(bench: &mut Bencher) {
             data: Some(vec![bytes.clone()]),
             key_entry: Entry::new(
                 None,
-                format!("{}", i).as_bytes().to_vec(),
+                format!("{}", i),
                 Data::FilePlaceholder,
                 None,
             ),
@@ -72,7 +72,7 @@ fn insert_1_key_x_128000_unique(bench: &mut Bencher) {
             data: Some(vec![my_bytes]),
             key_entry: Entry::new(
                 None,
-                format!("{}", i).as_bytes().to_vec(),
+                format!("{}", i),
                 Data::FilePlaceholder,
                 None,
             ),
@@ -99,7 +99,7 @@ fn insert_1_key_x_16_x_128000_zeros(bench: &mut Bencher) {
 
         let entry = EntryStub {
             data: Some(vec![bytes; 16]),
-            key_entry: Entry::new(None, vec![1u8, 2, 3].to_vec(), Data::FilePlaceholder, None),
+            key_entry: Entry::new(None, "abc".to_string(), Data::FilePlaceholder, None),
         };
         ks_p.send_reply(Msg::Insert(
             entry.key_entry.clone(),
@@ -142,7 +142,7 @@ fn insert_1_key_x_16_x_128000_unique(bench: &mut Bencher) {
 
         let entry = EntryStub {
             data: Some(chunks),
-            key_entry: Entry::new(None, vec![1u8, 2, 3], Data::FilePlaceholder, None),
+            key_entry: Entry::new(None, "abc".to_string(), Data::FilePlaceholder, None),
         };
 
         ks_p.send_reply(Msg::Insert(
@@ -168,7 +168,7 @@ fn insert_1_key_unchanged_empty(bench: &mut Bencher) {
     bench.iter(|| {
         let entry = EntryStub {
             data: None,
-            key_entry: Entry::new(None, vec![1u8, 2, 3], Data::FilePlaceholder, None),
+            key_entry: Entry::new(None, "abc".to_string(), Data::FilePlaceholder, None),
         };
         ks_p.send_reply(Msg::Insert(entry.key_entry.clone(), None))
             .unwrap();
@@ -193,7 +193,7 @@ fn insert_1_key_updated_empty(bench: &mut Bencher) {
                 node_id: None,
                 data: Data::DirPlaceholder,
                 info: Info {
-                    name: vec![1u8, 2, 3].to_vec(),
+                    name: "abc".to_string(),
                     created_ts_secs: Some(i),
                     modified_ts_secs: Some(i),
                     accessed_ts_secs: Some(i),
@@ -201,7 +201,7 @@ fn insert_1_key_updated_empty(bench: &mut Bencher) {
                     user_id: None,
                     permissions: None,
                     byte_length: None,
-                    hat_snapshot_ts: 0,
+                    snapshot_ts_utc: 0,
                 },
             },
         };
@@ -225,7 +225,7 @@ fn insert_1_key_unique_empty(bench: &mut Bencher) {
             data: None,
             key_entry: Entry::new(
                 None,
-                format!("{}", i).as_bytes().to_vec(),
+                format!("{}", i),
                 Data::DirPlaceholder,
                 None,
             ),

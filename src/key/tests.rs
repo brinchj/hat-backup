@@ -23,9 +23,12 @@ use std::io;
 use std::sync::Arc;
 use util::Process;
 
+fn random_string() -> String {
+    thread_rng().gen_ascii_chars().take(32).collect()
+}
+
 fn random_ascii_bytes() -> Vec<u8> {
-    let ascii: String = thread_rng().gen_ascii_chars().take(32).collect();
-    ascii.into_bytes()
+    random_string().into_bytes()
 }
 
 #[derive(Clone, Debug)]
@@ -91,7 +94,7 @@ fn rng_filesystem(size: usize) -> FileSystem {
                     data: data,
 
                     info: Info {
-                        name: random_ascii_bytes(),
+                        name: random_string(),
                         byte_length: None,
 
                         created_ts_secs: thread_rng().gen(),
@@ -123,7 +126,7 @@ fn rng_filesystem(size: usize) -> FileSystem {
             node_id: None, // updated by insert_and_update_fs()
             data: Data::DirPlaceholder,
             info: Info {
-                name: b"root".to_vec(),
+                name: "root".into(),
                 created_ts_secs: thread_rng().gen(),
                 modified_ts_secs: thread_rng().gen(),
                 accessed_ts_secs: thread_rng().gen(),

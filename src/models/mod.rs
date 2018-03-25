@@ -99,7 +99,7 @@ pub enum Permissions {
 
 #[derive(Serialize, Deserialize)]
 pub struct FileInfo {
-    #[serde(rename = "n")] pub name: Vec<u8>,
+    #[serde(rename = "n")] pub name: String,
     #[serde(rename = "c")] pub created_ts: i64,
     #[serde(rename = "m")] pub modified_ts: i64,
     #[serde(rename = "a")] pub accessed_ts: i64,

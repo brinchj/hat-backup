@@ -835,7 +835,7 @@ impl<B: StoreBackend> HatRc<B> {
         for (entry, hash_ref) in family.fetch_dir_data(dir_hash, self.hash_backend())? {
             assert!(entry.info.name.len() > 0);
 
-            output.push(str::from_utf8(&entry.info.name[..]).unwrap());
+            output.push(&entry.info.name[..]);
             println!("{}", output.display());
 
             match hash_ref {

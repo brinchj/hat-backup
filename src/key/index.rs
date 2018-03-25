@@ -55,7 +55,7 @@ pub struct Entry {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Info {
-    pub name: Vec<u8>,
+    pub name: String,
 
     pub created_ts_secs: Option<u64>,
     pub modified_ts_secs: Option<u64>,
@@ -72,7 +72,7 @@ pub struct Info {
 impl Entry {
     pub fn new(
         parent: Option<u64>,
-        name: Vec<u8>,
+        name: String,
         data: Data,
         meta: Option<&fs::Metadata>,
     ) -> Entry {
@@ -129,7 +129,7 @@ impl From<models::FileInfo> for Info {
 }
 
 impl Info {
-    pub fn new(name: Vec<u8>, meta: Option<&fs::Metadata>) -> Info {
+    pub fn new(name: String, meta: Option<&fs::Metadata>) -> Info {
         use std::os::linux::fs::MetadataExt;
 
         let created = meta.and_then(|m| FileTime::from_creation_time(m))
@@ -307,7 +307,7 @@ impl InternalKeyIndex {
     fn lookup(
         &mut self,
         parent_: Option<u64>,
-        name_: Vec<u8>,
+        name_: String,
     ) -> Result<Option<Entry>, DieselError> {
         use super::schema::key_tree::dsl::{key_tree, name, parent_id};
         use super::schema::key_data::dsl::*;
@@ -497,7 +497,7 @@ impl KeyIndex {
     pub fn lookup(
         &self,
         parent_: Option<u64>,
-        name_: Vec<u8>,
+        name_: String,
     ) -> Result<Option<Entry>, DieselError> {
         self.lock().lookup(parent_, name_)
     }
