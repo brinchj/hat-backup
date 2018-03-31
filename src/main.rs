@@ -58,7 +58,7 @@ fn main() {
         .about("Create backup snapshots")
         .args_from_usage(
             "-l, --license 'Display the license'
-                          --hat_cache_dir=[DIR] 'Location of Hat local state'",
+             --hat_cache_dir=[DIR] 'Location of Hat local state'",
         )
         .subcommand(
             SubCommand::with_name("commit")
@@ -174,5 +174,11 @@ fn main() {
             );
             std::process::exit(1);
         }
+    }
+
+    #[cfg(feature="flame_it")] {
+        use ::hat::flame;
+        use ::std::fs::File;
+        flame::dump_html(&mut File::create("hat_flamer_profile.html").unwrap()).unwrap();
     }
 }

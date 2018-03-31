@@ -279,6 +279,7 @@ impl<B: StoreBackend> Family<B> {
         }
     }
 
+    #[cfg_attr(feature="flame_it", flame)]
     pub fn snapshot_direct(
         &self,
         file: key::Entry,
@@ -294,6 +295,7 @@ impl<B: StoreBackend> Family<B> {
         Ok(id)
     }
 
+    #[cfg_attr(feature="flame_it", flame)]
     pub fn snapshot_direct_no_commit(
         &self,
         file: key::Entry,
@@ -313,6 +315,7 @@ impl<B: StoreBackend> Family<B> {
         Ok(id)
     }
 
+    #[cfg_attr(feature="flame_it", flame)]
     pub fn flush(&self) -> Result<(), HatError> {
         for ks in &self.key_store_process {
             if let key::Reply::FlushOk = ks.send_reply(key::Msg::Flush)? {

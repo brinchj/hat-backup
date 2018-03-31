@@ -14,8 +14,12 @@
 
 //! High level Hat API
 
-// Unstable APIs:
+// Unstable APIs: Bencher
 #![cfg_attr(feature = "benchmarks", feature(test))]
+
+// Unstable Plugins: Flamer flamegraphs for profiling.
+#![cfg_attr(feature="flame_it", feature(plugin, custom_attribute))]
+#![cfg_attr(feature="flame_it", plugin(flamer))]
 
 // Standard Rust imports.
 #[macro_use]
@@ -44,8 +48,6 @@ extern crate error_type;
 #[macro_use]
 extern crate diesel;
 #[macro_use]
-extern crate diesel_codegen;
-#[macro_use]
 extern crate diesel_migrations;
 
 // Testing utilities.
@@ -57,6 +59,10 @@ extern crate serde;
 extern crate serde_cbor;
 #[macro_use]
 extern crate serde_derive;
+
+// Flamer flamegraphs for profiling.
+#[cfg(feature="flame_it")]
+pub extern crate flame;
 
 // Submodules
 pub mod backend;
