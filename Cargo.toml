@@ -3,6 +3,12 @@ authors = ["Johan Nielsen <sejr@google.com>"]
 name = "hat-backup"
 version = "0.0.1-pre"
 
+[lib]
+name = "hat"
+path = "src/lib.rs"
+[profile.release]
+debug = true
+
 [[bin]]
 name = "hatbin"
 path = "src/main.rs"
@@ -47,9 +53,3 @@ version = "0.16.0"
 benchmarks = []
 default = []
 simd = ["argon2rs/simd"]
-
-[lib]
-name = "hat"
-path = "src/lib.rs"
-[profile.release]
-debug = true
