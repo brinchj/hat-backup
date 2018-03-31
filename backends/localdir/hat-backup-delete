@@ -1,0 +1,13 @@
+#!/bin/bash
+set -euo pipefail
+
+if [ -z ${HAT_BACKUP_STORAGE_DIR+x} ]; then
+  DIR="$(pwd)/blobs"
+else
+  DIR="${HAT_BACKUP_STORAGE_DIR}/blobs"
+fi
+
+NAME="$1"
+FILE="${DIR}/${NAME}"
+
+rm -f ${FILE}

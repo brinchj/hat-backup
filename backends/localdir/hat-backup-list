@@ -1,0 +1,10 @@
+#!/bin/bash
+set -euo pipefail
+
+if [ -z ${HAT_BACKUP_STORAGE_DIR+x} ]; then
+  DIR="$(pwd)/blobs"
+else
+  DIR="${HAT_BACKUP_STORAGE_DIR}/blobs"
+fi
+
+ls --color=never ${DIR}

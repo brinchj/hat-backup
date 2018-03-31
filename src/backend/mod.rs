@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod cmd;
 mod devnull;
 mod file;
 mod memory;
 
 use crypto::CipherText;
 
+pub use self::cmd::CmdBackend;
 pub use self::devnull::DevNullBackend;
 pub use self::file::FileBackend;
 pub use self::memory::MemoryBackend;

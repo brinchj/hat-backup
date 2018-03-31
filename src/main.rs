@@ -34,10 +34,6 @@ use std::sync::Arc;
 
 static MAX_BLOB_SIZE: usize = 4 * 1024 * 1024;
 
-fn blob_dir() -> PathBuf {
-    PathBuf::from("blobs")
-}
-
 fn license() {
     println!(include_str!("../LICENSE"));
     println!("clap (Command Line Argument Parser) License:");
@@ -111,14 +107,14 @@ fn main() {
     match matches.subcommand() {
         ("resume", Some(_cmd)) => {
             // Setting up the repository triggers automatic resume.
-            let backend = Arc::new(backend::FileBackend::new(blob_dir()));
+            let backend = Arc::new(backend::CmdBackend::new());
             hat::Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap();
         }
         ("commit", Some(cmd)) => {
             let name = cmd.value_of("NAME").unwrap().to_owned();
             let path = cmd.value_of("PATH").unwrap();
 
-            let backend = Arc::new(backend::FileBackend::new(blob_dir()));
+            let backend = Arc::new(backend::CmdBackend::new());
             let mut hat = hat::Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap();
 
             // Update the family index.
@@ -139,13 +135,13 @@ fn main() {
             let name = cmd.value_of("NAME").unwrap().to_owned();
             let path = cmd.value_of("PATH").unwrap();
 
-            let backend = Arc::new(backend::FileBackend::new(blob_dir()));
+            let backend = Arc::new(backend::CmdBackend::new());
             let mut hat = hat::Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap();
 
             hat.checkout_in_dir(name, PathBuf::from(path)).unwrap();
         }
         ("recover", Some(_cmd)) => {
-            let backend = Arc::new(backend::FileBackend::new(blob_dir()));
+            let backend = Arc::new(backend::CmdBackend::new());
             let mut hat = hat::Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap();
 
             hat.recover().unwrap();
@@ -154,14 +150,14 @@ fn main() {
             let name = cmd.value_of("NAME").unwrap().to_owned();
             let id = cmd.value_of("ID").unwrap().to_owned();
 
-            let backend = Arc::new(backend::FileBackend::new(blob_dir()));
+            let backend = Arc::new(backend::CmdBackend::new());
             let mut hat = hat::Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap();
 
             hat.deregister_by_name(name, id.parse::<u64>().unwrap())
                 .unwrap();
         }
         ("gc", Some(_cmd)) => {
-            let backend = Arc::new(backend::FileBackend::new(blob_dir()));
+            let backend = Arc::new(backend::CmdBackend::new());
             let mut hat = hat::Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap();
             let (deleted_hashes, live_blobs) = hat.gc().unwrap();
             println!("Deleted hashes: {:?}", deleted_hashes);
