@@ -197,6 +197,7 @@ impl InternalIndex {
         Ok(idx)
     }
 
+    #[cfg_attr(feature="flame_it", flame)]
     pub fn hash_locate(&mut self, hash_: &hash::Hash) -> Option<QueueEntry> {
         assert!(!hash_.bytes.is_empty());
         use self::schema::hashes::dsl::*;
@@ -527,6 +528,7 @@ impl InternalIndex {
         self.flush_periodically = enabled;
     }
 
+    #[cfg_attr(feature="flame_it", flame)]
     pub fn flush(&mut self) {
         debug!("SQL: hash db commit");
 

@@ -41,6 +41,7 @@ pub struct Hash {
 
 impl Hash {
     /// Computes `hash(text)` and stores this digest as the `bytes` field in a new `Hash` structure.
+    #[cfg_attr(feature="flame_it", flame)]
     pub fn new(
         keys: &crypto::keys::Keeper,
         nodetype: blob::NodeType,

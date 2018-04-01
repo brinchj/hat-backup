@@ -108,16 +108,17 @@ impl<B: StoreBackend> StoreInner<B> {
         // Replace blob id
         let old_blob_desc = self.reserve_new_blob();
 
+        let callbacks = mem::replace(&mut self.blob_refs, vec![]);
+        let done_callback = Box::new(move|()| {
+            callbacks.into_iter().for_each(|c| c.call(()));
+        });
+
         self.blob_index.in_air(&old_blob_desc);
         self.backend
-            .store(&old_blob_desc.name[..], &ct)
+            .store(&old_blob_desc.name[..], &ct, done_callback)
             .expect("Store operation failed");
-        self.blob_index.commit_done(&old_blob_desc);
 
-        // Go through callbacks
-        while let Some(callback) = self.blob_refs.pop() {
-            callback.call(());
-        }
+        self.blob_index.commit_done(&old_blob_desc);
     }
 
     fn store(
@@ -308,6 +309,7 @@ impl<B: StoreBackend> BlobStore<B> {
     }
 
     /// Flush the current blob, independent of its size.
+    #[cfg_attr(feature="flame_it", flame)]
     pub fn flush(&self) {
         let mut guard = self.lock();
         guard.flush();

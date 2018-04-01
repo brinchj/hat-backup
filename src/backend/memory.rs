@@ -16,6 +16,7 @@ use backend::StoreBackend;
 use crypto::CipherText;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
+use util::FnBox;
 
 pub struct MemoryBackend {
     files: Mutex<BTreeMap<Vec<u8>, Vec<u8>>>,
@@ -61,8 +62,10 @@ impl MemoryBackend {
 }
 
 impl StoreBackend for MemoryBackend {
-    fn store(&self, name: &[u8], data: &CipherText) -> Result<(), String> {
-        self.guarded_insert(name.to_vec(), data.to_vec())
+    fn store(&self, name: &[u8], data: &CipherText, done: Box<FnBox<(), ()>>) -> Result<(), String> {
+        let res = self.guarded_insert(name.to_vec(), data.to_vec());
+        done.call(());
+        res
     }
 
     fn retrieve(&self, name: &[u8]) -> Result<Option<Vec<u8>>, String> {

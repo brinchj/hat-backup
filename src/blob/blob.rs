@@ -50,6 +50,7 @@ impl Blob {
         }
     }
 
+    #[cfg_attr(feature="flame_it", flame)]
     pub fn try_append(&mut self, chunk: &[u8], mut href: &mut HashRef) -> Result<(), ()> {
         let ct = crypto::RefKey::seal(&mut href, &self.access_key, PlainTextRef::new(chunk));
 
@@ -78,6 +79,7 @@ impl Blob {
         Ok(())
     }
 
+    #[cfg_attr(feature="flame_it", flame)]
     pub fn to_ciphertext(&mut self) -> Option<CipherText> {
         if self.chunks.len() == 0 {
             return None;

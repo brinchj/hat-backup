@@ -14,11 +14,13 @@
 
 use backend::StoreBackend;
 use crypto::CipherText;
+use util::FnBox;
 
 pub struct DevNullBackend;
 
 impl StoreBackend for DevNullBackend {
-    fn store(&self, _name: &[u8], _data: &CipherText) -> Result<(), String> {
+    fn store(&self, _name: &[u8], _data: &CipherText, done: Box<FnBox<(), ()>>) -> Result<(), String> {
+        done.call(());
         Ok(())
     }
 
