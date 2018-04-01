@@ -840,7 +840,7 @@ impl<B: StoreBackend> HatRc<B> {
 
             match hash_ref {
                 walker::Content::Data(hash_ref) => {
-                    let mut fd = fs::File::create(&output).unwrap();
+                    let mut fd = fs::File::create(&output)?;
                     let tree_opt = hash::tree::LeafIterator::new(self.hash_backend(), hash_ref)?;
                     if let Some(tree) = tree_opt {
                         family.write_file_chunks(&mut fd, tree);
@@ -856,13 +856,16 @@ impl<B: StoreBackend> HatRc<B> {
             }
 
             if let Some(perms) = entry.info.permissions {
-                fs::set_permissions(&output, perms)?;
+                let current = fs::symlink_metadata(&output)?.permissions();
+                if current != perms {
+                    fs::set_permissions(&output, perms)?;
+                }
             }
 
             if let (Some(m), Some(a)) = (entry.info.modified_ts_secs, entry.info.accessed_ts_secs) {
                 let atime = filetime::FileTime::from_seconds_since_1970(a, 0 /* nanos */);
                 let mtime = filetime::FileTime::from_seconds_since_1970(m, 0 /* nanos */);
-                filetime::set_file_times(&output, atime, mtime)?;
+                filetime::set_symlink_file_times(&output, atime, mtime)?;
             }
 
             output.pop();

@@ -352,31 +352,34 @@ impl<B: StoreBackend> Family<B> {
             match entry.data {
                 key::Data::DirPlaceholder => {
                     // This is a directory, recurse!
-                    fs::create_dir_all(&path).unwrap();
+                    fs::create_dir_all(&path)?;
                     self.checkout_in_dir(path.clone(), entry.node_id)?;
                 }
                 key::Data::FilePlaceholder => {
                     // This is a file, write it
-                    let mut fd = fs::File::create(&path).unwrap();
+                    let mut fd = fs::File::create(&path)?;
                     if let Some(tree) = read_fn_opt.expect("File has data").init()? {
                         self.write_file_chunks(&mut fd, tree);
                     }
                 }
                 key::Data::Symlink(link_path) => {
                     use std::os::unix::fs::symlink;
-                    symlink(link_path, &path).unwrap()
+                    symlink(link_path, &path)?
                 }
                 _ => unreachable!("Unexpected data entry"),
             }
 
             if let Some(perms) = entry.info.permissions {
-                fs::set_permissions(&path, perms)?;
+                let current = fs::symlink_metadata(&path)?.permissions();
+                if current != perms {
+                    fs::set_permissions(&path, perms)?;
+                }
             }
 
             if let (Some(m), Some(a)) = (entry.info.modified_ts_secs, entry.info.accessed_ts_secs) {
                 let atime = filetime::FileTime::from_seconds_since_1970(a, 0 /* nanos */);
                 let mtime = filetime::FileTime::from_seconds_since_1970(m, 0 /* nanos */);
-                filetime::set_file_times(&path, atime, mtime).unwrap();
+                filetime::set_symlink_file_times(&path, atime, mtime)?;
             }
 
             // Prepare for next filename:
