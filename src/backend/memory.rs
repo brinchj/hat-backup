@@ -62,7 +62,12 @@ impl MemoryBackend {
 }
 
 impl StoreBackend for MemoryBackend {
-    fn store(&self, name: &[u8], data: &CipherText, done: Box<FnBox<(), ()>>) -> Result<(), String> {
+    fn store(
+        &self,
+        name: &[u8],
+        data: &CipherText,
+        done: Box<FnBox<(), ()>>,
+    ) -> Result<(), String> {
         let res = self.guarded_insert(name.to_vec(), data.to_vec());
         done.call(());
         res

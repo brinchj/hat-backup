@@ -20,7 +20,7 @@ use argon2rs;
 struct PublicKey(secstr::SecStr);
 struct SecretKey(secstr::SecStr);
 
-#[cfg_attr(feature="flame_it", flame)]
+#[cfg_attr(feature = "flame_it", flame)]
 pub fn compute_salt(node_type: blob::NodeType, leaf_type: blob::LeafType) -> Box<[u8]> {
     use byteorder::{LittleEndian, WriteBytesExt};
 
@@ -37,14 +37,14 @@ pub fn compute_salt(node_type: blob::NodeType, leaf_type: blob::LeafType) -> Box
     Box::new(salt)
 }
 
-#[cfg_attr(feature="flame_it", flame)]
+#[cfg_attr(feature = "flame_it", flame)]
 pub fn random_bytes(size: usize) -> secstr::SecStr {
     let mut r = vec![0u8; size];
     unsafe { libsodium_sys::randombytes_buf(r.as_mut_ptr(), r.len()) };
     secstr::SecStr::new(r)
 }
 
-#[cfg_attr(feature="flame_it", flame)]
+#[cfg_attr(feature = "flame_it", flame)]
 pub fn keyed_fingerprint(sk: &[u8], msg: &[u8], salt: &[u8], out: &mut [u8]) {
     use libsodium_sys::{crypto_generichash_blake2b_PERSONALBYTES,
                         crypto_generichash_blake2b_SALTBYTES};

@@ -80,7 +80,12 @@ impl FileBackend {
 }
 
 impl StoreBackend for FileBackend {
-    fn store(&self, name: &[u8], data: &CipherText, done: Box<FnBox<(), ()>>) -> Result<(), String> {
+    fn store(
+        &self,
+        name: &[u8],
+        data: &CipherText,
+        done: Box<FnBox<(), ()>>,
+    ) -> Result<(), String> {
         use self::io::Write;
 
         let mut path = self.root.clone();

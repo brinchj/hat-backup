@@ -32,7 +32,10 @@ impl FileEntry {
     fn new(full_path: PathBuf, parent: Option<u64>) -> Result<FileEntry, Box<Error>> {
         debug!("FileEntry::new({:?})", full_path);
 
-        if let Some(filename) = full_path.file_name().map(|s| s.to_string_lossy().to_string()) {
+        if let Some(filename) = full_path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+        {
             let meta = fs::symlink_metadata(&full_path)?;
             let data = if meta.is_file() {
                 key::Data::FilePlaceholder

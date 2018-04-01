@@ -109,7 +109,7 @@ impl<B: StoreBackend> StoreInner<B> {
         let old_blob_desc = self.reserve_new_blob();
 
         let callbacks = mem::replace(&mut self.blob_refs, vec![]);
-        let done_callback = Box::new(move|()| {
+        let done_callback = Box::new(move |()| {
             callbacks.into_iter().for_each(|c| c.call(()));
         });
 
@@ -309,7 +309,7 @@ impl<B: StoreBackend> BlobStore<B> {
     }
 
     /// Flush the current blob, independent of its size.
-    #[cfg_attr(feature="flame_it", flame)]
+    #[cfg_attr(feature = "flame_it", flame)]
     pub fn flush(&self) {
         let mut guard = self.lock();
         guard.flush();
