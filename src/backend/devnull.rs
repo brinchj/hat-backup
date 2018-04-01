@@ -22,7 +22,7 @@ impl StoreBackend for DevNullBackend {
     fn store(
         &self,
         _name: &[u8],
-        _data: &CipherText,
+        _data: CipherText,
         done: Box<FnBox<(), ()>>,
     ) -> Result<(), String> {
         done.call(());

@@ -29,7 +29,7 @@ pub trait StoreBackend: Sync + Send + 'static {
     fn store(
         &self,
         name: &[u8],
-        data: &CipherText,
+        data: CipherText,
         done_callback: Box<FnBox<(), ()>>,
     ) -> Result<(), String>;
     fn retrieve(&self, name: &[u8]) -> Result<Option<Vec<u8>>, String>;
