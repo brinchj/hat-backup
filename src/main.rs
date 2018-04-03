@@ -82,6 +82,11 @@ fn main() {
                 .args_from_usage("-p --pretend 'Do not modify any data'"),
         )
         .subcommand(SubCommand::with_name("resume").about("Resume previous failed command."))
+        .subcommand(
+            SubCommand::with_name("mount")
+                .about("Mount Hat snapshots on a mountpoint path using FUSE")
+                .args_from_usage("<PATH> 'Path of the mount point'"),
+        )
         .get_matches();
 
     // Check for license flag
@@ -162,6 +167,13 @@ fn main() {
             let (deleted_hashes, live_blobs) = hat.gc().unwrap();
             println!("Deleted hashes: {:?}", deleted_hashes);
             println!("Live data blobs after deletion: {:?}", live_blobs);
+        }
+        ("mount", Some(cmd)) => {
+            let path = cmd.value_of("PATH").unwrap();
+            let backend = Arc::new(backend::CmdBackend::new());
+
+            let hat = hat::Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap();
+            hat::hat::fuse::Fs::new(hat).mount(&path).unwrap();
         }
         _ => {
             println!(

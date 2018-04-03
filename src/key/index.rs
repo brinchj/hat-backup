@@ -159,6 +159,7 @@ impl Info {
             }),
             _ => models::Owner::None,
         };
+
         models::FileInfo {
             name: self.name.clone(),
             created_ts: self.created_ts_secs.unwrap_or(0) as i64,
@@ -333,6 +334,7 @@ impl InternalKeyIndex {
                 data: data.hash
                     .map(|h| Data::FileHash(h))
                     .unwrap_or(Data::DirPlaceholder),
+
                 info: Info {
                     name: name_,
                     created_ts_secs: data.created.map(|i| i as u64),

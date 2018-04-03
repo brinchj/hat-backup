@@ -35,6 +35,7 @@ use util::Process;
 use void::Void;
 use hex;
 
+pub mod fuse;
 mod family;
 mod insert_path_handler;
 mod walker;
@@ -801,6 +802,10 @@ impl<B: StoreBackend> HatRc<B> {
         self.blob_store.flush();
     }
 
+    pub fn list_snapshots(&mut self) -> Vec<db::SnapshotStatus> {
+        self.snapshot_index.list_all()
+    }
+
     pub fn checkout_in_dir(
         &mut self,
         family_name: String,
@@ -1014,7 +1019,7 @@ impl<B: StoreBackend> HatRc<B> {
         Ok((deleted_hashes, live_blobs))
     }
 
-    fn hash_backend(&self) -> key::HashStoreBackend<B> {
+    pub fn hash_backend(&self) -> key::HashStoreBackend<B> {
         key::HashStoreBackend::new(
             self.hash_index.clone(),
             self.blob_store.clone(),

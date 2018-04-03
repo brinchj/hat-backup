@@ -336,7 +336,7 @@ impl<IT: io::Read, B: StoreBackend> MsgHandler<Msg<IT>, Reply<B>> for Store<B> {
                 entry.info.byte_length.map(|s| {
                     file_size_warning(&entry.info.name, s, file_len);
                 });
-                
+
                 let mut entry = entry;
                 entry.info.byte_length = Some(file_len);
 
