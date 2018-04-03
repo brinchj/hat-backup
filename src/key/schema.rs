@@ -40,6 +40,7 @@ table! {
 
         symbolic_link_path -> Nullable<Binary>,
 
+        file_size -> Nullable<BigInt>,
         hash -> Nullable<Binary>,
         hash_ref -> Nullable<Binary>,
     }
@@ -86,6 +87,7 @@ pub struct KeyData {
 
     pub symbolic_link_path: Option<Vec<u8>>,
 
+    pub file_size: Option<i64>,
     pub hash: Option<Vec<u8>>,
     pub hash_ref: Option<Vec<u8>>,
 }
@@ -107,6 +109,7 @@ pub struct NewKeyData<'a> {
 
     pub symbolic_link_path: Option<&'a [u8]>,
 
+    pub file_size: Option<i64>,
     pub hash: Option<&'a [u8]>,
     pub hash_ref: Option<&'a [u8]>,
 }

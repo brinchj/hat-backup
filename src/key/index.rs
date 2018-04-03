@@ -110,11 +110,7 @@ impl From<models::FileInfo> for Info {
                 models::Permissions::None => None,
                 models::Permissions::Mode(mode) => Some(fs::Permissions::from_mode(mode)),
             },
-            byte_length: if info.byte_length == 0 {
-                None
-            } else {
-                Some(info.byte_length as u64)
-            },
+            byte_length: none_if_zero(info.byte_length as u64),
             user_id: match info.owner {
                 models::Owner::None => None,
                 models::Owner::UserGroup(ref ug) => Some(ug.user_id as u64),
@@ -286,6 +282,7 @@ impl InternalKeyIndex {
                 permissions: entry.info.permissions.as_ref().map(|p| p.mode() as i64),
                 group_id: entry.info.group_id.map(|u| u as i64),
                 user_id: entry.info.user_id.map(|u| u as i64),
+                file_size: entry.info.byte_length.map(|b| b as i64),
                 symbolic_link_path: link_path.map(|s| s.as_bytes()),
                 hash: hash_ref_opt.map(|h| &h.hash.bytes[..]),
                 hash_ref: hash_ref_bytes.as_ref().map(|v| &v[..]),
@@ -345,7 +342,7 @@ impl InternalKeyIndex {
                         .map(|m| fs::Permissions::from_mode(m as u32)),
                     user_id: data.user_id.map(|x| x as u64),
                     group_id: data.group_id.map(|x| x as u64),
-                    byte_length: None,
+                    byte_length: data.file_size.map(|x| x as u64),
                     snapshot_ts_utc: 0,
                 },
             }))
@@ -402,7 +399,7 @@ impl InternalKeyIndex {
                                 .map(|m| fs::Permissions::from_mode(m as u32)),
                             user_id: data.user_id.map(|x| x as u64),
                             group_id: data.group_id.map(|x| x as u64),
-                            byte_length: None,
+                            byte_length: data.file_size.map(|x| x as u64),
                             snapshot_ts_utc: 0,
                         },
                     },

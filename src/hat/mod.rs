@@ -145,14 +145,13 @@ fn synthetic_roots_family() -> String {
 
 struct SnapshotLister<'a, B: StoreBackend> {
     backend: &'a key::HashStoreBackend<B>,
-    family: &'a Family<B>,
     // Invariant: Only save the chunkref if it is a directory
     queue: Vec<(walker::Content, bool)>,
 }
 
 impl<'a, B: StoreBackend> SnapshotLister<'a, B> {
     fn fetch(&mut self, hash_ref: hash::tree::HashRef) -> Result<(), HatError> {
-        let res = self.family.fetch_dir_data(hash_ref, self.backend.clone())?;
+        let res = family::Family::<B>::fetch_dir_data(hash_ref, self.backend.clone())?;
         for (_entry, hash_ref) in res.into_iter().rev() {
             let is_dir = match &hash_ref {
                 &walker::Content::Dir(_) => true,
@@ -190,12 +189,10 @@ impl<'a, B: StoreBackend> Iterator for SnapshotLister<'a, B> {
 
 fn list_snapshot<'a, B: StoreBackend>(
     backend: &'a key::HashStoreBackend<B>,
-    family: &'a Family<B>,
     dir_hash: hash::tree::HashRef,
 ) -> SnapshotLister<'a, B> {
     SnapshotLister {
         backend: backend,
-        family: family,
         queue: vec![(walker::Content::Dir(dir_hash), true)],
     }
 }
@@ -832,7 +829,8 @@ impl<B: StoreBackend> HatRc<B> {
         dir_hash: hash::tree::HashRef,
     ) -> Result<(), HatError> {
         fs::create_dir_all(&output).unwrap();
-        for (entry, hash_ref) in family.fetch_dir_data(dir_hash, self.hash_backend())? {
+        for (entry, hash_ref) in family::Family::<B>::fetch_dir_data(dir_hash, self.hash_backend())?
+        {
             assert!(entry.info.name.len() > 0);
 
             output.push(&entry.info.name[..]);
@@ -843,7 +841,7 @@ impl<B: StoreBackend> HatRc<B> {
                     let mut fd = fs::File::create(&output)?;
                     let tree_opt = hash::tree::LeafIterator::new(self.hash_backend(), hash_ref)?;
                     if let Some(tree) = tree_opt {
-                        family.write_file_chunks(&mut fd, tree);
+                        family::Family::<B>::write_file_chunks(&mut fd, tree);
                     }
                 }
                 walker::Content::Dir(hash_ref) => {
@@ -919,7 +917,7 @@ impl<B: StoreBackend> HatRc<B> {
                     blob::LeafType::TreeList => {
                         // Recursive tree structure.
                         // We need all top hashes from all sub-trees.
-                        for hash in list_snapshot(&hash_backend, &family, top_ref) {
+                        for hash in list_snapshot(&hash_backend, top_ref) {
                             let res = hash.expect("Invalid hash ref");
                             let href = match res {
                                 walker::Content::Data(href) => href,

@@ -324,7 +324,6 @@ impl<B: StoreBackend> Family<B> {
     }
 
     pub fn write_file_chunks<HTB: hash::tree::HashTreeBackend<Err = key::MsgError>>(
-        &self,
         fd: &mut fs::File,
         tree: hash::tree::LeafIterator<HTB>,
     ) {
@@ -359,7 +358,7 @@ impl<B: StoreBackend> Family<B> {
                     // This is a file, write it
                     let mut fd = fs::File::create(&path)?;
                     if let Some(tree) = read_fn_opt.expect("File has data").init()? {
-                        self.write_file_chunks(&mut fd, tree);
+                        Self::write_file_chunks(&mut fd, tree);
                     }
                 }
                 key::Data::Symlink(link_path) => {
@@ -405,7 +404,6 @@ impl<B: StoreBackend> Family<B> {
     }
 
     pub fn fetch_dir_data<HTB: hash::tree::HashTreeBackend<Err = key::MsgError>>(
-        &self,
         dir_hash: hash::tree::HashRef,
         backend: HTB,
     ) -> Result<Vec<(key::Entry, walker::Content)>, HatError> {

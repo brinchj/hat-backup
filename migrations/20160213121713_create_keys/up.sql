@@ -24,6 +24,7 @@ CREATE TABLE key_data (
 
 	symbolic_link_path BLOB,
 
+	file_size      Integer,
 	hash           BLOB,
 	hash_ref       BLOB,
 
