@@ -198,12 +198,13 @@ impl CipherText {
         self.len += other.len();
         self.chunks.append(&mut other.chunks);
     }
-    fn collapse(&mut self) {
+    pub fn collapse(&mut self) -> CipherTextRef {
         if self.chunks.len() > 1 {
             let v = self.chunks.concat();
             mem::replace(&mut self.chunks, vec![v]);
             assert_eq!(self.chunks[0].len(), self.len);
         }
+        CipherTextRef::new(&self.chunks[0][..])
     }
     pub fn len(&self) -> usize {
         self.len
@@ -234,6 +235,7 @@ impl CipherText {
 
         CipherText::new(stream)
     }
+
     pub fn to_vec(&self) -> Vec<u8> {
         let mut out = vec![];
         for c in &self.chunks {
@@ -267,6 +269,9 @@ impl<'a> CipherTextRef<'a> {
     }
     pub fn as_ref(&self) -> CipherTextRef {
         CipherTextRef(&self.0[..])
+    }
+    pub fn to_owned(&self) -> CipherText {
+        CipherText::new(self.0.to_vec())
     }
     pub fn slice(&self, from: usize, to: usize) -> CipherTextRef<'a> {
         CipherTextRef(&self.0[from..to])

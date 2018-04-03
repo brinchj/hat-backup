@@ -27,6 +27,7 @@ use tags;
 use util::FnBox;
 use key;
 use serde_cbor;
+use lru_cache;
 
 mod chunk;
 mod blob;
@@ -67,6 +68,7 @@ pub struct StoreInner<B> {
     blob_desc: BlobDesc,
     blob_refs: Vec<(Box<FnBox<(), ()>>)>,
     blob: Blob,
+    read_cache: lru_cache::LruCache<Vec<u8>, BlobReader>,
 }
 
 impl<B> Drop for StoreInner<B> {
@@ -90,6 +92,7 @@ impl<B: StoreBackend> StoreInner<B> {
             blob_desc: Default::default(),
             blob_refs: Vec::new(),
             blob: Blob::new(keys, max_blob_size),
+            read_cache: lru_cache::LruCache::new(10),
         };
         bs.reserve_new_blob();
         bs
@@ -174,13 +177,23 @@ impl<B: StoreBackend> StoreInner<B> {
         if href.persistent_ref.offset == 0 && href.persistent_ref.length == 0 {
             return Ok(Some(Vec::new()));
         }
-        match self.backend.retrieve(&href.persistent_ref.blob_name[..]) {
-            Ok(Some(blob)) => Ok(Some(BlobReader::new(
-                self.keys.clone(),
-                crypto::CipherTextRef::new(&blob[..]),
-            )?.read_chunk(href)?)),
-            Ok(None) => Ok(None),
-            Err(e) => Err(e.into()),
+
+        let name = &href.persistent_ref.blob_name[..];
+        if self.read_cache.get_mut(name).is_some() {
+            let reader = self.read_cache.get_mut(name).expect("is_some");
+            Ok(Some(reader.read_chunk(href)?))
+        } else {
+            match self.backend.retrieve(name) {
+                Ok(Some(blob)) => {
+                    let text = crypto::CipherTextRef::new(&blob[..]);
+                    let mut reader = BlobReader::new(self.keys.clone(), text)?;
+                    let chunk = reader.read_chunk(href)?;
+                    self.read_cache.insert(name.to_vec(), reader);
+                    Ok(Some(chunk))
+                }
+                Ok(None) => Ok(None),
+                Err(e) => Err(e.into()),
+            }
         }
     }
 

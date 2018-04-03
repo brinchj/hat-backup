@@ -34,6 +34,7 @@ extern crate fuse;
 extern crate hex;
 extern crate libc;
 extern crate libsodium_sys;
+extern crate lru_cache;
 extern crate scoped_pool;
 extern crate secstr;
 extern crate void;
