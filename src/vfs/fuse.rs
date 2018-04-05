@@ -1,8 +1,9 @@
 use hash;
 use hat::{self, walker};
 use backend;
-use errors;
+use errors::{self, HatError};
 use libc::{self, c_int};
+use super::fs;
 
 use std::path::{Path, PathBuf};
 use std::mem;
@@ -32,81 +33,11 @@ struct File {
     parent: Option<INode>,
 }
 
-struct FileReader {
-    rest: Option<Box<Iterator<Item = Vec<u8>>>>,
-    offset: u64,
-    buf: Vec<u8>,
-    eof: bool,
-}
-
-impl FileReader {
-    fn new(rest: Option<Box<Iterator<Item = Vec<u8>>>>) -> FileReader {
-        FileReader {
-            rest,
-            offset: 0,
-            buf: Vec::with_capacity(128 * 1024),
-            eof: false,
-        }
-    }
-
-    fn next(&mut self) -> Vec<u8> {
-        if let Some(ref mut rest) = self.rest {
-            self.offset += self.buf.len() as u64;
-            if let Some(buf) = rest.next() {
-                return mem::replace(&mut self.buf, buf);
-            }
-        }
-        self.buf.clear();
-        self.eof = true;
-        vec![]
-    }
-
-    fn advance(&mut self, offset: u64) {
-        while self.offset + (self.buf.len() as u64) < offset || self.buf.is_empty() {
-            self.next();
-            if self.eof {
-                break;
-            }
-        }
-    }
-
-    fn from(&mut self, offset: u64) -> &[u8] {
-        assert!(self.offset <= offset);
-        assert!(offset - self.offset <= (self.buf.len() as u64));
-        &self.buf[(offset as usize) - (self.offset as usize)..]
-    }
-
-    fn take(&mut self, offset: u64, size: usize) -> &[u8] {
-        &self.from(offset)[..size]
-    }
-
-    fn read(&mut self, offset: u64, size: usize) -> Option<Cow<[u8]>> {
-        self.advance(offset);
-
-        if self.eof || self.from(offset).is_empty() {
-            return None;
-        }
-
-        let avail = self.from(offset).len();
-
-        if size <= avail {
-            Some(Cow::Borrowed(self.take(offset, size)))
-        } else {
-            let mut buf = Vec::with_capacity(size as usize);
-            buf.extend_from_slice(self.take(offset, avail));
-            if let Some(slice) = self.read(offset + (avail as u64), size - avail) {
-                buf.extend_from_slice(&slice);
-            }
-            Some(Cow::Owned(buf))
-        }
-    }
-}
-
 pub struct Fuse<B: backend::StoreBackend> {
     hat: Arc<Mutex<hat::HatRc<B>>>,
     inodes: HashMap<INode, File>,
     parent: HashMap<INode, Vec<INode>>,
-    open_files: HashMap<usize, FileReader>,
+    open_files: HashMap<usize, fs::FileReader>,
 }
 
 impl<B: backend::StoreBackend> Fuse<B> {
@@ -215,7 +146,7 @@ impl<B: backend::StoreBackend> Fuse<B> {
         &mut self,
         parent: INode,
         hash_ref: hash::tree::HashRef,
-    ) -> Result<(), errors::HatError> {
+    ) -> Result<(), HatError> {
         let backend = self.hat.lock().unwrap().hash_backend();
         let entries = hat::Family::<B>::fetch_dir_data(hash_ref, backend)?;
 
@@ -307,12 +238,9 @@ impl<B: backend::StoreBackend> fuse::Filesystem for Fuse<B> {
         if let Some(file) = self.inodes.get(&ino).cloned() {
             match file.file_type {
                 FileType::FileTop(hash_ref) => {
-                    let tree = hash::tree::LeafIterator::new(backend, hash_ref)
-                        .unwrap()
-                        .map(|t| Box::new(t) as Box<Iterator<Item = Vec<u8>>>);
-
                     let fh = self.open_files.len() + 1;
-                    self.open_files.insert(fh, FileReader::new(tree));
+                    self.open_files
+                        .insert(fh, fs::FileReader::new(backend, hash_ref).unwrap());
                     reply.opened(fh as u64, flags);
                 }
                 _ => (),
