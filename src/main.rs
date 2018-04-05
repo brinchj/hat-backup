@@ -173,7 +173,7 @@ fn main() {
             let backend = Arc::new(backend::CmdBackend::new());
 
             let hat = hat::Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap();
-            hat::hat::fuse::Fs::new(hat).mount(&path).unwrap();
+            hat::vfs::Fuse::new(hat).mount(&path).unwrap();
         }
         _ => {
             println!(

@@ -70,6 +70,7 @@ mod db;
 mod errors;
 mod gc;
 mod hash;
+pub mod vfs;
 pub mod hat;
 mod key;
 mod snapshot;

@@ -1,20 +1,18 @@
 use hash;
-use hat::walker;
+use hat::{self, walker};
+use backend;
 use errors;
-use libc;
+use libc::{self, c_int};
 
 use std::path::{Path, PathBuf};
 use std::mem;
 use std::io;
 use std::borrow::Cow;
-use fuse;
-use backend;
-use hat;
 use std::ffi::{OsStr, OsString};
-use libc::c_int;
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use time::Timespec;
+use fuse;
 
 #[derive(Clone)]
 enum FileType {
@@ -104,16 +102,16 @@ impl FileReader {
     }
 }
 
-pub struct Fs<B: backend::StoreBackend> {
+pub struct Fuse<B: backend::StoreBackend> {
     hat: Arc<Mutex<hat::HatRc<B>>>,
     inodes: HashMap<INode, File>,
     parent: HashMap<INode, Vec<INode>>,
     open_files: HashMap<usize, FileReader>,
 }
 
-impl<B: backend::StoreBackend> Fs<B> {
-    pub fn new(hat: hat::HatRc<B>) -> Fs<B> {
-        let mut fs = Fs {
+impl<B: backend::StoreBackend> Fuse<B> {
+    pub fn new(hat: hat::HatRc<B>) -> Fuse<B> {
+        let mut fs = Fuse {
             hat: Arc::new(Mutex::new(hat)),
             inodes: HashMap::new(),
             parent: HashMap::new(),
@@ -219,7 +217,7 @@ impl<B: backend::StoreBackend> Fs<B> {
         hash_ref: hash::tree::HashRef,
     ) -> Result<(), errors::HatError> {
         let backend = self.hat.lock().unwrap().hash_backend();
-        let entries = hat::family::Family::<B>::fetch_dir_data(hash_ref, backend)?;
+        let entries = hat::Family::<B>::fetch_dir_data(hash_ref, backend)?;
 
         for (entry, hash_ref) in entries {
             let mut file = File {
@@ -274,7 +272,7 @@ impl<B: backend::StoreBackend> Fs<B> {
     }
 }
 
-impl<B: backend::StoreBackend> fuse::Filesystem for Fs<B> {
+impl<B: backend::StoreBackend> fuse::Filesystem for Fuse<B> {
     fn init(&mut self, req: &fuse::Request) -> Result<(), c_int> {
         Ok(())
     }

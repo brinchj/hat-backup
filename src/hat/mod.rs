@@ -35,11 +35,10 @@ use util::Process;
 use void::Void;
 use hex;
 
-pub mod fuse;
 mod family;
 mod insert_path_handler;
-mod walker;
-use self::family::Family;
+pub mod walker;
+pub use self::family::Family;
 
 #[cfg(test)]
 mod tests;
