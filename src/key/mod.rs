@@ -296,6 +296,17 @@ impl<IT: io::Read, B: StoreBackend> MsgHandler<Msg<IT>, Reply<B>> for Store<B> {
                     None => insert_entry,
                 };
 
+                // Check if we have an data source:
+                let it_opt = chunk_it_opt.and_then(|open| open.call(()));
+                if it_opt.is_none() {
+                    // No data is associated with this entry.
+                    debug!("Insert entry: {:?}", entry.info.name);
+                    let entry = self.index.insert(entry, None)?;
+
+                    // Bail out before storing data that does not exist:
+                    return reply_ok!(Reply::Id(entry.node_id.unwrap()));
+                }
+
                 // Setup hash tree structure
                 let mut tree = self.hash_tree_writer(blob::LeafType::FileChunk);
 
@@ -303,24 +314,22 @@ impl<IT: io::Read, B: StoreBackend> MsgHandler<Msg<IT>, Reply<B>> for Store<B> {
                 // (see HashStoreBackend::insert_chunk above)
                 let max_chunk_len = 128 * 1024;
                 let mut chunk = vec![0; max_chunk_len];
+                let mut reader = it_opt.unwrap();
                 let mut file_len = 0u64;
-
-                if let Some(mut reader) = chunk_it_opt.and_then(|open| open.call(())) {
-                    loop {
-                        let mut chunk_len = 0;
-                        while chunk_len < max_chunk_len {
-                            chunk_len += match reader.read(&mut chunk[chunk_len..]) {
-                                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                                Ok(0) | Err(_) => break,
-                                Ok(size) => size,
-                            }
+                loop {
+                    let mut chunk_len = 0;
+                    while chunk_len < max_chunk_len {
+                        chunk_len += match reader.read(&mut chunk[chunk_len..]) {
+                            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                            Ok(0) | Err(_) => break,
+                            Ok(size) => size,
                         }
-                        if chunk_len == 0 {
-                            break;
-                        }
-                        file_len += chunk_len as u64;
-                        tree.append(&chunk[..chunk_len])?
                     }
+                    if chunk_len == 0 {
+                        break;
+                    }
+                    file_len += chunk_len as u64;
+                    tree.append(&chunk[..chunk_len])?
                 }
 
                 // Warn the user if we did not read the expected size:
