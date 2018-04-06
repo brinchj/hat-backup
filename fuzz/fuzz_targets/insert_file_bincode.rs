@@ -58,4 +58,4 @@ fn fuzz_test(data: &[u8]) {
     }
 }
 
-fuzz_target!(|data: &[u8]| fuzz_test(data));
+fuzz_target!(|data: &[u8]| { fuzz_test(data) });
