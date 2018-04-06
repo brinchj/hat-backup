@@ -8,7 +8,9 @@ use hat::hat::{Family, HatRc};
 use hat::backend::{MemoryBackend, StoreBackend};
 use hat::key;
 use hat::models;
+use hat::vfs::{self, Filesystem};
 
+use std::path;
 use std::sync::Arc;
 
 pub fn setup_hat<B: StoreBackend>(backend: Arc<B>) -> HatRc<B> {
@@ -30,12 +32,28 @@ fn setup_family() -> (
     (backend, hat, fam)
 }
 
-fuzz_target!(|data: &[u8]| {
-    if let Ok(info) = bincode::deserialize::<models::FileInfo>(data) {
+fuzz_target!(
+    |data: &[u8]| if let Ok(info) = bincode::deserialize::<models::FileInfo>(data) {
         if !info.name.is_empty() {
             let entry = key::Entry::new_from_model(None, key::Data::FilePlaceholder, info);
-            let (_backend, _hat, fam) = setup_family();
-            fam.snapshot_direct(entry, false, None).unwrap();
+            let (_backend, mut hat, mut fam) = setup_family();
+
+            fam.snapshot_direct(entry.clone(), false, None).unwrap();
+            hat.commit(&mut fam, None).unwrap();
+            hat.meta_commit().unwrap();
+            hat.data_flush().unwrap();
+
+            let mut fs = Filesystem::new(hat);
+
+            if let vfs::fs::List::Dir(files) = fs.ls(&path::PathBuf::from("familyname/1"))
+                .unwrap()
+                .expect("no files found")
+            {
+                assert_eq!(files.len(), 1);
+                assert_eq!(files[0].0.info.name, entry.info.name);
+            } else {
+                panic!("familyname/1 is not a directory");
+            }
         }
     }
-});
+);
