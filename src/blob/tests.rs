@@ -173,7 +173,7 @@ fn blob_reuse() {
     b.try_append(&[4, 5, 6], &mut c2).unwrap();
 
     let out = b.to_ciphertext().unwrap().to_vec();
-    let reader = BlobReader::new(keys.clone(), crypto::CipherTextRef::new(&out[..])).unwrap();
+    let mut reader = BlobReader::new(keys.clone(), crypto::CipherTextRef::new(&out[..])).unwrap();
     assert_eq!(vec![1, 2, 3], reader.read_chunk(&c1).unwrap());
     assert_eq!(vec![4, 5, 6], reader.read_chunk(&c2).unwrap());
 
@@ -184,7 +184,7 @@ fn blob_reuse() {
     b.try_append(&[1, 2], &mut c3).unwrap();
 
     let out = b.to_ciphertext().unwrap().to_vec();
-    let reader = BlobReader::new(keys.clone(), crypto::CipherTextRef::new(&out[..])).unwrap();
+    let mut reader = BlobReader::new(keys.clone(), crypto::CipherTextRef::new(&out[..])).unwrap();
     assert_eq!(vec![1, 2], reader.read_chunk(&c1).unwrap());
     assert_eq!(vec![1, 2], reader.read_chunk(&c2).unwrap());
     assert_eq!(vec![1, 2], reader.read_chunk(&c3).unwrap());
@@ -234,7 +234,7 @@ fn blob_identity() {
         assert_eq!(max_size, out.len());
 
         let keys = Arc::new(crypto::keys::Keeper::new_for_testing());
-        let reader = BlobReader::new(keys.clone(), crypto::CipherTextRef::new(&out[..])).unwrap();
+        let mut reader = BlobReader::new(keys.clone(), crypto::CipherTextRef::new(&out[..])).unwrap();
         let hrefs = reader.refs().unwrap();
         assert_eq!(n, hrefs.len());
 
@@ -313,7 +313,7 @@ fn blob_ciphertext_authed_allbytes() {
 
     fn verify(keys: &Arc<crypto::keys::Keeper>, bs: &[u8]) -> Result<Vec<Vec<u8>>, BlobError> {
         let mut vs = vec![];
-        let reader = BlobReader::new(keys.clone(), crypto::CipherTextRef::new(&bs[..]))?;
+        let mut reader = BlobReader::new(keys.clone(), crypto::CipherTextRef::new(&bs[..]))?;
         for r in reader.refs()? {
             vs.push(reader.read_chunk(&r)?);
         }

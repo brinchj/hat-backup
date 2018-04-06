@@ -244,7 +244,7 @@ impl<B: StoreBackend> HatRc<B> {
         Ok(hat)
     }
 
-    #[cfg_attr(test, fuzzing)]
+    #[cfg(any(test, feature = "fuzzing"))]
     pub fn new_for_testing(backend: Arc<B>, max_blob_size: usize) -> Result<HatRc<B>, HatError> {
         let keys = Arc::new(crypto::keys::Keeper::new_for_testing());
 
