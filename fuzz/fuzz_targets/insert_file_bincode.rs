@@ -32,8 +32,8 @@ fn setup_family() -> (
     (backend, hat, fam)
 }
 
-fuzz_target!(
-    |data: &[u8]| if let Ok(info) = bincode::deserialize::<models::FileInfo>(data) {
+fn fuzz_test(data: &[u8]) {
+    if let Ok(info) = bincode::deserialize::<models::FileInfo>(data) {
         if !info.name.is_empty() {
             let entry = key::Entry::new_from_model(None, key::Data::FilePlaceholder, info);
             let (_backend, mut hat, mut fam) = setup_family();
@@ -56,4 +56,6 @@ fuzz_target!(
             }
         }
     }
-);
+}
+
+fuzz_target!(|data: &[u8]| fuzz_test(data));
