@@ -31,6 +31,7 @@ use std::borrow::ToOwned;
 use std::convert::From;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::collections::BTreeSet;
 
 static MAX_BLOB_SIZE: usize = 4 * 1024 * 1024;
 
@@ -86,6 +87,11 @@ fn main() {
             SubCommand::with_name("mount")
                 .about("Mount Hat snapshots on a mountpoint path using FUSE")
                 .args_from_usage("<PATH> 'Path of the mount point'"),
+        )
+        .subcommand(
+            SubCommand::with_name("ls")
+                .about("List Hat snapshots paths")
+                .args_from_usage("<PATH> 'Path to list inside hat'"),
         )
         .get_matches();
 
@@ -174,6 +180,35 @@ fn main() {
 
             let hat = hat::Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap();
             hat::vfs::Fuse::new(hat).mount(&path).unwrap();
+        }
+        ("ls", Some(cmd)) => {
+            let path: PathBuf = cmd.value_of("PATH").unwrap().into();
+            let backend = Arc::new(backend::CmdBackend::new());
+
+            let hat = hat::Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap();
+            if let Some(f) = hat::vfs::Filesystem::new(hat).ls(&path).unwrap() {
+                match f {
+                    hat::vfs::fs::List::Root(snapshots) => {
+                        snapshots
+                            .into_iter()
+                            .map(|s| s.family_name)
+                            .collect::<BTreeSet<_>>()
+                            .into_iter()
+                            .for_each(|name| println!("{}", name));
+                    }
+                    hat::vfs::fs::List::Snapshots(snapshots) => for si in snapshots {
+                        println!(
+                            "{}",
+                            PathBuf::from(si.family_name)
+                                .join(format!("{}", si.info.snapshot_id))
+                                .display()
+                        );
+                    },
+                    hat::vfs::fs::List::Dir(files) => for (entry, _) in files {
+                        println!("{}", path.join(entry.info.name).display());
+                    },
+                }
+            }
         }
         _ => {
             println!(

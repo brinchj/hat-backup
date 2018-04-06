@@ -1,7 +1,14 @@
-use hash::tree::{self, HashTreeBackend};
+use hash::tree::{self, HashRef, HashTreeBackend};
+use hat;
+use hat::walker::Content;
+use backend::StoreBackend;
+use errors::HatError;
+use key::Entry;
+use db;
 
 use std::borrow::Cow;
 use std::mem;
+use std::path::{self, Path, PathBuf};
 
 pub struct FileReader {
     rest: Option<Box<Iterator<Item = Vec<u8>>>>,
@@ -76,5 +83,84 @@ impl FileReader {
             }
             Some(Cow::Owned(buf))
         }
+    }
+}
+
+#[derive(Debug)]
+pub enum List {
+    Root(Vec<db::SnapshotStatus>),
+    Snapshots(Vec<db::SnapshotStatus>),
+    Dir(Vec<(Entry, Content)>),
+}
+
+pub struct Filesystem<B: StoreBackend> {
+    hat: hat::HatRc<B>,
+}
+
+impl<B: StoreBackend> Filesystem<B> {
+    pub fn new(hat: hat::HatRc<B>) -> Filesystem<B> {
+        Filesystem { hat }
+    }
+
+    pub fn ls(&mut self, path: &Path) -> Result<Option<List>, HatError> {
+        let snapshots = self.hat.list_snapshots();
+
+        let mut components = path.components();
+
+        let snapshots: Vec<_> = match components.next() {
+            None | Some(path::Component::RootDir) => return Ok(Some(List::Root(snapshots))),
+            Some(f) => snapshots
+                .into_iter()
+                .filter(|s| s.family_name == f.as_os_str().to_string_lossy())
+                .collect(),
+        };
+
+        let snapshot_opt = match components.next() {
+            None => return Ok(Some(List::Snapshots(snapshots))),
+            Some(n) => snapshots
+                .iter()
+                .find(|s| format!("{}", s.info.snapshot_id) == n.as_os_str().to_string_lossy()),
+        };
+
+        if let Some(href_bytes) = snapshot_opt.and_then(|s| s.hash_ref.as_ref()) {
+            let href = HashRef::from_bytes(&href_bytes[..])?;
+            let mut listing = self.ls_ref(href.clone())?;
+            let mut href_opt = Some(href);
+            loop {
+                match (href_opt, components.next()) {
+                    (_, None) => return Ok(Some(List::Dir(listing))),
+                    (None, _) => return Ok(None),
+                    (Some(href), Some(name)) => {
+                        let name_str = name.as_os_str().to_string_lossy();
+                        if let Some((entry, content)) = listing
+                            .into_iter()
+                            .find(|&(ref e, ref c)| e.info.name == name_str)
+                        {
+                            match content {
+                                Content::Data(..) | Content::Link(..) => {
+                                    href_opt = None;
+                                    listing = vec![(entry, content)];
+                                    continue;
+                                }
+                                Content::Dir(dir_href) => {
+                                    listing = self.ls_ref(dir_href.clone())?;
+                                    href_opt = Some(dir_href);
+                                    continue;
+                                }
+                            }
+                        } else {
+                            return Ok(None);
+                        }
+                    }
+                }
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn ls_ref(&mut self, hash_ref: HashRef) -> Result<Vec<(Entry, Content)>, HatError> {
+        let backend = self.hat.hash_backend();
+        Ok(hat::Family::<B>::fetch_dir_data(hash_ref, backend)?)
     }
 }

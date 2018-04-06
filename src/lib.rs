@@ -73,7 +73,7 @@ pub mod hat;
 mod key;
 mod snapshot;
 mod tags;
-mod util;
+pub mod util;
 
 // Re-export the main type
 
