@@ -1,0 +1,26 @@
+[package]
+name = "hat-backup-fuzz"
+version = "0.0.1"
+authors = ["Automatically generated"]
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies.hat-backup]
+path = ".."
+features = ["fuzzing"]
+
+[dependencies.libfuzzer-sys]
+git = "https://github.com/rust-fuzz/libfuzzer-sys.git"
+
+[dependencies]
+bincode = "1.0.0"
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "insert_file_bincode"
+path = "fuzz_targets/insert_file_bincode.rs"

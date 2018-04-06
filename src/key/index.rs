@@ -89,6 +89,15 @@ impl Entry {
             && ((self.parent_id, &self.info.name, self.info.modified_ts_secs)
                 == (them.parent_id, &them.info.name, them.info.modified_ts_secs))
     }
+
+    pub fn new_from_model(parent: Option<u64>, data: Data, info: models::FileInfo) -> Entry {
+        Entry {
+            node_id: None,
+            parent_id: parent,
+            data,
+            info: From::from(info),
+        }
+    }
 }
 
 impl From<models::FileInfo> for Info {

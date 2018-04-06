@@ -48,6 +48,7 @@ features = [
 version = "1.1.1"
 
 [features]
+fuzzing = []
 benchmarks = []
 default = []
 simd = ["argon2rs/simd"]

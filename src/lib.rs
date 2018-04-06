@@ -70,7 +70,7 @@ mod gc;
 mod hash;
 pub mod vfs;
 pub mod hat;
-mod key;
+pub mod key;
 mod snapshot;
 mod tags;
 pub mod util;
