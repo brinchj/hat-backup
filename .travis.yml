@@ -17,6 +17,8 @@ addons:
     - sqlite3
     - gcc-5
     - g++-5
+    - fuse
+    - libfuse-dev
 env:
   - CXX=g++-5 CC=gcc-5
 cache:
