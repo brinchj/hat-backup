@@ -25,12 +25,16 @@ impl FileReader {
         let tree = tree::LeafIterator::new(backend, file)?
             .map(|t| Box::new(t) as Box<Iterator<Item = Vec<u8>>>);
 
-        Ok(FileReader {
-            eof: tree.is_none(),
-            rest: tree,
+        Ok(FileReader::new_from_iter(tree))
+    }
+
+    pub fn new_from_iter(rest: Option<Box<Iterator<Item = Vec<u8>>>>) -> FileReader {
+        FileReader {
+            eof: rest.is_none(),
+            rest,
             offset: 0,
             buf: Vec::with_capacity(16 * 1024),
-        })
+        }
     }
 
     fn next(&mut self) -> Vec<u8> {
@@ -46,7 +50,7 @@ impl FileReader {
     }
 
     fn advance(&mut self, offset: u64) {
-        while self.offset + (self.buf.len() as u64) < offset || self.buf.is_empty() {
+        while self.offset + (self.buf.len() as u64) <= offset || self.buf.is_empty() {
             self.next();
             if self.eof {
                 break;
