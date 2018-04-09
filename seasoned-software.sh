@@ -5,22 +5,14 @@ set -euo pipefail
 export CFLAGS=""
 export CXXFLAGS=""
 
+# Print environment for debuggin.
 env
 
-clang --version
-
-
-curl https://sh.rustup.rs -sSf | sh -s -- -y
-export PATH="/home/user/.cargo/bin:${PATH}"
-
-
+# Switch to nightly Rust as needed by Cargo-fuzz.
 rustup override set nightly
-cargo install cargo-fuzz
 
 
-export CUSTOM_LIBFUZZER_PATH="$(clang -print-file-name=libclang_rt.fuzzer-x86_64.a)"
-
-
+# Install libsodium.
 ./travis-install-libsodium.sh
 
 
@@ -35,6 +27,7 @@ fi
 export LD_LIBRARY_PATH=$HOME/libsodium/lib:$LD_LIBRARY_PATH
 
 
+# Build and register all tests known to Cargo-fuzz.
 for t in $(cargo fuzz list|sed 's@\x1b[^m]*m@@g'); do
 	echo "Building test: $t"
 	cargo fuzz run $t --release -- -help=1
