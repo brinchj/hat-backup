@@ -4,8 +4,8 @@ extern crate hat;
 #[macro_use]
 extern crate libfuzzer_sys;
 
-use hat::hat::{Family, HatRc};
 use hat::backend::{MemoryBackend, StoreBackend};
+use hat::hat::{Family, HatRc};
 use hat::key;
 use hat::models;
 use hat::vfs::{self, Filesystem};
@@ -50,7 +50,9 @@ fn fuzz_test(data: &[u8]) {
                 .expect("no files found")
             {
                 assert_eq!(files.len(), 1);
-                assert_eq!(files[0].0.info.name, entry.info.name);
+                let mut want = entry.info;
+                want.snapshot_ts_utc = files[0].0.info.snapshot_ts_utc;
+                assert_eq!(want, files[0].0.info);
             } else {
                 panic!("familyname/1 is not a directory");
             }
