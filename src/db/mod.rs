@@ -44,7 +44,7 @@ impl Index {
     pub fn lock(&self) -> MutexGuard<InternalIndex> {
         self.0.lock().expect("Database mutex is poisoned")
     }
-    #[cfg(any(test, feature = "fuzzing"))]
+    #[cfg(any(test, fuzzing))]
     pub fn new_for_testing() -> Index {
         Index(Mutex::new(InternalIndex::new(":memory:").unwrap()))
     }

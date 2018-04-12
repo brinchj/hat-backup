@@ -9,7 +9,6 @@ cargo-fuzz = true
 
 [dependencies.hat-backup]
 path = ".."
-features = ["fuzzing"]
 
 [dependencies.libfuzzer-sys]
 git = "https://github.com/rust-fuzz/libfuzzer-sys.git"

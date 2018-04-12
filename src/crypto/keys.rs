@@ -102,7 +102,7 @@ impl Keeper {
         keeper
     }
 
-    #[cfg(any(test, feature = "fuzzing"))]
+    #[cfg(any(test, fuzzing))]
     pub fn new_for_testing() -> Keeper {
         let mut keeper = Keeper {
             universal_key: secstr::SecStr::new(vec![0; 32]),
