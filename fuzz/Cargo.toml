@@ -1,11 +1,25 @@
 [package]
-name = "hat-backup-fuzz"
-version = "0.0.1"
 authors = ["Automatically generated"]
+name = "hat-backup-fuzz"
 publish = false
+version = "0.0.1"
 
-[package.metadata]
-cargo-fuzz = true
+[[bin]]
+name = "metadata_test_bincode"
+path = "fuzz_targets/metadata_test_bincode.rs"
+
+[[bin]]
+name = "metadata_test_cbor"
+path = "fuzz_targets/metadata_test_cbor.rs"
+
+[[bin]]
+name = "metadata_test_json"
+path = "fuzz_targets/metadata_test_json.rs"
+
+[dependencies]
+bincode = "1.0.0"
+serde_cbor = "0.8.2"
+serde_json = "1.0.13"
 
 [dependencies.hat-backup]
 path = ".."
@@ -13,13 +27,12 @@ path = ".."
 [dependencies.libfuzzer-sys]
 git = "https://github.com/rust-fuzz/libfuzzer-sys.git"
 
-[dependencies]
-bincode = "1.0.0"
+[lib]
+name = "hat_fuzz"
+src = "src/lib.rs"
 
-# Prevent this from interfering with workspaces
+[package.metadata]
+cargo-fuzz = true
+
 [workspace]
 members = ["."]
-
-[[bin]]
-name = "insert_file_bincode"
-path = "fuzz_targets/insert_file_bincode.rs"

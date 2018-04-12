@@ -16,9 +16,9 @@
 
 use blob;
 
+use chrono;
 use models;
 use serde_cbor;
-use chrono;
 
 use diesel;
 use diesel::connection::TransactionManager;
@@ -200,8 +200,8 @@ impl InternalIndex {
     #[cfg_attr(feature = "flame_it", flame)]
     pub fn hash_locate(&mut self, hash_: &hash::Hash) -> Option<QueueEntry> {
         assert!(!hash_.bytes.is_empty());
-        use self::schema::hashes::dsl::*;
         use self::schema::blobs::dsl::blobs;
+        use self::schema::hashes::dsl::*;
 
         let result_opt = hashes
             .left_outer_join(blobs)
@@ -231,8 +231,8 @@ impl InternalIndex {
     }
 
     pub fn hash_locate_by_id(&mut self, id_: u64) -> Option<Entry> {
-        use self::schema::hashes::dsl::*;
         use self::schema::blobs::dsl::blobs;
+        use self::schema::hashes::dsl::*;
 
         let result_opt = hashes
             .left_outer_join(blobs)
@@ -481,8 +481,8 @@ impl InternalIndex {
     }
 
     pub fn hash_list(&mut self) -> Vec<Entry> {
-        use self::schema::hashes::dsl::*;
         use self::schema::blobs::dsl::blobs;
+        use self::schema::hashes::dsl::*;
 
         hashes
             .left_outer_join(blobs)
@@ -539,8 +539,8 @@ impl InternalIndex {
 
     pub fn blob_next_id(&mut self) -> i64 {
         // TODO(jos): use an id_counter.
-        use diesel::dsl::max;
         use self::schema::blobs::dsl::*;
+        use diesel::dsl::max;
 
         blobs
             .select(max(id))
@@ -704,8 +704,8 @@ impl InternalIndex {
         family_name_: &str,
         snapshot_id_: u64,
     ) -> Option<(SnapshotInfo, hash::Hash, Option<hash::tree::HashRef>)> {
-        use self::schema::snapshots::dsl::*;
         use self::schema::family::dsl::{family, name};
+        use self::schema::snapshots::dsl::*;
 
         let row_opt = snapshots
             .inner_join(family)
@@ -833,9 +833,9 @@ impl InternalIndex {
     }
 
     pub fn snapshot_list(&mut self, skip_tag: Option<tags::Tag>) -> Vec<SnapshotStatus> {
-        use diesel::*;
-        use self::schema::snapshots::dsl::*;
         use self::schema::family::dsl::family;
+        use self::schema::snapshots::dsl::*;
+        use diesel::*;
         let rows = match skip_tag {
             None => snapshots
                 .inner_join(family)

@@ -12,18 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use serde_cbor;
-use models;
-use crypto;
-use chrono;
 use backend::StoreBackend;
 use blob;
+use chrono;
+use crypto;
 use db;
 use errors::HatError;
 use filetime;
 use gc::{self, Gc, GcRc};
 use hash;
+use hex;
 use key;
+use models;
+use serde_cbor;
 use snapshot;
 use std::cmp;
 use std::fs;
@@ -33,17 +34,16 @@ use std::sync::{mpsc, Arc};
 use tags;
 use util::Process;
 use void::Void;
-use hex;
 
 mod family;
 mod insert_path_handler;
 pub mod walker;
 pub use self::family::Family;
 
-#[cfg(test)]
-mod tests;
 #[cfg(all(test, feature = "benchmarks"))]
 mod benchmarks;
+#[cfg(test)]
+mod tests;
 
 pub struct GcBackend {
     hash_index: Arc<hash::HashIndex>,
