@@ -32,9 +32,7 @@ fn setup_family() -> (
 }
 
 fn metadata_test(info: models::FileInfo) {
-    println!("OK: MESSAGE PARSED");
     if !info.name.is_empty() {
-        panic!("OK: MESSAGE HAS FILENAME");
         let entry = key::Entry::new_from_model(None, key::Data::FilePlaceholder, info);
         let (_backend, mut hat, mut fam) = setup_family();
 
