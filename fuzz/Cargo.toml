@@ -29,10 +29,14 @@ git = "https://github.com/rust-fuzz/libfuzzer-sys.git"
 
 [lib]
 name = "hat_fuzz"
-src = "src/lib.rs"
 
 [package.metadata]
 cargo-fuzz = true
+
+[profile.release]
+incremental = false  # required for LTO
+lto = true
+codegen-units = 1
 
 [workspace]
 members = ["."]
