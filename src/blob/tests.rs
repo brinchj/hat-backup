@@ -234,7 +234,8 @@ fn blob_identity() {
         assert_eq!(max_size, out.len());
 
         let keys = Arc::new(crypto::keys::Keeper::new_for_testing());
-        let mut reader = BlobReader::new(keys.clone(), crypto::CipherTextRef::new(&out[..])).unwrap();
+        let mut reader =
+            BlobReader::new(keys.clone(), crypto::CipherTextRef::new(&out[..])).unwrap();
         let hrefs = reader.refs().unwrap();
         assert_eq!(n, hrefs.len());
 

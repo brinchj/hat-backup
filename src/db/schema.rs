@@ -78,7 +78,8 @@ allow_tables_to_appear_in_same_query!(blobs, family, gc_metadata, hashes, snapsh
 
 #[derive(Queryable, QueryableByName)]
 pub struct RowId {
-    #[sql_type = "BigInt"] pub row_id: i64,
+    #[sql_type = "BigInt"]
+    pub row_id: i64,
 }
 
 #[derive(Queryable)]
