@@ -34,5 +34,5 @@ for t in $(cargo fuzz list|sed 's@\x1b[^m]*m@@g'); do
 	exe="$(find fuzz/target -iname $t -executable)"
 
 	echo "Registering: $exe"
-	register-binary "$t" "$exe"
+	upload-binary "$exe"
 done
