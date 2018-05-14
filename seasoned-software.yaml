@@ -1,7 +1,7 @@
 install:
   apt-get:
-    libsodium18
-    fuse
-    libfuse-dev
-    sqlite3
-    libsqlite3-dev
+  - libsodium18
+  - fuse
+  - libfuse-dev
+  - sqlite3
+  - libsqlite3-dev
