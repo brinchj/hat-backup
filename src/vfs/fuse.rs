@@ -199,7 +199,7 @@ impl<B: backend::StoreBackend> Fuse<B> {
             }
         }
 
-        self.parent.get(&parent).unwrap().clone()
+        self.parent.get(&parent).cloned().unwrap_or_else(|| vec![])
     }
 }
 
