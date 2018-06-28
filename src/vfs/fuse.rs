@@ -258,7 +258,7 @@ impl<B: backend::StoreBackend> fuse::Filesystem for Fuse<B> {
     ) {
         if let Some(ref mut file) = self.open_files.get_mut(&(fh as usize)) {
             match file.read(offset as u64, size as usize) {
-                None => reply.error(libc::EOF),
+                None => reply.data(&[]),
                 Some(data) => reply.data(&data),
             }
         }
