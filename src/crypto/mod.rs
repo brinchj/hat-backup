@@ -35,9 +35,10 @@ pub mod authed {
         use libsodium_sys;
         use secstr;
 
-        pub const KEYBYTES: usize = libsodium_sys::crypto_aead_chacha20poly1305_KEYBYTES;
-        pub const NONCEBYTES: usize = libsodium_sys::crypto_aead_chacha20poly1305_NPUBBYTES;
-        pub const MACBYTES: usize = libsodium_sys::crypto_aead_chacha20poly1305_ABYTES;
+        pub const KEYBYTES: usize = libsodium_sys::crypto_aead_chacha20poly1305_KEYBYTES as usize;
+        pub const NONCEBYTES: usize =
+            libsodium_sys::crypto_aead_chacha20poly1305_NPUBBYTES as usize;
+        pub const MACBYTES: usize = libsodium_sys::crypto_aead_chacha20poly1305_ABYTES as usize;
         pub type Key = secstr::SecStr;
         pub type Nonce = secstr::SecStr;
     }
@@ -56,7 +57,7 @@ pub mod authed {
             access_key: &super::desc::Key,
             other_key: &super::desc::Key,
         ) -> super::desc::Key {
-            let mut mixed_key = [0u8; super::hash::DIGESTBYTES];
+            let mut mixed_key = [0u8; super::hash::DIGESTBYTES as usize];
             let salt: &[u8; 16] = b"mixkey~~mixkey~~";
             ::crypto::keys::keyed_fingerprint(
                 &access_key.unsecure()[..],
@@ -77,7 +78,7 @@ pub mod sealed {
     pub mod desc {
         use libsodium_sys;
 
-        pub const SEALBYTES: usize = libsodium_sys::crypto_box_SEALBYTES;
+        pub const SEALBYTES: usize = libsodium_sys::crypto_box_SEALBYTES as usize;
 
         pub fn symmetric_seal_bytes() -> usize {
             // Mac and nonce from inner symmetric seal
@@ -219,16 +220,16 @@ impl CipherText {
         use libsodium_sys::{crypto_stream_chacha20, crypto_stream_chacha20_KEYBYTES,
                             crypto_stream_chacha20_NONCEBYTES};
 
-        let key = keys::random_bytes(crypto_stream_chacha20_KEYBYTES);
-        let nonce = keys::random_bytes(crypto_stream_chacha20_NONCEBYTES);
+        let key = keys::random_bytes(crypto_stream_chacha20_KEYBYTES as usize);
+        let nonce = keys::random_bytes(crypto_stream_chacha20_NONCEBYTES as usize);
         let mut stream = vec![0u8; size];
 
         let ret = unsafe {
             crypto_stream_chacha20(
                 stream.as_mut_ptr(),
                 stream.len() as u64,
-                nonce.unsecure().as_ptr() as *const [u8; crypto_stream_chacha20_NONCEBYTES],
-                key.unsecure().as_ptr() as *const [u8; crypto_stream_chacha20_KEYBYTES],
+                nonce.unsecure().as_ptr(),
+                key.unsecure().as_ptr(),
             )
         };
         assert_eq!(0, ret);
@@ -250,7 +251,7 @@ impl CipherText {
 
         let blob = &mut self.chunks[0];
         let blob_len = blob.len();
-        blob.resize(blob_len + authed::hash::DIGESTBYTES, 0u8);
+        blob.resize(blob_len + authed::hash::DIGESTBYTES as usize, 0u8);
         {
             let (data, hash) = blob.split_at_mut(blob_len);
             keys.blob_authentication(&data[..], &mut hash[..]);
@@ -307,9 +308,9 @@ impl<'a> CipherTextRef<'a> {
     }
 
     pub fn strip_authentication(&self, keys: &keys::Keeper) -> Result<CipherTextRef, CryptoError> {
-        let (rest, want) = self.split_from_right(authed::hash::DIGESTBYTES)?;
+        let (rest, want) = self.split_from_right(authed::hash::DIGESTBYTES as usize)?;
 
-        let mut got = vec![0u8; authed::hash::DIGESTBYTES];
+        let mut got = vec![0u8; authed::hash::DIGESTBYTES as usize];
         keys.blob_authentication(&rest.0[..], &mut got[..]);
 
         if want.0 == &got[..] {

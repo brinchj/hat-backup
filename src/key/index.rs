@@ -57,9 +57,9 @@ pub struct Entry {
 pub struct Info {
     pub name: String,
 
-    pub created_ts_secs: Option<u64>,
-    pub modified_ts_secs: Option<u64>,
-    pub accessed_ts_secs: Option<u64>,
+    pub created_ts_secs: Option<i64>,
+    pub modified_ts_secs: Option<i64>,
+    pub accessed_ts_secs: Option<i64>,
 
     pub permissions: Option<fs::Permissions>,
     pub user_id: Option<u64>,
@@ -93,7 +93,14 @@ impl Entry {
 
 impl From<models::FileInfo> for Info {
     fn from(info: models::FileInfo) -> Info {
-        fn none_if_zero(x: u64) -> Option<u64> {
+        fn none_if_zero_i64(x: i64) -> Option<i64> {
+            if x == 0 {
+                None
+            } else {
+                Some(x)
+            }
+        }
+        fn none_if_zero_u64(x: u64) -> Option<u64> {
             if x == 0 {
                 None
             } else {
@@ -103,14 +110,14 @@ impl From<models::FileInfo> for Info {
 
         Info {
             name: info.name,
-            created_ts_secs: none_if_zero(info.created_ts as u64),
-            modified_ts_secs: none_if_zero(info.modified_ts as u64),
-            accessed_ts_secs: none_if_zero(info.accessed_ts as u64),
+            created_ts_secs: none_if_zero_i64(info.created_ts),
+            modified_ts_secs: none_if_zero_i64(info.modified_ts),
+            accessed_ts_secs: none_if_zero_i64(info.accessed_ts),
             permissions: match info.permissions {
                 models::Permissions::None => None,
                 models::Permissions::Mode(mode) => Some(fs::Permissions::from_mode(mode)),
             },
-            byte_length: none_if_zero(info.byte_length as u64),
+            byte_length: none_if_zero_u64(info.byte_length as u64),
             user_id: match info.owner {
                 models::Owner::None => None,
                 models::Owner::UserGroup(ref ug) => Some(ug.user_id as u64),
@@ -129,10 +136,9 @@ impl Info {
         use std::os::linux::fs::MetadataExt;
 
         let created = meta.and_then(|m| FileTime::from_creation_time(m))
-            .map(|t| t.seconds_relative_to_1970());
-        let modified =
-            meta.map(|m| FileTime::from_last_modification_time(m).seconds_relative_to_1970());
-        let accessed = meta.map(|m| FileTime::from_last_access_time(m).seconds_relative_to_1970());
+            .map(|t| t.seconds());
+        let modified = meta.map(|m| FileTime::from_last_modification_time(m).seconds());
+        let accessed = meta.map(|m| FileTime::from_last_access_time(m).seconds());
 
         Info {
             name: name,
@@ -337,9 +343,9 @@ impl InternalKeyIndex {
 
                 info: Info {
                     name: name_,
-                    created_ts_secs: data.created.map(|i| i as u64),
-                    modified_ts_secs: data.modified.map(|i| i as u64),
-                    accessed_ts_secs: data.accessed.map(|i| i as u64),
+                    created_ts_secs: data.created,
+                    modified_ts_secs: data.modified,
+                    accessed_ts_secs: data.accessed,
                     permissions: data.permissions
                         .map(|m| fs::Permissions::from_mode(m as u32)),
                     user_id: data.user_id.map(|x| x as u64),
@@ -394,9 +400,9 @@ impl InternalKeyIndex {
                         },
                         info: Info {
                             name: node.name,
-                            created_ts_secs: data.created.map(|i| i as u64),
-                            modified_ts_secs: data.modified.map(|i| i as u64),
-                            accessed_ts_secs: data.accessed.map(|i| i as u64),
+                            created_ts_secs: data.created,
+                            modified_ts_secs: data.modified,
+                            accessed_ts_secs: data.accessed,
                             permissions: data.permissions
                                 .map(|m| fs::Permissions::from_mode(m as u32)),
                             user_id: data.user_id.map(|x| x as u64),

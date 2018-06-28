@@ -376,8 +376,8 @@ impl<B: StoreBackend> Family<B> {
             }
 
             if let (Some(m), Some(a)) = (entry.info.modified_ts_secs, entry.info.accessed_ts_secs) {
-                let atime = filetime::FileTime::from_seconds_since_1970(a, 0 /* nanos */);
-                let mtime = filetime::FileTime::from_seconds_since_1970(m, 0 /* nanos */);
+                let atime = filetime::FileTime::from_unix_time(a, 0 /* nanos */);
+                let mtime = filetime::FileTime::from_unix_time(m, 0 /* nanos */);
                 filetime::set_symlink_file_times(&path, atime, mtime)?;
             }
 

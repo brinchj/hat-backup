@@ -37,7 +37,7 @@ impl Blob {
             access_key: crypto::FixedKey::new_access_partial_key(),
             chunks: CipherText::empty(),
             footer: Vec::with_capacity(max_len / 2),
-            overhead: crypto::sealed::desc::overhead() + crypto::authed::hash::DIGESTBYTES,
+            overhead: crypto::sealed::desc::overhead() + crypto::authed::hash::DIGESTBYTES as usize,
             max_len: max_len,
         }
     }

@@ -39,8 +39,9 @@ pub fn compute_salt(node_type: blob::NodeType, leaf_type: blob::LeafType) -> Box
 
 #[cfg_attr(feature = "flame_it", flame)]
 pub fn random_bytes(size: usize) -> secstr::SecStr {
+    use std::os::raw::c_void;
     let mut r = vec![0u8; size];
-    unsafe { libsodium_sys::randombytes_buf(r.as_mut_ptr(), r.len()) };
+    unsafe { libsodium_sys::randombytes_buf(r.as_mut_ptr() as *mut c_void, r.len()) };
     secstr::SecStr::new(r)
 }
 
@@ -48,10 +49,10 @@ pub fn random_bytes(size: usize) -> secstr::SecStr {
 pub fn keyed_fingerprint(sk: &[u8], msg: &[u8], salt: &[u8], out: &mut [u8]) {
     use libsodium_sys::{crypto_generichash_blake2b_PERSONALBYTES,
                         crypto_generichash_blake2b_SALTBYTES};
-    assert_eq!(crypto_generichash_blake2b_SALTBYTES, salt.len());
+    assert_eq!(crypto_generichash_blake2b_SALTBYTES, salt.len() as u32);
 
     let outlen = out.len();
-    let personal: &[u8; libsodium_sys::crypto_generichash_blake2b_PERSONALBYTES] =
+    let personal: &[u8; libsodium_sys::crypto_generichash_blake2b_PERSONALBYTES as usize] =
         b"hat-backup~~~~~a";
 
     let ret = unsafe {
@@ -62,8 +63,8 @@ pub fn keyed_fingerprint(sk: &[u8], msg: &[u8], salt: &[u8], out: &mut [u8]) {
             msg.len() as u64,
             sk.as_ptr(),
             sk.len(),
-            salt.as_ptr() as *const [u8; crypto_generichash_blake2b_SALTBYTES],
-            personal.as_ptr() as *const [u8; crypto_generichash_blake2b_PERSONALBYTES],
+            salt.as_ptr(),
+            personal.as_ptr(),
         )
     };
     assert_eq!(ret, 0);
@@ -179,9 +180,9 @@ impl Keeper {
 
         let ret = unsafe {
             libsodium_sys::crypto_box_seed_keypair(
-                pk.unsecure_mut().as_mut_ptr() as *mut [u8; 32],
-                sk.unsecure_mut().as_mut_ptr() as *mut [u8; 32],
-                seed.unsecure().as_ptr() as *const [u8; 32],
+                pk.unsecure_mut().as_mut_ptr(),
+                sk.unsecure_mut().as_mut_ptr(),
+                seed.unsecure().as_ptr(),
             )
         };
         assert_eq!(ret, 0);
@@ -190,13 +191,13 @@ impl Keeper {
     }
 
     fn asymmetric_lock(pk: &PublicKey, msg: &[u8]) -> Vec<u8> {
-        let mut out = vec![0; msg.len() + libsodium_sys::crypto_box_SEALBYTES];
+        let mut out = vec![0; msg.len() + libsodium_sys::crypto_box_SEALBYTES as usize];
         let ret = unsafe {
             libsodium_sys::crypto_box_seal(
                 out.as_mut_ptr(),
                 msg.as_ptr(),
                 msg.len() as u64,
-                pk.0.unsecure().as_ptr() as *const [u8; 32],
+                pk.0.unsecure().as_ptr(),
             )
         };
         assert_eq!(0, ret);
@@ -205,14 +206,14 @@ impl Keeper {
     }
 
     fn asymmetric_unlock(pk: &PublicKey, sk: &SecretKey, ciphertext: &[u8]) -> Vec<u8> {
-        let mut out = vec![0; ciphertext.len() - libsodium_sys::crypto_box_SEALBYTES];
+        let mut out = vec![0; ciphertext.len() - libsodium_sys::crypto_box_SEALBYTES as usize];
         let ret = unsafe {
             libsodium_sys::crypto_box_seal_open(
                 out.as_mut_ptr(),
                 ciphertext.as_ptr(),
                 ciphertext.len() as u64,
-                pk.0.unsecure().as_ptr() as *const [u8; 32],
-                sk.0.unsecure().as_ptr() as *const [u8; 32],
+                pk.0.unsecure().as_ptr(),
+                sk.0.unsecure().as_ptr(),
             )
         };
         assert_eq!(0, ret);
@@ -285,7 +286,8 @@ impl Keeper {
     }
 
     pub fn symmetric_lock(msg: &[u8], ad: &[u8], nonce: &[u8], key: &[u8]) -> Vec<u8> {
-        let mut out = vec![0u8; msg.len() + libsodium_sys::crypto_aead_chacha20poly1305_ABYTES];
+        let mut out =
+            vec![0u8; msg.len() + libsodium_sys::crypto_aead_chacha20poly1305_ABYTES as usize];
         let mut out_len = 0;
 
         let ret = unsafe {
@@ -296,9 +298,9 @@ impl Keeper {
                 msg.len() as u64,
                 ad.as_ptr(),
                 ad.len() as u64,
-                &[0u8; 0],
-                nonce.as_ptr() as *const [u8; 8],
-                key.as_ptr() as *const [u8; 32],
+                [0u8; 0].as_ptr(),
+                nonce.as_ptr(),
+                key.as_ptr(),
             )
         };
         assert_eq!(0, ret);
@@ -308,21 +310,24 @@ impl Keeper {
     }
 
     pub fn symmetric_unlock(key: &[u8], ciphertext: &[u8], ad: &[u8], nonce: &[u8]) -> Vec<u8> {
-        let mut out =
-            vec![0u8; ciphertext.len() - libsodium_sys::crypto_aead_chacha20poly1305_ABYTES];
+        let mut out = vec![
+            0u8;
+            ciphertext.len()
+                - libsodium_sys::crypto_aead_chacha20poly1305_ABYTES as usize
+        ];
         let mut out_len = 0;
 
         let ret = unsafe {
             libsodium_sys::crypto_aead_chacha20poly1305_decrypt(
                 out.as_mut_ptr(),
                 &mut out_len,
-                &mut [0u8; 0],
+                [0u8; 0].as_mut_ptr(),
                 ciphertext.as_ptr(),
                 ciphertext.len() as u64,
                 ad.as_ptr(),
                 ad.len() as u64,
-                nonce.as_ptr() as *const [u8; 8],
-                key.as_ptr() as *const [u8; 32],
+                nonce.as_ptr(),
+                key.as_ptr(),
             )
         };
         assert_eq!(0, ret);
