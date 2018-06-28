@@ -26,10 +26,10 @@ use util::UniquePriorityQueue;
 
 pub mod tree;
 
-#[cfg(test)]
-mod tests;
 #[cfg(all(test, feature = "benchmarks"))]
 mod benchmarks;
+#[cfg(test)]
+mod tests;
 
 pub struct HashIndex(InternalHashIndex);
 

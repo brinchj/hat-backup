@@ -18,8 +18,8 @@ use crypto;
 use errors::RetryError;
 use hash;
 use hash::tree::HashTreeBackend;
-use key::MsgError;
 use key;
+use key::MsgError;
 use std::sync::{Arc, Mutex};
 
 pub struct HashStoreBackend<B> {

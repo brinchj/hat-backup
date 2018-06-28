@@ -15,18 +15,18 @@
 use backend::StoreBackend;
 use blob;
 use errors::HatError;
+use filetime;
 use hash;
 use hat::insert_path_handler::InsertPathHandler;
 use hat::walker;
 use key;
+use models;
+use serde_cbor;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::str;
 use util::{FileIterator, FnBox, PathHandler};
-use filetime;
-use models;
-use serde_cbor;
 
 fn try_a_few_times_then_panic<F>(mut f: F, msg: &str)
 where
@@ -41,13 +41,13 @@ where
 }
 
 pub mod recover {
+    use super::parse_dir_data;
     use blob;
     use hash;
     use hash::tree;
     use hat::walker;
     use std::collections::VecDeque;
     use std::mem;
-    use super::parse_dir_data;
 
     #[derive(Clone)]
     pub struct Node {

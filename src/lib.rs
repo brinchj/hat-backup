@@ -61,19 +61,19 @@ extern crate serde_derive;
 
 // Submodules
 pub mod backend;
-pub mod models;
 mod blob;
 mod crypto;
 mod db;
 mod errors;
 mod gc;
 mod hash;
-pub mod vfs;
 pub mod hat;
 mod key;
+pub mod models;
 mod snapshot;
 mod tags;
 pub mod util;
+pub mod vfs;
 
 // Re-export the main type
 

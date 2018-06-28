@@ -14,11 +14,11 @@ use backend::StoreBackend;
 use crypto::CipherText;
 use hex::{self, FromHex};
 use std::collections::BTreeMap;
+use std::mem;
 use std::process;
 use std::sync::{Mutex, MutexGuard};
-use std::mem;
-use std::time::Duration;
 use std::thread;
+use std::time::Duration;
 use util::FnBox;
 
 const HAT_CMD_PUT: &str = "hat-backup-put";

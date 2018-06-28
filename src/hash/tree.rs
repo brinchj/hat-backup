@@ -17,12 +17,12 @@
 //! This module implements two structures for handling hash trees: A streaming hash-tree writer, and
 //! a streaming hash-tree reader.
 
-use models;
-use key;
 use blob::{ChunkRef, LeafType, NodeType};
+use key;
+use models;
 
-use serde_cbor;
 use hash::Hash;
+use serde_cbor;
 
 #[cfg(test)]
 use quickcheck;

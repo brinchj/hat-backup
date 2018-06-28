@@ -37,11 +37,11 @@ mod hat_error {
 
     use blob;
     use key;
-    use std::{io, str};
+    use serde_cbor;
     use std::borrow::Cow;
     use std::sync::mpsc;
+    use std::{io, str};
     use void;
-    use serde_cbor;
 
     error_type! {
         #[derive(Debug)]
@@ -106,8 +106,8 @@ mod diesel_error {
 }
 
 mod crypto_error {
-    use std::str;
     use std::borrow::Cow;
+    use std::str;
 
     error_type! {
         #[derive(Debug)]

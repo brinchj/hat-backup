@@ -1,10 +1,10 @@
+use backend::StoreBackend;
+use db;
+use errors::HatError;
 use hash::tree::{self, HashRef, HashTreeBackend};
 use hat;
 use hat::walker::Content;
-use backend::StoreBackend;
-use errors::HatError;
 use key::Entry;
-use db;
 
 use std::borrow::Cow;
 use std::mem;

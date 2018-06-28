@@ -17,20 +17,20 @@
 use backend::StoreBackend;
 use crypto;
 use errors;
-use hash::Hash;
 use hash::tree::HashRef;
+use hash::Hash;
+use key;
+use lru_cache;
+use serde_cbor;
 use std::borrow::Cow;
 use std::mem;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use tags;
 use util::FnBox;
-use key;
-use serde_cbor;
-use lru_cache;
 
-mod chunk;
 mod blob;
+mod chunk;
 mod index;
 #[cfg(test)]
 pub mod tests;

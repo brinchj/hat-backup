@@ -17,8 +17,8 @@ use key::*;
 
 use quickcheck;
 
-use rand::Rng;
 use rand::thread_rng;
+use rand::Rng;
 use std::io;
 use std::sync::Arc;
 use util::Process;

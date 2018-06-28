@@ -1,19 +1,19 @@
-use hash;
-use hat::{self, walker};
+use super::fs;
 use backend;
 use errors::{self, HatError};
+use hash;
+use hat::{self, walker};
 use libc::{self, c_int};
-use super::fs;
 
-use std::path::{Path, PathBuf};
-use std::mem;
-use std::io;
-use std::borrow::Cow;
-use std::ffi::{OsStr, OsString};
-use std::sync::{Arc, Mutex};
-use std::collections::HashMap;
-use time::Timespec;
 use fuse;
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
+use std::io;
+use std::mem;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use time::Timespec;
 
 #[derive(Clone)]
 enum FileType {

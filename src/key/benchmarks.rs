@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use backend::DevNullBackend;
-use key::*;
 use key::tests::*;
+use key::*;
 use std::sync::Arc;
 use test::Bencher;
 use util::Process;

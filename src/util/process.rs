@@ -49,7 +49,6 @@
 ///
 /// A handler is allowed to call `reply()` **exactly** once. Not calling it or calling it multiple
 /// times will likely cause runtime panicure when using `send_reply()`.
-
 use std::fmt;
 use std::sync::mpsc;
 use std::thread;

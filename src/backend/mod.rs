@@ -17,8 +17,8 @@ mod devnull;
 mod file;
 mod memory;
 
-use util::FnBox;
 use crypto::CipherText;
+use util::FnBox;
 
 pub use self::cmd::CmdBackend;
 pub use self::devnull::DevNullBackend;

@@ -14,8 +14,8 @@
 
 use backend::{MemoryBackend, StoreBackend};
 use errors::HatError;
-use hat::HatRc;
 use hat::family::Family;
+use hat::HatRc;
 use key;
 use std::collections::HashMap;
 use std::sync::Arc;

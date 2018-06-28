@@ -15,8 +15,8 @@
 use models;
 pub use models::LeafType;
 
-use serde_cbor;
 use secstr;
+use serde_cbor;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Packing {

@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use argon2rs;
 use blob;
 use libsodium_sys;
 use secstr;
-use argon2rs;
 
 struct PublicKey(secstr::SecStr);
 struct SecretKey(secstr::SecStr);

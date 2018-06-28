@@ -14,8 +14,8 @@
 
 use blob::{Blob, ChunkRef, LeafType, NodeType};
 use crypto;
-use hash::Hash;
 use hash::tree::HashRef;
+use hash::Hash;
 
 use std::sync::Arc;
 

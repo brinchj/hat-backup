@@ -16,10 +16,10 @@ mod counter;
 mod file_iterator;
 mod fnbox;
 mod listdir;
-mod sync_pool;
 mod ordered_collection;
 mod periodic_timer;
 mod process;
+mod sync_pool;
 mod unique_priority_queue;
 
 pub use self::counter::Counter;

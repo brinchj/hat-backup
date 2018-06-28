@@ -23,15 +23,15 @@ extern crate libsodium_sys;
 #[macro_use]
 extern crate clap;
 
-use std::env;
 use clap::{App, SubCommand};
+use std::env;
 
 use hat::backend;
 use std::borrow::ToOwned;
+use std::collections::BTreeSet;
 use std::convert::From;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::collections::BTreeSet;
 
 static MAX_BLOB_SIZE: usize = 4 * 1024 * 1024;
 

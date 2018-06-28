@@ -14,27 +14,27 @@
 
 //! Local state for keys in the snapshot in progress (the "index").
 
-use std::str;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::str;
 
-use models;
 use chrono;
 use diesel;
-use diesel::prelude::*;
 use diesel::connection::TransactionManager;
+use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
 use errors::DieselError;
-use hash;
 use filetime::FileTime;
+use hash;
+use models;
 
 use std::sync::{Mutex, MutexGuard};
 
 use super::schema;
-use time::Duration;
 use std::path::PathBuf;
-use util::PeriodicTimer;
 use tags::Tag;
+use time::Duration;
+use util::PeriodicTimer;
 
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub enum Data {
@@ -307,8 +307,8 @@ impl InternalKeyIndex {
         parent_: Option<u64>,
         name_: String,
     ) -> Result<Option<Entry>, DieselError> {
-        use super::schema::key_tree::dsl::{key_tree, name, parent_id};
         use super::schema::key_data::dsl::*;
+        use super::schema::key_tree::dsl::{key_tree, name, parent_id};
 
         let row_opt = match parent_ {
             Some(p) => key_tree
@@ -359,9 +359,9 @@ impl InternalKeyIndex {
         &mut self,
         parent_opt: Option<u64>,
     ) -> Result<Vec<(Entry, Option<hash::tree::HashRef>)>, DieselError> {
-        use diesel::prelude::*;
-        use super::schema::key_tree::dsl::*;
         use super::schema::key_data::dsl::{committed, key_data};
+        use super::schema::key_tree::dsl::*;
+        use diesel::prelude::*;
 
         let rows = match parent_opt {
             Some(p) => key_tree
@@ -440,8 +440,8 @@ impl InternalKeyIndex {
     /// Delete children not marked reserved.
     /// This function applies recursively to child directories.
     fn cleanup_unused(&mut self, parent_opt: Option<u64>) -> Result<(), DieselError> {
-        use super::schema::key_tree::dsl::*;
         use super::schema::key_data::dsl::{key_data, tag};
+        use super::schema::key_tree::dsl::*;
 
         let children = match parent_opt {
             Some(p) => key_tree

@@ -13,9 +13,9 @@
 // limitations under the License.
 
 use backend::DevNullBackend;
-use hat::HatRc;
 use hat::family::Family;
 use hat::tests::{entry, setup_hat};
+use hat::HatRc;
 use std::io;
 use std::sync::{Arc, Mutex};
 use test::Bencher;

@@ -26,14 +26,14 @@ use std::sync::Arc;
 
 use util::{FnBox, MsgHandler, Process};
 
-mod schema;
-mod index;
 mod hash_store_backend;
+mod index;
+mod schema;
 
-#[cfg(test)]
-mod tests;
 #[cfg(all(test, feature = "benchmarks"))]
 mod benchmarks;
+#[cfg(test)]
+mod tests;
 
 pub use self::hash_store_backend::HashStoreBackend;
 pub use self::index::{Data, Entry, Info, KeyIndex};

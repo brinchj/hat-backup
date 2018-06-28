@@ -14,8 +14,8 @@
 
 use blob::{ChunkRef, LeafType, NodeType};
 use crypto;
-use hash::Hash;
 use hash::tree::*;
+use hash::Hash;
 use key;
 use quickcheck;
 

@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::path::PathBuf;
 use hash;
 use key;
 use std::collections::VecDeque;
+use std::path::PathBuf;
 
 #[derive(Clone, Debug)]
 pub enum Content {
