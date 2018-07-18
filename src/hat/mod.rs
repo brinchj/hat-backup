@@ -28,9 +28,11 @@ use serde_cbor;
 use snapshot;
 use std::cmp;
 use std::fs;
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::str;
 use std::sync::{mpsc, Arc};
+use secstr::SecStr;
 use tags;
 use util::Process;
 use void::Void;
@@ -199,11 +201,13 @@ fn list_snapshot<'a, B: StoreBackend>(
 
 impl<B: StoreBackend> HatRc<B> {
     pub fn open_repository(
-        repository_root: PathBuf,
+        mut repository_root: PathBuf,
         backend: Arc<B>,
         max_blob_size: usize,
     ) -> Result<HatRc<B>, HatError> {
-        let keys = Arc::new(crypto::keys::Keeper::new("hat-master-key"));
+        let keys = Arc::new(crypto::keys::Keeper::load_from_universal_key(&repository_root)?);
+
+        repository_root = repository_root.join("cache");
 
         let hash_index_path = hash_index_name(repository_root.clone());
         let db_p = Arc::new(db::Index::new(&hash_index_path)?);

@@ -12,10 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use argon2rs;
 use blob;
 use libsodium_sys;
 use secstr;
+use std::path::Path;
+use std::fs;
+use std::io::{self, Write, Read};
 
 struct PublicKey(secstr::SecStr);
 struct SecretKey(secstr::SecStr);
@@ -53,7 +55,7 @@ pub fn keyed_fingerprint(sk: &[u8], msg: &[u8], salt: &[u8], out: &mut [u8]) {
 
     let outlen = out.len();
     let personal: &[u8; libsodium_sys::crypto_generichash_blake2b_PERSONALBYTES as usize] =
-        b"hat-backup~~~~~a";
+        b"hat-backup~~rust";
 
     let ret = unsafe {
         libsodium_sys::crypto_generichash_blake2b_salt_personal(
@@ -86,10 +88,32 @@ pub struct Keeper {
 }
 
 impl Keeper {
-    pub fn new(universal: &str) -> Keeper {
-        let app: &str = "hat-backup:universal-key";
+    pub fn load_from_universal_key(dir: &Path) -> Result<Keeper, io::Error> {
+        let mut f = fs::File::open(dir.join("secret-universal-key"))?;
+        let mut buf = Vec::new();
+        f.read_to_end(&mut buf)?;
+
+        Ok(Keeper::new(secstr::SecStr::new(buf)))
+    }
+
+    pub fn write_new_universal_key(dir: &Path) -> Result<(), io::Error> {
+        let mut f = fs::File::create(dir.join("secret-universal-key"))?;
+        let keeper = Keeper::new(random_bytes(32));
+        f.write_all(keeper.universal_key.unsecure())?;
+        Ok(())
+    }
+
+    pub fn new(key: secstr::SecStr) -> Keeper {
+        // Personalize key for Hat and make it 256-bit.
+        let mut universal_key = secstr::SecStr::new(vec![0; 32]);
+        keyed_fingerprint(
+            key.unsecure(),
+            b"hat-backup:universal-key" /* msg */,
+            b"hat-nonce~~~~~~~" /* salt */,
+            universal_key.unsecure_mut());
+
         let mut keeper = Keeper {
-            universal_key: Keeper::strengthen(universal, app),
+            universal_key: universal_key,
             fingerprint_key: None,
             blob_authentication_key: None,
             data_key_pk: None,
@@ -105,19 +129,7 @@ impl Keeper {
 
     #[cfg(test)]
     pub fn new_for_testing() -> Keeper {
-        let mut keeper = Keeper {
-            universal_key: secstr::SecStr::new(vec![0; 32]),
-            fingerprint_key: None,
-            blob_authentication_key: None,
-            data_key_pk: None,
-            data_key_sk: None,
-            access_key_pk: None,
-            access_key_sk: None,
-            naming_key_pk: None,
-            naming_key_sk: None,
-        };
-        keeper.init();
-        keeper
+        Keeper::new(vec![0; 32])
     }
 
     fn init(&mut self) {
@@ -145,19 +157,6 @@ impl Keeper {
         let (pk, sk) = self.x25519_key_pair_from_nonce("hat:NAMING-key-x25519".as_bytes());
         self.naming_key_pk = Some(pk);
         self.naming_key_sk = Some(sk);
-    }
-
-    fn strengthen(phrase: &str, salt: &str) -> secstr::SecStr {
-        let passes = 5;
-        let threads = 2;
-        let kib = 16 * 1024;
-
-        let argon2 =
-            argon2rs::Argon2::new(passes, threads, kib, argon2rs::Variant::Argon2d).unwrap();
-
-        let mut out = vec![0; 64];
-        argon2.hash(&mut out[..], phrase.as_bytes(), salt.as_bytes(), &[], &[]);
-        secstr::SecStr::new(out)
     }
 
     pub fn from_nonce(&self, nonce: &[u8], outlen: usize) -> secstr::SecStr {

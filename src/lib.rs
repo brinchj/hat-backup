@@ -26,7 +26,6 @@ extern crate test;
 extern crate time;
 
 // Rust crates.
-extern crate argon2rs;
 extern crate byteorder;
 extern crate chrono;
 extern crate filetime;
@@ -62,7 +61,7 @@ extern crate serde_derive;
 // Submodules
 pub mod backend;
 mod blob;
-mod crypto;
+pub mod crypto;
 mod db;
 mod errors;
 mod gc;

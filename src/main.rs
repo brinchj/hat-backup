@@ -32,6 +32,7 @@ use std::collections::BTreeSet;
 use std::convert::From;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::fs;
 
 static MAX_BLOB_SIZE: usize = 4 * 1024 * 1024;
 
@@ -42,7 +43,10 @@ fn license() {
 }
 
 fn main() {
+    // Initialize libraries
+    unsafe { libsodium_sys::sodium_init() };
     env_logger::init();
+
 
     // Because "snapshot" and "checkout" use the exact same type of arguments, we can make a
     // template. This template defines two positional arguments, both are required
@@ -55,7 +59,12 @@ fn main() {
         .about("Create backup snapshots")
         .args_from_usage(
             "-l, --license 'Display the license'
-                          --hat_cache_dir=[DIR] 'Location of Hat local state'",
+            --hat_state_dir=[DIR] 'Location of Hat\'s local state'",
+        )
+        .subcommand(
+            SubCommand::with_name("init")
+            .about("Init state directory with a new key and cache dir")
+            .args_from_usage("<DIR> 'New state directory to initialize'")
         )
         .subcommand(
             SubCommand::with_name("commit")
@@ -73,8 +82,7 @@ fn main() {
                 .about("Delete a snapshot")
                 .args_from_usage(
                     "<NAME> 'Name of the snapshot family'
-                                                        \
-                              <ID> 'The snapshot id to delete'",
+                     <ID> 'The snapshot id to delete'",
                 ),
         )
         .subcommand(
@@ -109,11 +117,26 @@ fn main() {
             .expect(&format!("{} required", name))
     };
 
-    // Setup config variables that can take their value from either flag or environment.
-    let cache_dir = PathBuf::from(flag_or_env("hat_cache_dir"));
+    // Special cased one-off commands
+    match matches.subcommand() {
+        ("init", Some(dir)) => {
+            let dir = PathBuf::from(dir.value_of("DIR").expect("missing DIR to initialize"));
+            if dir.exists() {
+                eprintln!("Error: directory already exists ({})", dir.display());
+                std::process::exit(1);
+            }
 
-    // Initialize sodium (must only be called once)
-    unsafe { libsodium_sys::sodium_init() };
+            fs::create_dir_all(&dir).unwrap();
+            fs::create_dir_all(dir.join("cache")).unwrap();
+            hat::crypto::keys::Keeper::write_new_universal_key(&dir).unwrap();
+
+            std::process::exit(0);
+        }
+        _ => (),
+    }
+
+    // Setup config variables that can take their value from either flag or environment.
+    let cache_dir = PathBuf::from(flag_or_env("hat_state_dir"));
 
     match matches.subcommand() {
         ("resume", Some(_cmd)) => {
@@ -129,7 +152,8 @@ fn main() {
             let mut hat = hat::Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap();
 
             // Update the family index.
-            let mut family = hat.open_family(name.clone())
+            let mut family = hat
+                .open_family(name.clone())
                 .expect(&format!("Could not open family '{}'", name));
             family.snapshot_dir(PathBuf::from(path));
 

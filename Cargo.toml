@@ -8,7 +8,6 @@ name = "hatbin"
 path = "src/main.rs"
 
 [dependencies]
-argon2rs = "0.2.5"
 arrayref = "0.3.4"
 byteorder = "1.2.3"
 chrono = "0.4.4"
@@ -21,15 +20,15 @@ fuse = "0.3.1"
 hex = "0.3.2"
 libc = "0.2.42"
 libsodium-sys = "0.1.0"
-log = "0.4.2"
+log = "0.4.3"
 lru-cache = "0.1.1"
 quickcheck = "0.6.2"
 rand = "0.5.3"
 scoped-pool = "1.0.0"
 secstr = "0.3.0"
-serde = "1.0.67"
+serde = "1.0.70"
 serde_cbor = "0.8.2"
-serde_derive = "1.0.67"
+serde_derive = "1.0.70"
 time = "0.1.40"
 void = "1.0.2"
 
@@ -44,7 +43,6 @@ version = "1.3.2"
 [features]
 benchmarks = []
 default = []
-simd = ["argon2rs/simd"]
 
 [lib]
 name = "hat"
