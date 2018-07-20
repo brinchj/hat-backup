@@ -6,7 +6,7 @@ Warning: This is an incomplete work-in-progress.
 
 Warning: This project does currently NOT support security or privacy.
 
-[![Build Status](https://travis-ci.org/google/hat-backup.svg?branch=master)](https://travis-ci.org/google/hat-backup)
+[![Build Status](https://travis-ci.org/brinchj/hat-backup.svg?branch=master)](https://travis-ci.org/brinchj/hat-backup)
 
 Project
 -------
