@@ -19,6 +19,17 @@ use std::path::Path;
 use std::fs;
 use std::io::{self, Write, Read};
 
+
+const UNIVERSAL_KEY_FILENAME: &str = "secret-universal-key";
+
+// Crypto personalizations. Do not change these.
+const UNIVERSAL_KEY_MSG: &[u8] = b"hat-backup:universal-key:rust";
+
+const HAT_PERSONALIZATION:
+    &[u8; libsodium_sys::crypto_generichash_blake2b_PERSONALBYTES as usize] =
+    b"hat-backup~~rust";
+
+
 struct PublicKey(secstr::SecStr);
 struct SecretKey(secstr::SecStr);
 
@@ -47,6 +58,10 @@ pub fn random_bytes(size: usize) -> secstr::SecStr {
     secstr::SecStr::new(r)
 }
 
+pub fn keyed_fingerprint_simple(sk: &[u8], msg: &[u8], out: &mut [u8]) {
+    keyed_fingerprint(sk, msg, &HAT_PERSONALIZATION[..], out)
+}
+
 #[cfg_attr(feature = "flame_it", flame)]
 pub fn keyed_fingerprint(sk: &[u8], msg: &[u8], salt: &[u8], out: &mut [u8]) {
     use libsodium_sys::{crypto_generichash_blake2b_PERSONALBYTES,
@@ -54,8 +69,6 @@ pub fn keyed_fingerprint(sk: &[u8], msg: &[u8], salt: &[u8], out: &mut [u8]) {
     assert_eq!(crypto_generichash_blake2b_SALTBYTES, salt.len() as u32);
 
     let outlen = out.len();
-    let personal: &[u8; libsodium_sys::crypto_generichash_blake2b_PERSONALBYTES as usize] =
-        b"hat-backup~~rust";
 
     let ret = unsafe {
         libsodium_sys::crypto_generichash_blake2b_salt_personal(
@@ -66,7 +79,7 @@ pub fn keyed_fingerprint(sk: &[u8], msg: &[u8], salt: &[u8], out: &mut [u8]) {
             sk.as_ptr(),
             sk.len(),
             salt.as_ptr(),
-            personal.as_ptr(),
+            HAT_PERSONALIZATION.as_ptr(),
         )
     };
     assert_eq!(ret, 0);
@@ -89,7 +102,7 @@ pub struct Keeper {
 
 impl Keeper {
     pub fn load_from_universal_key(dir: &Path) -> Result<Keeper, io::Error> {
-        let mut f = fs::File::open(dir.join("secret-universal-key"))?;
+        let mut f = fs::File::open(dir.join(UNIVERSAL_KEY_FILENAME))?;
         let mut buf = Vec::new();
         f.read_to_end(&mut buf)?;
 
@@ -97,20 +110,15 @@ impl Keeper {
     }
 
     pub fn write_new_universal_key(dir: &Path) -> Result<(), io::Error> {
-        let mut f = fs::File::create(dir.join("secret-universal-key"))?;
+        let mut f = fs::File::create(dir.join(UNIVERSAL_KEY_FILENAME))?;
         let keeper = Keeper::new(random_bytes(32));
         f.write_all(keeper.universal_key.unsecure())?;
         Ok(())
     }
 
     pub fn new(key: secstr::SecStr) -> Keeper {
-        // Personalize key for Hat and make it 256-bit.
-        let mut universal_key = secstr::SecStr::new(vec![0; 32]);
-        keyed_fingerprint(
-            key.unsecure(),
-            b"hat-backup:universal-key" /* msg */,
-            b"hat-nonce~~~~~~~" /* salt */,
-            universal_key.unsecure_mut());
+        // Personalize key for Hat and make it 256-bit (32 bytes).
+        let universal_key = Keeper::from_key_and_nonce(&key, &UNIVERSAL_KEY_MSG[..], 32);
 
         let mut keeper = Keeper {
             universal_key: universal_key,
@@ -123,7 +131,9 @@ impl Keeper {
             naming_key_pk: None,
             naming_key_sk: None,
         };
+
         keeper.init();
+
         keeper
     }
 
@@ -159,16 +169,18 @@ impl Keeper {
         self.naming_key_sk = Some(sk);
     }
 
-    pub fn from_nonce(&self, nonce: &[u8], outlen: usize) -> secstr::SecStr {
+    fn from_key_and_nonce(key: &secstr::SecStr, nonce: &[u8], outlen: usize) -> secstr::SecStr {
         let mut out = secstr::SecStr::new(vec![0; outlen]);
-        let salt: &[u8; 16] = b"nonce~~~nonce~~~";
-        keyed_fingerprint(
-            &self.universal_key.unsecure(),
+        keyed_fingerprint_simple(
+            &key.unsecure(),
             &nonce[..],
-            salt,
             out.unsecure_mut(),
         );
         out
+    }
+
+    pub fn from_nonce(&self, nonce: &[u8], outlen: usize) -> secstr::SecStr {
+        Self::from_key_and_nonce(&self.universal_key, nonce, outlen)
     }
 
     fn x25519_key_pair_from_nonce(&self, nonce: &[u8]) -> (PublicKey, SecretKey) {
