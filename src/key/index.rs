@@ -109,7 +109,7 @@ impl From<models::FileInfo> for Info {
         }
 
         Info {
-            name: info.name,
+            name: info.name.utf8().to_owned(),
             created_ts_secs: none_if_zero_i64(info.created_ts),
             modified_ts_secs: none_if_zero_i64(info.modified_ts),
             accessed_ts_secs: none_if_zero_i64(info.accessed_ts),
@@ -167,7 +167,7 @@ impl Info {
         };
 
         models::FileInfo {
-            name: self.name.clone(),
+            name: models::FileName::Utf8(self.name.clone()),
             created_ts: self.created_ts_secs.unwrap_or(0) as i64,
             modified_ts: self.modified_ts_secs.unwrap_or(0) as i64,
             accessed_ts: self.accessed_ts_secs.unwrap_or(0) as i64,

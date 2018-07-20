@@ -175,7 +175,7 @@ fn parse_dir_data(chunk: &[u8], out: &mut Vec<walker::FileEntry>) -> Result<(), 
     let file_list: models::Files = serde_cbor::from_slice(chunk)?;
 
     for f in file_list.files {
-        if f.info.name.len() == 0 {
+        if f.info.name.is_empty() {
             // Empty entry at end.
             // TODO(jos): Can we get rid of these?
             break;

@@ -131,9 +131,32 @@ pub enum Permissions {
 }
 
 #[derive(Serialize, Deserialize)]
+pub enum FileName {
+    #[serde(rename = "u")]
+    Utf8(String),
+    #[serde(rename = "r")]
+    RawAndLossyUtf8(Vec<u8>, String),
+}
+
+impl FileName {
+    pub fn is_empty(&self) -> bool {
+        match self {
+            FileName::Utf8(s) => s.is_empty(),
+            FileName::RawAndLossyUtf8(raw, _) => raw.is_empty(),
+        }
+    }
+    pub fn utf8(&self) -> &str {
+        match self {
+            FileName::Utf8(ref s) => s,
+            FileName::RawAndLossyUtf8(_, ref s) => s,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct FileInfo {
     #[serde(rename = "n")]
-    pub name: String,
+    pub name: FileName,
     #[serde(rename = "c")]
     pub created_ts: i64,
     #[serde(rename = "m")]
