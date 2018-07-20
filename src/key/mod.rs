@@ -259,7 +259,8 @@ impl<IT: io::Read, B: StoreBackend> MsgHandler<Msg<IT>, Reply<B>> for Store<B> {
             }
 
             Msg::Insert(insert_entry, chunk_it_opt) => {
-                let entry = match self.index
+                let entry = match self
+                    .index
                     .lookup(insert_entry.parent_id, insert_entry.info.name.clone())?
                 {
                     Some(ref stored_entry) if insert_entry.data_looks_unchanged(stored_entry) => {
@@ -334,7 +335,7 @@ impl<IT: io::Read, B: StoreBackend> MsgHandler<Msg<IT>, Reply<B>> for Store<B> {
 
                 // Warn the user if we did not read the expected size:
                 entry.info.byte_length.map(|s| {
-                    file_size_warning(&entry.info.name, s, file_len);
+                    file_size_warning(entry.info.name.utf8(), s, file_len);
                 });
 
                 let mut entry = entry;

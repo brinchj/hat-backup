@@ -24,15 +24,16 @@ use hash;
 use hex;
 use key;
 use models;
+use secstr::SecStr;
 use serde_cbor;
 use snapshot;
 use std::cmp;
+use std::ffi;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::str;
 use std::sync::{mpsc, Arc};
-use secstr::SecStr;
 use tags;
 use util::Process;
 use void::Void;
@@ -205,7 +206,9 @@ impl<B: StoreBackend> HatRc<B> {
         backend: Arc<B>,
         max_blob_size: usize,
     ) -> Result<HatRc<B>, HatError> {
-        let keys = Arc::new(crypto::keys::Keeper::load_from_universal_key(&repository_root)?);
+        let keys = Arc::new(crypto::keys::Keeper::load_from_universal_key(
+            &repository_root,
+        )?);
 
         repository_root = repository_root.join("cache");
 
@@ -390,7 +393,8 @@ impl<B: StoreBackend> HatRc<B> {
         tree.append(&listing[..])?;
 
         let top_ref = tree.hash(None)?;
-        let top_id = self.hash_index
+        let top_id = self
+            .hash_index
             .get_id(&top_ref.hash)
             .expect("Top hash missing");
 
@@ -441,7 +445,8 @@ impl<B: StoreBackend> HatRc<B> {
 
     pub fn recover(&mut self) -> Result<(), HatError> {
         self.blob_store.recover()?;
-        let root_href = self.recover_root()?
+        let root_href = self
+            .recover_root()?
             .expect("Failed to find a commit-ed root.");
 
         info!(
@@ -592,7 +597,8 @@ impl<B: StoreBackend> HatRc<B> {
         }
         self.flush_blob_store();
 
-        let final_id = self.hash_index
+        let final_id = self
+            .hash_index
             .get_id(&final_hash.hash)
             .expect("final hash has no id");
         self.gc.register_final(&info, final_id)?;
@@ -663,7 +669,8 @@ impl<B: StoreBackend> HatRc<B> {
                 }
                 db::SnapshotWorkStatus::DeleteInProgress => {
                     let hash = snapshot.hash.expect("Snapshot has no hash");
-                    let hash_id = self.hash_index
+                    let hash_id = self
+                        .hash_index
                         .get_id(&hash)
                         .expect("Snapshot hash not recognized");
                     let status = self.gc.status(hash_id)?;
@@ -687,7 +694,8 @@ impl<B: StoreBackend> HatRc<B> {
                 }
                 db::SnapshotWorkStatus::DeleteComplete => {
                     let hash = snapshot.hash.expect("Snapshot has no hash");
-                    let hash_id = self.hash_index
+                    let hash_id = self
+                        .hash_index
                         .get_id(&hash)
                         .expect("Snapshot hash not recognized");
                     self.deregister_finalize_by_name(snapshot.family_name, snapshot.info, hash_id)?
@@ -753,7 +761,8 @@ impl<B: StoreBackend> HatRc<B> {
         // At this point, the GC should still be able to either resume or rollback safely.
         // After a successful flush, all GC work is done.
         // The GC must be able to tell if it has completed or not.
-        let hash_id = self.hash_index
+        let hash_id = self
+            .hash_index
             .get_id(&top_ref.hash)
             .expect("Hash does not exist");
         self.gc.register_final(&snap_info, hash_id)?;
@@ -823,7 +832,8 @@ impl<B: StoreBackend> HatRc<B> {
             ),
         };
 
-        let family = self.open_family(family_name.clone())
+        let family = self
+            .open_family(family_name.clone())
             .expect(&format!("Could not open family '{}'", family_name));
 
         let mut output_dir = output_dir;
@@ -839,9 +849,10 @@ impl<B: StoreBackend> HatRc<B> {
         fs::create_dir_all(&output).unwrap();
         for (entry, hash_ref) in family::Family::<B>::fetch_dir_data(dir_hash, self.hash_backend())?
         {
-            assert!(entry.info.name.len() > 0);
+            assert!(!entry.info.name.is_empty());
 
-            output.push(&entry.info.name[..]);
+            let name_os_string: ffi::OsString = entry.info.name.into();
+            output.push(&name_os_string);
             println!("{}", output.display());
 
             match hash_ref {
@@ -907,7 +918,8 @@ impl<B: StoreBackend> HatRc<B> {
         self.snapshot_index.will_delete(&info);
         self.flush_snapshot_index();
 
-        let final_ref = self.hash_index
+        let final_ref = self
+            .hash_index
             .get_id(&top_hash)
             .expect("Snapshot hash does not exist");
 

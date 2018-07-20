@@ -10,6 +10,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::ffi;
+
 #[derive(Serialize, Deserialize)]
 pub struct Snapshot {
     pub id: u64,
@@ -130,12 +132,61 @@ pub enum Permissions {
     Mode(u32),
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
 pub enum FileName {
     #[serde(rename = "u")]
     Utf8(String),
     #[serde(rename = "r")]
     RawAndLossyUtf8(Vec<u8>, String),
+}
+
+impl From<ffi::OsString> for FileName {
+    fn from(s: ffi::OsString) -> FileName {
+        use std::os::unix::ffi::OsStrExt;
+        match s.to_str() {
+            Some(utf8) => FileName::Utf8(utf8.to_string()),
+            None => {
+                FileName::RawAndLossyUtf8(s.as_bytes().to_vec(), s.to_string_lossy().to_string())
+            }
+        }
+    }
+}
+
+impl Into<ffi::OsString> for FileName {
+    fn into(self) -> ffi::OsString {
+        use std::os::unix::ffi::OsStrExt;
+        match self {
+            FileName::Utf8(utf8) => utf8.into(),
+            FileName::RawAndLossyUtf8(raw, _utf8) => ffi::OsStr::from_bytes(&raw[..]).to_owned(),
+        }
+    }
+}
+
+impl Into<Vec<u8>> for FileName {
+    fn into(self) -> Vec<u8> {
+        match self {
+            FileName::Utf8(utf8) => utf8.into_bytes(),
+            FileName::RawAndLossyUtf8(raw, _utf8) => raw,
+        }
+    }
+}
+
+impl From<Vec<u8>> for FileName {
+    fn from(v: Vec<u8>) -> FileName {
+        match String::from_utf8(v.clone()) {
+            Ok(utf8) => FileName::Utf8(utf8),
+            Err(_) => {
+                let utf8 = String::from_utf8_lossy(&v).to_string();
+                FileName::RawAndLossyUtf8(v, utf8)
+            }
+        }
+    }
+}
+
+impl From<String> for FileName {
+    fn from(utf8: String) -> FileName {
+        FileName::Utf8(utf8)
+    }
 }
 
 impl FileName {

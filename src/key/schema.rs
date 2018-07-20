@@ -20,7 +20,7 @@ table! {
     key_tree (node_id) {
         node_id -> Nullable<BigInt>,
         parent_id -> Nullable<BigInt>,
-        name -> Text,
+        name -> Binary,
     }
 }
 
@@ -61,7 +61,7 @@ pub struct RowId {
 pub struct KeyNode {
     pub node_id: Option<i64>,
     pub parent_id: Option<i64>,
-    pub name: String,
+    pub name: Vec<u8>,
 }
 
 #[derive(Insertable)]
@@ -69,7 +69,7 @@ pub struct KeyNode {
 pub struct NewKeyNode<'a> {
     pub node_id: Option<i64>,
     pub parent_id: Option<i64>,
-    pub name: &'a str,
+    pub name: &'a [u8],
 }
 
 #[derive(Queryable)]

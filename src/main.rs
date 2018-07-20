@@ -30,9 +30,10 @@ use hat::backend;
 use std::borrow::ToOwned;
 use std::collections::BTreeSet;
 use std::convert::From;
+use std::ffi;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::fs;
 
 static MAX_BLOB_SIZE: usize = 4 * 1024 * 1024;
 
@@ -46,7 +47,6 @@ fn main() {
     // Initialize libraries
     unsafe { libsodium_sys::sodium_init() };
     env_logger::init();
-
 
     // Because "snapshot" and "checkout" use the exact same type of arguments, we can make a
     // template. This template defines two positional arguments, both are required
@@ -63,8 +63,8 @@ fn main() {
         )
         .subcommand(
             SubCommand::with_name("init")
-            .about("Init state directory with a new key and cache dir")
-            .args_from_usage("<DIR> 'New state directory to initialize'")
+                .about("Init state directory with a new key and cache dir")
+                .args_from_usage("<DIR> 'New state directory to initialize'"),
         )
         .subcommand(
             SubCommand::with_name("commit")
@@ -229,7 +229,8 @@ fn main() {
                         );
                     },
                     hat::vfs::fs::List::Dir(files) => for (entry, _) in files {
-                        println!("{}", path.join(entry.info.name).display());
+                        let name_os_string: ffi::OsString = entry.info.name.into();
+                        println!("{}", path.join(name_os_string).display());
                     },
                 }
             }

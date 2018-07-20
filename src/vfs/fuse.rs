@@ -123,7 +123,8 @@ impl<B: backend::StoreBackend> Fuse<B> {
                 parent: Some(root_ino),
             });
             for s in snapshots {
-                if let Some(Ok(hash_ref)) = s.hash_ref
+                if let Some(Ok(hash_ref)) = s
+                    .hash_ref
                     .as_ref()
                     .map(|b| hash::tree::HashRef::from_bytes(&b[..]))
                 {
@@ -152,7 +153,7 @@ impl<B: backend::StoreBackend> Fuse<B> {
 
         for (entry, hash_ref) in entries {
             let mut file = File {
-                name: entry.info.name.clone().into(),
+                name: entry.info.name.into(),
                 file_type: FileType::Parent,
                 attr: Self::default_attr(fuse::FileType::Directory),
                 parent: Some(parent),

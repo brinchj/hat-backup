@@ -41,7 +41,7 @@ fn setup_family() -> (
 }
 
 pub fn entry(name: String) -> key::Entry {
-    key::Entry::new(None, name, key::Data::FilePlaceholder, None)
+    key::Entry::new(None, name.into(), key::Data::FilePlaceholder, None)
 }
 
 fn snapshot_files<B: StoreBackend>(
@@ -61,7 +61,8 @@ fn snapshot_files<B: StoreBackend>(
             let mut e = entry(current.to_string());
             e.parent_id = parent.clone();
 
-            parent = dirs.entry((parent, current))
+            parent = dirs
+                .entry((parent, current))
                 .or_insert_with(|| Some(family.snapshot_direct(e, true, None).unwrap()))
                 .clone();
             current = parts.next().unwrap();

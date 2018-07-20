@@ -22,6 +22,7 @@ use hat::walker;
 use key;
 use models;
 use serde_cbor;
+use std::ffi;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -346,7 +347,8 @@ impl<B: StoreBackend> Family<B> {
         let mut path = output_dir;
         for (entry, _ref, read_fn_opt) in self.list_from_key_store(dir_id)? {
             // Extend directory with filename:
-            path.push(&entry.info.name);
+            let name_os_string: ffi::OsString = entry.info.name.clone().into();
+            path.push(&name_os_string);
 
             match entry.data {
                 key::Data::DirPlaceholder => {
@@ -392,7 +394,8 @@ impl<B: StoreBackend> Family<B> {
         &self,
         dir_id: Option<u64>,
     ) -> Result<Vec<key::DirElem<B>>, HatError> {
-        match self.key_store_process
+        match self
+            .key_store_process
             .iter()
             .last()
             .unwrap()
@@ -426,7 +429,7 @@ impl<B: StoreBackend> Family<B> {
         let mut top_tree = self.key_store.hash_tree_writer(blob::LeafType::TreeList);
         self.commit_to_tree(&mut top_tree, None, top_hash_fn)?;
 
-        let info = key::Info::new(self.name.clone(), None);
+        let info = key::Info::new(self.name.clone().into(), None);
         Ok(top_tree.hash(Some(&info))?)
     }
 

@@ -116,7 +116,8 @@ impl<B: StoreBackend> HashTreeBackend for HashStoreBackend<B> {
                 );
 
                 // Someone came before us: piggyback on their result.
-                let pref = self.fetch_persistent_ref(&hash_entry.hash)
+                let pref = self
+                    .fetch_persistent_ref(&hash_entry.hash)
                     .expect("Could not find persistent ref for known hash");
                 Ok((
                     id,

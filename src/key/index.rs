@@ -14,6 +14,7 @@
 
 //! Local state for keys in the snapshot in progress (the "index").
 
+use std::ffi;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::str;
@@ -55,7 +56,7 @@ pub struct Entry {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Info {
-    pub name: String,
+    pub name: models::FileName,
 
     pub created_ts_secs: Option<i64>,
     pub modified_ts_secs: Option<i64>,
@@ -72,7 +73,7 @@ pub struct Info {
 impl Entry {
     pub fn new(
         parent: Option<u64>,
-        name: String,
+        name: models::FileName,
         data: Data,
         meta: Option<&fs::Metadata>,
     ) -> Entry {
@@ -109,7 +110,7 @@ impl From<models::FileInfo> for Info {
         }
 
         Info {
-            name: info.name.utf8().to_owned(),
+            name: info.name,
             created_ts_secs: none_if_zero_i64(info.created_ts),
             modified_ts_secs: none_if_zero_i64(info.modified_ts),
             accessed_ts_secs: none_if_zero_i64(info.accessed_ts),
@@ -132,10 +133,11 @@ impl From<models::FileInfo> for Info {
 }
 
 impl Info {
-    pub fn new(name: String, meta: Option<&fs::Metadata>) -> Info {
+    pub fn new(name: models::FileName, meta: Option<&fs::Metadata>) -> Info {
         use std::os::linux::fs::MetadataExt;
 
-        let created = meta.and_then(|m| FileTime::from_creation_time(m))
+        let created = meta
+            .and_then(|m| FileTime::from_creation_time(m))
             .map(|t| t.seconds());
         let modified = meta.map(|m| FileTime::from_last_modification_time(m).seconds());
         let accessed = meta.map(|m| FileTime::from_last_access_time(m).seconds());
@@ -167,7 +169,7 @@ impl Info {
         };
 
         models::FileInfo {
-            name: models::FileName::Utf8(self.name.clone()),
+            name: self.name.clone(),
             created_ts: self.created_ts_secs.unwrap_or(0) as i64,
             modified_ts: self.modified_ts_secs.unwrap_or(0) as i64,
             accessed_ts: self.accessed_ts_secs.unwrap_or(0) as i64,
@@ -257,11 +259,13 @@ impl InternalKeyIndex {
         mut entry: Entry,
         hash_ref_opt: Option<&hash::tree::HashRef>,
     ) -> Result<Entry, DieselError> {
+        let name_bytes: Vec<u8> = entry.info.name.clone().into();
+
         if entry.node_id.is_none() {
             let new = schema::NewKeyNode {
                 node_id: None, // new row id
                 parent_id: entry.parent_id.map(|p| p as i64),
-                name: &entry.info.name[..],
+                name: &name_bytes[..],
             };
             use super::schema::key_tree::dsl::*;
             diesel::insert_into(key_tree)
@@ -311,23 +315,25 @@ impl InternalKeyIndex {
     fn lookup(
         &mut self,
         parent_: Option<u64>,
-        name_: String,
+        name_: models::FileName,
     ) -> Result<Option<Entry>, DieselError> {
         use super::schema::key_data::dsl::*;
         use super::schema::key_tree::dsl::{key_tree, name, parent_id};
+
+        let name_bytes: Vec<u8> = name_.clone().into();
 
         let row_opt = match parent_ {
             Some(p) => key_tree
                 .inner_join(key_data)
                 .filter(parent_id.eq(p as i64))
-                .filter(name.eq(&name_[..]))
+                .filter(name.eq(&name_bytes[..]))
                 .order(committed)
                 .first::<(schema::KeyNode, schema::KeyData)>(&self.conn)
                 .optional()?,
             None => key_tree
                 .inner_join(key_data)
                 .filter(parent_id.is_null())
-                .filter(name.eq(&name_[..]))
+                .filter(name.eq(&name_bytes[..]))
                 .order(committed)
                 .first::<(schema::KeyNode, schema::KeyData)>(&self.conn)
                 .optional()?,
@@ -337,7 +343,8 @@ impl InternalKeyIndex {
             Ok(Some(Entry {
                 node_id: node.node_id.map(|n| n as u64),
                 parent_id: node.parent_id.map(|p| p as u64),
-                data: data.hash
+                data: data
+                    .hash
                     .map(|h| Data::FileHash(h))
                     .unwrap_or(Data::DirPlaceholder),
 
@@ -346,7 +353,8 @@ impl InternalKeyIndex {
                     created_ts_secs: data.created,
                     modified_ts_secs: data.modified,
                     accessed_ts_secs: data.accessed,
-                    permissions: data.permissions
+                    permissions: data
+                        .permissions
                         .map(|m| fs::Permissions::from_mode(m as u32)),
                     user_id: data.user_id.map(|x| x as u64),
                     group_id: data.group_id.map(|x| x as u64),
@@ -382,7 +390,8 @@ impl InternalKeyIndex {
                 .load::<(schema::KeyNode, schema::KeyData)>(&self.conn)?,
         };
 
-        Ok(rows.into_iter()
+        Ok(rows
+            .into_iter()
             .map(|(node, mut data)| {
                 (
                     Entry {
@@ -399,11 +408,12 @@ impl InternalKeyIndex {
                             }
                         },
                         info: Info {
-                            name: node.name,
+                            name: node.name.into(),
                             created_ts_secs: data.created,
                             modified_ts_secs: data.modified,
                             accessed_ts_secs: data.accessed,
-                            permissions: data.permissions
+                            permissions: data
+                                .permissions
                                 .map(|m| fs::Permissions::from_mode(m as u32)),
                             user_id: data.user_id.map(|x| x as u64),
                             group_id: data.group_id.map(|x| x as u64),
@@ -502,7 +512,7 @@ impl KeyIndex {
     pub fn lookup(
         &self,
         parent_: Option<u64>,
-        name_: String,
+        name_: models::FileName,
     ) -> Result<Option<Entry>, DieselError> {
         self.lock().lookup(parent_, name_)
     }

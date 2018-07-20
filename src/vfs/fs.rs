@@ -5,6 +5,7 @@ use hash::tree::{self, HashRef, HashTreeBackend};
 use hat;
 use hat::walker::Content;
 use key::Entry;
+use models::FileName;
 
 use std::borrow::Cow;
 use std::mem;
@@ -135,10 +136,10 @@ impl<B: StoreBackend> Filesystem<B> {
                     (_, None) => return Ok(Some(List::Dir(listing))),
                     (None, _) => return Ok(None),
                     (Some(href), Some(name)) => {
-                        let name_str = name.as_os_str().to_string_lossy();
+                        let name: FileName = name.as_os_str().to_owned().into();
                         if let Some((entry, content)) = listing
                             .into_iter()
-                            .find(|&(ref e, ref c)| e.info.name == name_str)
+                            .find(|&(ref e, ref c)| e.info.name == name)
                         {
                             match content {
                                 Content::Data(..) | Content::Link(..) => {

@@ -94,7 +94,7 @@ fn rng_filesystem(size: usize) -> FileSystem {
                     data: data,
 
                     info: Info {
-                        name: random_string(),
+                        name: random_string().into(),
                         byte_length: None,
 
                         created_ts_secs: thread_rng().gen(),
@@ -126,7 +126,7 @@ fn rng_filesystem(size: usize) -> FileSystem {
             node_id: None, // updated by insert_and_update_fs()
             data: Data::DirPlaceholder,
             info: Info {
-                name: "root".into(),
+                name: "root".to_string().into(),
                 created_ts_secs: thread_rng().gen(),
                 modified_ts_secs: thread_rng().gen(),
                 accessed_ts_secs: thread_rng().gen(),
@@ -147,14 +147,16 @@ fn rng_filesystem(size: usize) -> FileSystem {
 
 fn insert_and_update_fs<B: StoreBackend>(fs: &mut FileSystem, ks_p: &StoreProcess<EntryStub, B>) {
     let local_file = fs.file.clone();
-    fs.file.key_entry.node_id = match ks_p.send_reply(Msg::Insert(
-        fs.file.key_entry.clone(),
-        if fs.file.data.is_some() {
-            Some(Box::new(move |()| Some(local_file)))
-        } else {
-            None
-        },
-    )).unwrap()
+    fs.file.key_entry.node_id = match ks_p
+        .send_reply(Msg::Insert(
+            fs.file.key_entry.clone(),
+            if fs.file.data.is_some() {
+                Some(Box::new(move |()| Some(local_file)))
+            } else {
+                None
+            },
+        ))
+        .unwrap()
     {
         Reply::Id(id) => Some(id),
         _ => panic!("unexpected reply from key store"),
@@ -167,7 +169,8 @@ fn insert_and_update_fs<B: StoreBackend>(fs: &mut FileSystem, ks_p: &StoreProces
 }
 
 fn verify_filesystem<B: StoreBackend>(fs: &FileSystem, ks_p: &StoreProcess<EntryStub, B>) -> usize {
-    let listing = match ks_p.send_reply(Msg::ListDir(fs.file.key_entry.node_id))
+    let listing = match ks_p
+        .send_reply(Msg::ListDir(fs.file.key_entry.node_id))
         .unwrap()
     {
         Reply::ListResult(ls) => ls,
