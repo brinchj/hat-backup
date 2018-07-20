@@ -129,7 +129,7 @@ impl Keeper {
 
     #[cfg(test)]
     pub fn new_for_testing() -> Keeper {
-        Keeper::new(vec![0; 32])
+        Keeper::new(secstr::SecStr::new(vec![0; 32]))
     }
 
     fn init(&mut self) {
