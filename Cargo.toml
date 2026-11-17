@@ -47,8 +47,13 @@ path = "src/bin/hat_crash_worker.rs"
 
 [dev-dependencies]
 assert_cmd = "2"
+criterion = { version = "0.5", features = ["html_reports"] }
 libsodium-sys = "0.2"
 tempfile = "3"
+
+[[bench]]
+name = "hat_ops"
+harness = false
 
 [profile.release]
 debug = true

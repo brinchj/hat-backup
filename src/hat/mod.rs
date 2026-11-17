@@ -975,7 +975,6 @@ impl<B: StoreBackend> HatRc<B> {
 
             let name_os_string: ffi::OsString = entry.info.name.into();
             output.push(&name_os_string);
-            println!("{}", output.display());
 
             match hash_ref {
                 walker::Content::Data(hash_ref) => {
