@@ -24,7 +24,7 @@ use std::borrow::Cow;
 use std::io;
 use std::sync::Arc;
 
-use crate::util::{FnBox, MsgHandler, Process};
+use crate::util::{MsgHandler, Process};
 
 mod hash_store_backend;
 mod index;
@@ -89,7 +89,7 @@ pub enum Msg<IT> {
     /// Insert a key into the index. If this key has associated data a "chunk-iterator creator"
     /// can be passed along with it. If the data turns out to be unreadable, this iterator proc
     /// can return `None`. Returns `Id` with the new entry ID.
-    Insert(Entry, Option<Box<dyn FnBox<(), Option<IT>>>>),
+    Insert(Entry, Option<Box<dyn FnOnce() -> Option<IT> + Send>>),
 
     /// List a "directory" (aka. a `level`) in the index.
     /// Returns `ListResult` with all the entries under the given parent.
@@ -302,7 +302,7 @@ impl<IT: io::Read, B: StoreBackend> MsgHandler<Msg<IT>, Reply<B>> for Store<B> {
                 };
 
                 // Check if we have an data source:
-                let it_opt = chunk_it_opt.and_then(|open| open.call(()));
+                let it_opt = chunk_it_opt.and_then(|open| open());
                 if it_opt.is_none() {
                     // No data is associated with this entry.
                     debug!("Insert entry: {:?}", entry.info.name);

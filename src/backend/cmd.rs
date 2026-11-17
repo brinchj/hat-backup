@@ -19,7 +19,6 @@ use std::process;
 use std::sync::{Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
-use crate::util::FnBox;
 
 const HAT_CMD_PUT: &str = "hat-backup-put";
 const HAT_CMD_GET: &str = "hat-backup-get";
@@ -36,7 +35,7 @@ pub struct CmdBackend {
 struct CmdPutContext {
     hex_key: String,
     text: CipherText,
-    done_callback: Box<dyn FnBox<(), ()>>,
+    done_callback: Box<dyn FnOnce() + Send>,
 }
 
 impl CmdPutContext {
@@ -103,7 +102,7 @@ impl CmdPut {
         };
 
         if status.success() {
-            self.context.done_callback.call(());
+            (self.context.done_callback)();
             Ok(())
         } else {
             let why = status
@@ -213,7 +212,7 @@ impl CmdBackend {
 }
 
 impl StoreBackend for CmdBackend {
-    fn store(&self, name: &[u8], text: CipherText, done: Box<dyn FnBox<(), ()>>) -> Result<(), String> {
+    fn store(&self, name: &[u8], text: CipherText, done: Box<dyn FnOnce() + Send>) -> Result<(), String> {
         let hex_key = hex::encode(&name);
 
         let context = CmdPutContext {

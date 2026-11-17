@@ -114,7 +114,7 @@ impl<B: StoreBackend> PathHandler<Option<u64>> for InsertPathHandler<B> {
                 match ks.send_reply(key::Msg::Insert(
                     file_entry.key_entry,
                     if is_file {
-                        Some(Box::new(move |()| match FileIterator::new(&full_path) {
+                        Some(Box::new(move || match FileIterator::new(&full_path) {
                             Err(e) => {
                                 println!("Skipping '{}': {}", local_root.display(), e.to_string());
                                 None

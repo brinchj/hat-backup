@@ -28,7 +28,6 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use crate::tags;
-use crate::util::FnBox;
 
 mod blob;
 mod chunk;
@@ -74,7 +73,7 @@ pub struct StoreInner<B> {
     backend: Arc<B>,
     blob_index: Arc<BlobIndex>,
     blob_desc: BlobDesc,
-    blob_refs: Vec<Box<dyn FnBox<(), ()>>>,
+    blob_refs: Vec<Box<dyn FnOnce() + Send>>,
     blob: Blob,
     read_cache: LruCache<Vec<u8>, BlobReader>,
 }
@@ -120,8 +119,8 @@ impl<B: StoreBackend> StoreInner<B> {
         let old_blob_desc = self.reserve_new_blob();
 
         let callbacks = mem::replace(&mut self.blob_refs, vec![]);
-        let done_callback = Box::new(move |()| {
-            callbacks.into_iter().for_each(|c| c.call(()));
+        let done_callback = Box::new(move || {
+            callbacks.into_iter().for_each(|c| c());
         });
 
         self.blob_index.in_air(&old_blob_desc);
@@ -139,7 +138,7 @@ impl<B: StoreBackend> StoreInner<B> {
         node: NodeType,
         leaf: LeafType,
         info: Option<&key::Info>,
-        callback: Box<dyn FnBox<(), ()>>,
+        callback: Box<dyn FnOnce() + Send>,
     ) -> HashRef {
         let mut href = HashRef {
             hash: hash,
@@ -159,7 +158,7 @@ impl<B: StoreBackend> StoreInner<B> {
 
         if chunk.is_empty() {
             // We are not going to store an empty chunk, so commit it ASAP.
-            thread::spawn(move || callback.call(()));
+            thread::spawn(move || callback());
         } else {
             href.persistent_ref.blob_id = Some(self.blob_desc.id);
             href.persistent_ref.blob_name = self.blob_desc.name.clone();
@@ -222,9 +221,12 @@ impl<B: StoreBackend> StoreInner<B> {
     }
 
     fn recover(&mut self) -> Result<(), String> {
-        self.backend.list()?.into_iter()
-            .filter(|b| b.len() > 4)  // FIXME(jos): Remove when "root" is gone.
-            .map(|b| self.blob_index.recover(b.into_vec())).last();
+        // Blob names are sealed i64 ids (always longer than the old literal "root" marker).
+        self.backend
+            .list()?
+            .into_iter()
+            .map(|b| self.blob_index.recover(b.into_vec()))
+            .last();
         Ok(())
     }
 
@@ -281,7 +283,7 @@ impl<B: StoreBackend> BlobStore<B> {
         node: NodeType,
         leaf: LeafType,
         info: Option<&key::Info>,
-        callback: Box<dyn FnBox<(), ()>>,
+        callback: Box<dyn FnOnce() + Send>,
     ) -> HashRef {
         let mut guard = self.lock();
         guard.store(chunk, hash, node, leaf, info, callback)

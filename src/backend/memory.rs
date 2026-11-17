@@ -16,7 +16,6 @@ use crate::backend::StoreBackend;
 use crate::crypto::CipherText;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
-use crate::util::FnBox;
 
 pub struct MemoryBackend {
     files: Mutex<BTreeMap<Vec<u8>, Vec<u8>>>,
@@ -62,9 +61,9 @@ impl MemoryBackend {
 }
 
 impl StoreBackend for MemoryBackend {
-    fn store(&self, name: &[u8], data: CipherText, done: Box<dyn FnBox<(), ()>>) -> Result<(), String> {
+    fn store(&self, name: &[u8], data: CipherText, done: Box<dyn FnOnce() + Send>) -> Result<(), String> {
         let res = self.guarded_insert(name.to_vec(), data.to_vec());
-        done.call(());
+        done();
         res
     }
 

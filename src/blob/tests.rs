@@ -43,7 +43,7 @@ fn identity() {
                     node,
                     leaf,
                     None,
-                    Box::new(move |_| {}),
+                    Box::new(move || {}),
                 ),
                 chunk,
             ));
@@ -92,7 +92,7 @@ fn identity_with_excessive_flushing() {
                     node,
                     leaf,
                     None,
-                    Box::new(move |_| {}),
+                    Box::new(move || {}),
                 ),
                 chunk,
             ));

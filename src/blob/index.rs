@@ -19,7 +19,7 @@ use crate::db;
 
 use crate::errors::DieselError;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::tags;
 
@@ -31,7 +31,6 @@ pub struct BlobDesc {
 
 pub struct InternalBlobIndex {
     index: Arc<db::Index>,
-    next_id: Arc<Mutex<i64>>,
     keys: Arc<crypto::keys::Keeper>,
 }
 
@@ -42,13 +41,10 @@ impl InternalBlobIndex {
         keys: Arc<crypto::keys::Keeper>,
         index: Arc<db::Index>,
     ) -> Result<InternalBlobIndex, DieselError> {
-        let bi = InternalBlobIndex {
+        Ok(InternalBlobIndex {
             index: index,
-            next_id: Arc::new(Mutex::new(0)),
             keys: keys,
-        };
-        bi.refresh_next_id();
-        Ok(bi)
+        })
     }
 
     fn name_of_id(&self, id: i64) -> Vec<u8> {
@@ -66,23 +62,11 @@ impl InternalBlobIndex {
     }
 
     fn new_blob_desc(&self) -> BlobDesc {
-        let id = self.next_id();
+        let id = self.index.lock().blob_next_id();
         BlobDesc {
             name: self.name_of_id(id),
             id: id,
         }
-    }
-
-    pub fn refresh_next_id(&self) {
-        let id = { self.index.lock().blob_next_id() };
-        let mut next_id = self.next_id.lock().unwrap();
-        *next_id = 1 + id;
-    }
-
-    fn next_id(&self) -> i64 {
-        let mut id = self.next_id.lock().unwrap();
-        *id += 1;
-        *id
     }
 
     fn recover(&self, name: Vec<u8>) -> BlobDesc {

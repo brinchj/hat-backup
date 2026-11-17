@@ -152,7 +152,7 @@ fn insert_and_update_fs<B: StoreBackend>(fs: &mut FileSystem, ks_p: &StoreProces
         .send_reply(Msg::Insert(
             fs.file.key_entry.clone(),
             if fs.file.data.is_some() {
-                Some(Box::new(move |()| Some(local_file)))
+                Some(Box::new(move || Some(local_file)))
             } else {
                 None
             },

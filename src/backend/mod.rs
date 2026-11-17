@@ -18,7 +18,6 @@ mod file;
 mod memory;
 
 use crate::crypto::CipherText;
-use crate::util::FnBox;
 
 pub use self::cmd::CmdBackend;
 pub use self::devnull::DevNullBackend;
@@ -30,7 +29,7 @@ pub trait StoreBackend: Sync + Send + 'static {
         &self,
         name: &[u8],
         data: CipherText,
-        done_callback: Box<dyn FnBox<(), ()>>,
+        done_callback: Box<dyn FnOnce() + Send>,
     ) -> Result<(), String>;
     fn retrieve(&self, name: &[u8]) -> Result<Option<Vec<u8>>, String>;
     fn delete(&self, name: &[u8]) -> Result<(), String>;

@@ -20,7 +20,6 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use crate::util::FnBox;
 
 pub struct FileBackend {
     root: PathBuf,
@@ -80,7 +79,7 @@ impl FileBackend {
 }
 
 impl StoreBackend for FileBackend {
-    fn store(&self, name: &[u8], data: CipherText, done: Box<dyn FnBox<(), ()>>) -> Result<(), String> {
+    fn store(&self, name: &[u8], data: CipherText, done: Box<dyn FnOnce() + Send>) -> Result<(), String> {
         use self::io::Write;
 
         let mut path = self.root.clone();
@@ -97,7 +96,7 @@ impl StoreBackend for FileBackend {
             }
         }
 
-        done.call(());
+        done();
         Ok(())
     }
 

@@ -128,14 +128,11 @@ impl BlobReader {
         let rest = blob.strip_authentication(&keys)?;
         let (access_key, footer_ct, rest) = crypto::FixedKey::new(&keys).unseal_access_ctx(rest)?;
 
-        // TODO(jos): Figure out how to make the borrow checker happy without this.
-        let rest_of_blob = blob.slice(0, rest.len());
-
         Ok(BlobReader {
             keys: keys,
             access_key: access_key,
             footer_ct: footer_ct.to_vec(),
-            blob: rest_of_blob.to_owned(),
+            blob: rest.to_owned(),
         })
     }
 

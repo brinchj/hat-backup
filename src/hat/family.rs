@@ -26,7 +26,7 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::str;
-use crate::util::{FileIterator, FnBox, PathHandler};
+use crate::util::{FileIterator, PathHandler};
 
 fn try_a_few_times_then_panic<F>(mut f: F, msg: &str)
 where
@@ -176,8 +176,7 @@ fn parse_dir_data(chunk: &[u8], out: &mut Vec<walker::FileEntry>) -> Result<(), 
 
     for f in file_list.files {
         if f.info.name.is_empty() {
-            // Empty entry at end.
-            // TODO(jos): Can we get rid of these?
+            // Legacy end-of-list sentinel from older writers; no longer emitted.
             break;
         }
 
@@ -303,7 +302,7 @@ impl<B: StoreBackend> Family<B> {
         let f = if is_directory {
             None
         } else {
-            Some(Box::new(move |()| contents) as Box<dyn FnBox<(), _>>)
+            Some(Box::new(move || contents) as Box<dyn FnOnce() -> Option<FileIterator> + Send>)
         };
         let ks = self.key_store_process.iter().last().unwrap();
         let id = match ks.send_reply(key::Msg::Insert(file, f))? {
@@ -336,8 +335,8 @@ impl<B: StoreBackend> Family<B> {
         try_a_few_times_then_panic(|| fd.flush().is_ok(), "Could not flush file.");
     }
 
-    // FIXME(jos): Merge with hat's checkout_in_dir which checks out snapshots.
-    // (this checkout_in_dir checks out the family index)
+    // Checks out the family key-index. Hat::checkout_in_dir checks out a committed snapshot;
+    // sharing more of the write path is a future cleanup.
     pub fn checkout_in_dir(
         &self,
         output_dir: PathBuf,

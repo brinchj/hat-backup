@@ -146,7 +146,7 @@ impl<B: StoreBackend> HashTreeBackend for HashStoreBackend<B> {
                 let guard = m.lock().unwrap();
 
                 let local_m = m.clone();
-                let callback = Box::new(move |()| {
+                let callback = Box::new(move || {
                     // The callback has to run *after* we called update_reserved in the outer body.
                     let guard = local_m.lock().unwrap();
                     local_hash_index.commit(id, None);

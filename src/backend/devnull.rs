@@ -14,7 +14,6 @@
 
 use crate::backend::StoreBackend;
 use crate::crypto::CipherText;
-use crate::util::FnBox;
 
 pub struct DevNullBackend;
 
@@ -23,9 +22,9 @@ impl StoreBackend for DevNullBackend {
         &self,
         _name: &[u8],
         _data: CipherText,
-        done: Box<dyn FnBox<(), ()>>,
+        done: Box<dyn FnOnce() + Send>,
     ) -> Result<(), String> {
-        done.call(());
+        done();
         Ok(())
     }
 

@@ -385,7 +385,7 @@ impl<B: StoreBackend> HatRc<B> {
 
         let listing = cbor_util::to_vec(&snapshots).unwrap();
 
-        // FIXME(jos): Split into N-entries per append().
+        // Snapshot lists can grow large; chunking across append()s is a future improvement.
         let mut tree = self.hash_tree_writer(blob::LeafType::SnapshotList);
         tree.append(&listing[..])?;
 
@@ -406,10 +406,10 @@ impl<B: StoreBackend> HatRc<B> {
         self.meta_flush();
         self.commit_finalize(snap_info, &top_ref.hash)?;
 
-        // Delete old root snapshots, but always keep the past 10.
-        // FIXME(jos): Number of meta snapshots to keep to be configurable.
+        // Keep a fixed window of meta roots; making this configurable is a future improvement.
+        const META_ROOTS_TO_KEEP: usize = 10;
         all_root_ids.sort();
-        for id in all_root_ids.iter().rev().skip(10) {
+        for id in all_root_ids.iter().rev().skip(META_ROOTS_TO_KEEP) {
             self.deregister_by_name(synthetic_roots_family(), *id)?;
         }
 
@@ -424,10 +424,10 @@ impl<B: StoreBackend> HatRc<B> {
             for r in self.blob_store.retrieve_refs(b)?.unwrap_or(vec![]) {
                 match r.leaf {
                     blob::LeafType::SnapshotList => {
-                        // FIXME(jos): Allow skipping first root in case it is not working.
+                        // First SnapshotList wins; retrying a bad root is a future improvement.
                         return Ok(Some(r));
                     }
-                    // FIXME(jos): Recover file-listings stored after commit
+                    // Recovering TreeList entries after commit is a future improvement.
                     blob::LeafType::TreeList => {
                         warn!("Skipping directory listing: {}", hex::encode(&r.hash.bytes))
                     }

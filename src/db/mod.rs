@@ -170,6 +170,7 @@ pub struct QueueEntry {
 pub struct InternalIndex {
     conn: SqliteConnection,
     hash_id_counter: Counter,
+    blob_id_counter: Counter,
     flush_timer: PeriodicTimer,
     flush_periodically: bool,
 }
@@ -183,6 +184,7 @@ impl InternalIndex {
         let mut idx = InternalIndex {
             conn: conn,
             hash_id_counter: Counter::new(0),
+            blob_id_counter: Counter::new(0),
             flush_timer: PeriodicTimer::new(Duration::from_secs(10)),
             flush_periodically: true,
         };
@@ -194,6 +196,7 @@ impl InternalIndex {
         <SqliteConnection as Connection>::TransactionManager::begin_transaction(&mut idx.conn)?;
 
         idx.hash_refresh_id_counter();
+        idx.blob_refresh_id_counter();
         Ok(idx)
     }
 
@@ -366,10 +369,8 @@ impl InternalIndex {
         tag_opt.and_then(tags::tag_from_num)
     }
 
+    /// List hash ids with `tag_`, highest tree height first (safe for top-down deletion).
     pub fn hash_list_ids_by_tag(&mut self, tag_: u64) -> Vec<u64> {
-        // We list hashes top-down.
-        // This is required for safe deletion.
-        // TODO(jos): consider moving this requirement closer to the code that needs it.
         use self::schema::hashes::dsl::*;
 
         hashes
@@ -538,18 +539,23 @@ impl InternalIndex {
             .unwrap();
     }
 
-    pub fn blob_next_id(&mut self) -> i64 {
-        // TODO(jos): use an id_counter.
+    pub fn blob_refresh_id_counter(&mut self) {
         use self::schema::blobs::dsl::*;
         use diesel::dsl::max;
 
-        blobs
+        let id_opt = blobs
             .select(max(id))
             .first::<Option<i64>>(&mut self.conn)
             .optional()
             .expect("Error querying blobs")
             .and_then(|x| x)
-            .unwrap_or(0)
+            .unwrap_or(0);
+
+        self.blob_id_counter = Counter::new(id_opt);
+    }
+
+    pub fn blob_next_id(&mut self) -> i64 {
+        self.blob_id_counter.next()
     }
 
     pub fn blob_in_air(&mut self, blob: &blob::BlobDesc) {

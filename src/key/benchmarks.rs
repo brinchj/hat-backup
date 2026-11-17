@@ -38,7 +38,7 @@ fn insert_1_key_x_128000_zeros(bench: &mut Bencher) {
 
         ks_p.send_reply(Msg::Insert(
             entry.key_entry.clone(),
-            Some(Box::new(move |()| Some(entry))),
+            Some(Box::new(move || Some(entry))),
         )).unwrap();
     });
 
@@ -70,7 +70,7 @@ fn insert_1_key_x_128000_unique(bench: &mut Bencher) {
 
         ks_p.send_reply(Msg::Insert(
             entry.key_entry.clone(),
-            Some(Box::new(move |()| Some(entry))),
+            Some(Box::new(move || Some(entry))),
         )).unwrap();
     });
 
@@ -93,7 +93,7 @@ fn insert_1_key_x_16_x_128000_zeros(bench: &mut Bencher) {
         };
         ks_p.send_reply(Msg::Insert(
             entry.key_entry.clone(),
-            Some(Box::new(move |()| Some(entry))),
+            Some(Box::new(move || Some(entry))),
         )).unwrap();
 
         match ks_p.send_reply(Msg::Flush).unwrap() {
@@ -137,7 +137,7 @@ fn insert_1_key_x_16_x_128000_unique(bench: &mut Bencher) {
 
         ks_p.send_reply(Msg::Insert(
             entry.key_entry.clone(),
-            Some(Box::new(move |()| Some(entry))),
+            Some(Box::new(move || Some(entry))),
         )).unwrap();
 
         match ks_p.send_reply(Msg::Flush).unwrap() {
