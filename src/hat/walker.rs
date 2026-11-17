@@ -69,8 +69,8 @@ where
     pub fn new(backend: B, root_hash: hash::tree::HashRef) -> Result<Walker<B>, B::Err> {
         let tree = hash::tree::Walker::new(backend.clone(), root_hash)?.unwrap();
         Ok(Walker {
-            backend: backend,
-            tree: tree,
+            backend,
+            tree,
             child: None,
             stack: VecDeque::new(),
         })
@@ -139,6 +139,6 @@ where
             }
         }
 
-        return Ok(true);
+        Ok(true)
     }
 }

@@ -100,7 +100,7 @@ impl Drop for InternalHashIndex {
 impl InternalHashIndex {
     fn new(index: Arc<db::Index>) -> Result<InternalHashIndex, DieselError> {
         Ok(InternalHashIndex {
-            index: index,
+            index,
             queue: Mutex::new(UniquePriorityQueue::new()),
         })
     }
@@ -145,14 +145,14 @@ impl InternalHashIndex {
         let my_id = index.hash_next_id();
         let qe = db::QueueEntry {
             id: my_id,
-            node: node,
-            leaf: leaf,
+            node,
+            leaf,
             childs: childs.clone(),
             tag: None,
             persistent_ref: persistent_ref.clone(),
         };
         index.hash_insert_new(my_id, hash.bytes.clone(), qe.clone());
-        assert!(queue.put_value(my_id, hash.bytes.clone(), qe).is_ok());
+        assert!(queue.put_value(my_id, hash.bytes.clone(), qe));
 
         my_id
     }
@@ -198,13 +198,13 @@ impl InternalHashIndex {
         &self,
         id: u64,
         entry_opt: Option<Entry>,
-        mut queue: &mut MutexGuard<Queue>,
-        mut index: &mut db::IndexGuard,
+        queue: &mut MutexGuard<Queue>,
+        index: &mut db::IndexGuard,
     ) {
-        entry_opt.map(|e| self.update_reserved(id, e, queue));
+        if let Some(e) = entry_opt { self.update_reserved(id, e, queue) }
 
         queue.set_ready(&id);
-        self.insert_completed_in_order(&mut queue, &mut index);
+        self.insert_completed_in_order(queue, index);
     }
 }
 

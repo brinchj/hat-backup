@@ -63,18 +63,17 @@ fn snapshot_files<B: StoreBackend>(
                 break;
             }
             let mut e = entry(current.to_string());
-            e.parent_id = parent.clone();
+            e.parent_id = parent;
 
-            parent = dirs
+            parent = *dirs
                 .entry((parent, current))
-                .or_insert_with(|| Some(family.snapshot_direct(e, true, None).unwrap()))
-                .clone();
+                .or_insert_with(|| Some(family.snapshot_direct(e, true, None).unwrap()));
             current = parts.next().unwrap();
         }
-        if current.len() > 0 {
+        if !current.is_empty() {
             // We have a file to insert.
             let mut e = entry(current.to_string());
-            e.parent_id = parent.clone();
+            e.parent_id = parent;
             family.snapshot_direct(e, false, Some(FileIterator::from_bytes(contents)))?;
         }
     }
@@ -196,7 +195,7 @@ fn basic_fixture() -> Vec<(&'static str, Vec<u8>)> {
 }
 
 fn basic_snapshot<B: StoreBackend>(fam: &Family<B>) {
-    snapshot_files(&fam, basic_fixture()).unwrap();
+    snapshot_files(fam, basic_fixture()).unwrap();
 }
 
 #[test]

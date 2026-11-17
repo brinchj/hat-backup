@@ -18,7 +18,7 @@ use scoped_thread_pool;
 use std::fs;
 use std::io;
 use std::iter;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 fn walk_pool() -> &'static scoped_thread_pool::Pool {
@@ -40,8 +40,8 @@ pub trait PathHandler<P: Send + 'static>: Sync {
     type DirItem: HasPath;
     type DirIter: iter::Iterator<Item = io::Result<Self::DirItem>>;
 
-    fn read_dir(&self, _path: &PathBuf) -> io::Result<Self::DirIter>;
-    fn handle_path(&self, _payload: &P, _path: &PathBuf) -> Option<P>;
+    fn read_dir(&self, _path: &Path) -> io::Result<Self::DirIter>;
+    fn handle_path(&self, _payload: &P, _path: &Path) -> Option<P>;
 
     fn recurse_worker<'a>(&'a self, scope: &scoped_thread_pool::Scope<'a>, root: PathBuf, payload: P) {
         scope.recurse(move |scope| {
@@ -120,7 +120,7 @@ mod tests {
             paths.insert(path, true)
         }
 
-        fn list(&self, dir: &PathBuf) -> vec::IntoIter<io::Result<PathBuf>> {
+        fn list(&self, dir: &Path) -> vec::IntoIter<io::Result<PathBuf>> {
             let paths = self.paths.lock().unwrap();
             let mut contents = vec![];
             for k in paths.keys() {
@@ -147,18 +147,18 @@ mod tests {
         type DirItem = PathBuf;
         type DirIter = vec::IntoIter<io::Result<Self::DirItem>>;
 
-        fn read_dir(&self, path: &PathBuf) -> io::Result<Self::DirIter> {
+        fn read_dir(&self, path: &Path) -> io::Result<Self::DirIter> {
             Ok(self.list(path))
         }
 
-        fn handle_path(&self, p_opt: &ParentOpt, path: &PathBuf) -> Option<ParentOpt> {
-            assert_eq!(self.visit(path.clone()), Some(false));
+        fn handle_path(&self, p_opt: &ParentOpt, path: &Path) -> Option<ParentOpt> {
+            assert_eq!(self.visit(path.to_path_buf()), Some(false));
 
-            if let &Some(ref p) = p_opt {
+            if let Some(p) = p_opt {
                 assert!(path.parent() == Some(p));
             }
 
-            self.list(path).next().map(|_| Some(path.clone()))
+            self.list(path).next().map(|_| Some(path.to_path_buf()))
         }
     }
 

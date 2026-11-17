@@ -17,7 +17,7 @@ use crate::key;
 use std::error::Error;
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{atomic, Mutex};
 use std::time::{Duration, Instant};
 use crate::util::{FileIterator, PathHandler, SyncPool};
@@ -43,12 +43,12 @@ impl FileEntry {
                 key::Data::Symlink(path)
             } else {
                 // Unsupported file type. Skipping.
-                return Err(From::from(format!("unknown file kind")));
+                return Err(From::from("unknown file kind".to_string()));
             };
             Ok(FileEntry {
                 key_entry: key::Entry::new(parent, filename.to_owned().into(), data, Some(&meta)),
                 metadata: meta,
-                full_path: full_path,
+                full_path,
             })
         } else {
             Err(From::from("Could not parse filename."[..].to_owned()))
@@ -83,11 +83,11 @@ impl<B: StoreBackend> PathHandler<Option<u64>> for InsertPathHandler<B> {
     type DirItem = fs::DirEntry;
     type DirIter = fs::ReadDir;
 
-    fn read_dir(&self, path: &PathBuf) -> io::Result<Self::DirIter> {
+    fn read_dir(&self, path: &Path) -> io::Result<Self::DirIter> {
         fs::read_dir(path)
     }
 
-    fn handle_path(&self, parent: &Option<u64>, path: &PathBuf) -> Option<Option<u64>> {
+    fn handle_path(&self, parent: &Option<u64>, path: &Path) -> Option<Option<u64>> {
         let count = self.count.fetch_add(1, atomic::Ordering::SeqCst) + 1;
 
         if count % 16 == 0 {
@@ -100,14 +100,14 @@ impl<B: StoreBackend> PathHandler<Option<u64>> for InsertPathHandler<B> {
             }
         }
 
-        match FileEntry::new(path.clone(), *parent) {
+        match FileEntry::new(path.to_path_buf(), *parent) {
             Err(e) => {
                 println!("Skipping '{}': {}", path.display(), e);
             }
             Ok(file_entry) => {
                 let is_file = file_entry.is_file();
                 let is_directory = file_entry.is_directory();
-                let local_root = path.clone();
+                let local_root = path.to_path_buf();
                 let full_path = file_entry.full_path.clone();
 
                 let ks = self.key_store.lock().unwrap();
@@ -116,7 +116,7 @@ impl<B: StoreBackend> PathHandler<Option<u64>> for InsertPathHandler<B> {
                     if is_file {
                         Some(Box::new(move || match FileIterator::new(&full_path) {
                             Err(e) => {
-                                println!("Skipping '{}': {}", local_root.display(), e.to_string());
+                                println!("Skipping '{}': {}", local_root.display(), e);
                                 None
                             }
                             Ok(it) => Some(it),

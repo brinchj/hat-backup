@@ -15,7 +15,6 @@
 use crate::backend::{MemoryBackend, StoreBackend};
 use crate::key::*;
 
-use quickcheck;
 
 use rand::distributions::{Alphanumeric, DistString};
 use rand::thread_rng;
@@ -68,7 +67,7 @@ fn rng_filesystem(size: usize) -> FileSystem {
         // dist_factor * i for i in range(children) + children == size
         let dist_factor: f32 = (size as f32 - children) / ((children * (children - 1.0)) / 2.0);
 
-        let mut child_size = 0.0 as f32;
+        let mut child_size = 0.0_f32;
 
         let mut files = Vec::new();
         for _ in 0..children as usize {
@@ -92,7 +91,7 @@ fn rng_filesystem(size: usize) -> FileSystem {
                 key_entry: Entry {
                     node_id: None,
                     parent_id: None, // updated by insert_and_update_fs()
-                    data: data,
+                    data,
 
                     info: Info {
                         name: random_string().into(),
@@ -227,7 +226,7 @@ fn verify_filesystem<B: StoreBackend>(fs: &FileSystem, ks_p: &StoreProcess<Entry
                 break; // Proceed to check next file
             }
         }
-        assert_eq!(true, found);
+        assert!(found);
     }
 
     let mut count = fs.filelist.len();

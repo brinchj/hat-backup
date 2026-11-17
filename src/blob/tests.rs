@@ -53,7 +53,7 @@ fn identity() {
 
         // Non-empty chunks must be in the backend now:
         for &(ref id, chunk) in ids.iter() {
-            if chunk.len() > 0 {
+            if !chunk.is_empty() {
                 match backend.retrieve(&id.persistent_ref.blob_name[..]) {
                     Ok(_) => (),
                     Err(e) => panic!("{:?}", e),
@@ -63,10 +63,10 @@ fn identity() {
 
         // All chunks must be available through the blob store:
         for &(ref id, chunk) in ids.iter() {
-            assert_eq!(bs_p.retrieve(&id).unwrap().unwrap(), &chunk[..]);
+            assert_eq!(bs_p.retrieve(id).unwrap().unwrap(), &chunk[..]);
         }
 
-        return true;
+        true
     }
     quickcheck::quickcheck(prop as fn(Vec<Vec<u8>>) -> bool);
 }
@@ -98,12 +98,12 @@ fn identity_with_excessive_flushing() {
             ));
             bs_p.flush();
             let &(ref id, chunk) = ids.last().unwrap();
-            assert_eq!(bs_p.retrieve(&id).unwrap().unwrap(), &chunk[..]);
+            assert_eq!(bs_p.retrieve(id).unwrap().unwrap(), &chunk[..]);
         }
 
         // Non-empty chunks must be in the backend now:
         for &(ref id, chunk) in ids.iter() {
-            if chunk.len() > 0 {
+            if !chunk.is_empty() {
                 match backend.retrieve(&id.persistent_ref.blob_name[..]) {
                     Ok(_) => (),
                     Err(e) => panic!("{:?}", e),
@@ -113,10 +113,10 @@ fn identity_with_excessive_flushing() {
 
         // All chunks must be available through the blob store:
         for &(ref id, chunk) in ids.iter() {
-            assert_eq!(bs_p.retrieve(&id).unwrap().unwrap(), &chunk[..]);
+            assert_eq!(bs_p.retrieve(id).unwrap().unwrap(), &chunk[..]);
         }
 
-        return true;
+        true
     }
     quickcheck::quickcheck(prop as fn(Vec<Vec<u8>>) -> bool);
 }
@@ -127,13 +127,13 @@ fn blobid_identity() {
         let blob_name = ChunkRef {
             blob_id: None,
             blob_name: name.to_vec(),
-            offset: offset,
-            length: length,
+            offset,
+            length,
             packing: None,
             key: None,
         };
         let blob_name_bytes = blob_name.as_bytes();
-        let recovered = ChunkRef::from_bytes(&mut &blob_name_bytes[..]).unwrap();
+        let recovered = ChunkRef::from_bytes(&blob_name_bytes[..]).unwrap();
         assert_eq!(blob_name.blob_name, recovered.blob_name);
         assert_eq!(blob_name.offset, recovered.offset);
         assert_eq!(blob_name.length, recovered.length);
@@ -154,8 +154,8 @@ fn blob_reuse() {
     let leaf = LeafType::FileChunk;
     let mut c1 = hash::tree::HashRef {
         hash: hash::Hash::new(&keys, node, leaf, &[]),
-        node: node,
-        leaf: leaf,
+        node,
+        leaf,
         info: None,
         persistent_ref: ChunkRef {
             blob_id: None,
@@ -172,7 +172,7 @@ fn blob_reuse() {
     b.try_append(&[1, 2, 3], &mut c1).unwrap();
     b.try_append(&[4, 5, 6], &mut c2).unwrap();
 
-    let out = b.to_ciphertext().unwrap().to_vec();
+    let out = b.finish().unwrap().to_vec();
     let mut reader = BlobReader::new(keys.clone(), crypto::CipherTextRef::new(&out[..])).unwrap();
     assert_eq!(vec![1, 2, 3], reader.read_chunk(&c1).unwrap());
     assert_eq!(vec![4, 5, 6], reader.read_chunk(&c2).unwrap());
@@ -183,7 +183,7 @@ fn blob_reuse() {
     b.try_append(&[1, 2], &mut c2).unwrap();
     b.try_append(&[1, 2], &mut c3).unwrap();
 
-    let out = b.to_ciphertext().unwrap().to_vec();
+    let out = b.finish().unwrap().to_vec();
     let mut reader = BlobReader::new(keys.clone(), crypto::CipherTextRef::new(&out[..])).unwrap();
     assert_eq!(vec![1, 2], reader.read_chunk(&c1).unwrap());
     assert_eq!(vec![1, 2], reader.read_chunk(&c2).unwrap());
@@ -204,8 +204,8 @@ fn blob_identity() {
         for chunk in chunks.iter() {
             let mut cref = hash::tree::HashRef {
                 hash: hash::Hash::new(&keys, node, leaf, &[]),
-                node: node,
-                leaf: leaf,
+                node,
+                leaf,
                 info: None,
                 persistent_ref: ChunkRef {
                     blob_id: None,
@@ -216,14 +216,14 @@ fn blob_identity() {
                     key: None,
                 },
             };
-            if let Err(_) = b.try_append(&chunk[..], &mut cref) {
+            if b.try_append(&chunk[..], &mut cref).is_err() {
                 assert!(b.upperbound_len() + chunk.len() + cref.as_bytes().len() + 50 >= max_size);
                 break;
             }
-            n = n + 1;
+            n += 1;
         }
 
-        let out = match b.to_ciphertext() {
+        let out = match b.finish() {
             None => {
                 assert_eq!(n, 0);
                 return true;
@@ -269,8 +269,8 @@ fn empty_blocks_blob_ciphertext(blob: &mut Blob, blocksize: usize) -> Vec<u8> {
     loop {
         let mut cref = hash::tree::HashRef {
             hash: hash::Hash::new(&keys, node, leaf, &block[..]),
-            node: node,
-            leaf: leaf,
+            node,
+            leaf,
             info: None,
             persistent_ref: ChunkRef {
                 blob_id: None,
@@ -286,7 +286,7 @@ fn empty_blocks_blob_ciphertext(blob: &mut Blob, blocksize: usize) -> Vec<u8> {
             Err(_) => break,
         }
     }
-    blob.to_ciphertext().unwrap().to_vec()
+    blob.finish().unwrap().to_vec()
 }
 
 #[test]
@@ -314,7 +314,7 @@ fn blob_ciphertext_authed_allbytes() {
 
     fn verify(keys: &Arc<crypto::keys::Keeper>, bs: &[u8]) -> Result<Vec<Vec<u8>>, BlobError> {
         let mut vs = vec![];
-        let mut reader = BlobReader::new(keys.clone(), crypto::CipherTextRef::new(&bs[..]))?;
+        let mut reader = BlobReader::new(keys.clone(), crypto::CipherTextRef::new(bs))?;
         for r in reader.refs()? {
             vs.push(reader.read_chunk(&r)?);
         }
@@ -328,7 +328,7 @@ fn blob_ciphertext_authed_allbytes() {
         {
             bytes[i] ^= b;
         }
-        let res = f(&bytes);
+        let res = f(bytes);
         {
             bytes[i] ^= b;
         }

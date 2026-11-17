@@ -17,14 +17,16 @@ use crate::crypto;
 use crate::hash::tree::*;
 use crate::hash::Hash;
 use crate::key;
-use quickcheck;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
+type ChunkEntry = (NodeType, LeafType, Option<Vec<u64>>, Vec<u8>);
+type ChunkMap = BTreeMap<Vec<u8>, ChunkEntry>;
+
 #[derive(Clone)]
 pub struct MemoryBackend {
-    chunks: Arc<Mutex<BTreeMap<Vec<u8>, (NodeType, LeafType, Option<Vec<u64>>, Vec<u8>)>>>,
+    chunks: Arc<Mutex<ChunkMap>>,
     seen_chunks: Arc<Mutex<BTreeSet<Vec<u8>>>>,
 }
 
@@ -48,29 +50,26 @@ impl HashTreeBackend for MemoryBackend {
         let guarded_chunks = self.chunks.lock().unwrap();
         Ok(guarded_chunks
             .get(&href.hash.bytes)
-            .map(|&(_, _, _, ref chunk)| chunk.clone()))
+            .map(|(_, _, _, chunk)| chunk.clone()))
     }
 
     fn fetch_childs(&self, hash: &Hash) -> Option<Vec<u64>> {
         let guarded_chunks = self.chunks.lock().unwrap();
         guarded_chunks
             .get(&hash.bytes)
-            .and_then(|&(_, _, ref childs, _)| childs.clone())
+            .and_then(|(_, _, childs, _)| childs.clone())
     }
 
     fn fetch_persistent_ref(&self, hash: &Hash) -> Option<ChunkRef> {
         let guarded_chunks = self.chunks.lock().unwrap();
-        match guarded_chunks.get(&hash.bytes) {
-            Some(&(_, _, _, ref chunk)) => Some(ChunkRef {
+        guarded_chunks.get(&hash.bytes).map(|(_, _, _, chunk)| ChunkRef {
                 blob_id: None,
                 blob_name: hash.bytes.clone(),
                 offset: 0,
                 length: chunk.len(),
                 packing: None,
                 key: None,
-            }),
-            None => None,
-        }
+            })
     }
 
     fn insert_chunk(
@@ -95,8 +94,8 @@ impl HashTreeBackend for MemoryBackend {
             0,
             HashRef {
                 hash: hash.clone(),
-                node: node,
-                leaf: leaf,
+                node,
+                leaf,
                 info: None,
                 persistent_ref: ChunkRef {
                     blob_id: None,

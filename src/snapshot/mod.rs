@@ -14,7 +14,6 @@
 
 //! Local state for known snapshots.
 
-use chrono;
 use crate::db;
 use crate::hash;
 use std::sync::Arc;

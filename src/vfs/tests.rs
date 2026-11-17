@@ -23,7 +23,7 @@ fn filereader() {
 
         let mut reader = FileReader::new_from_iter(Some(Box::new(data.into_iter())));
 
-        if let Some(slice) = reader.read(offset as u64, size.into()) {
+        if let Some(slice) = reader.read(offset as u64, size) {
             let wanted_slice = if offset + size < reference.len() {
                 &reference[offset..offset + size]
             } else if offset < reference.len() {

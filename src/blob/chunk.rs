@@ -15,7 +15,6 @@
 use crate::models;
 pub use crate::models::LeafType;
 
-use secstr;
 use crate::cbor_util;
 
 #[derive(Debug, Clone, Eq, PartialEq)]

@@ -222,7 +222,7 @@ impl<B: backend::StoreBackend> Filesystem for Fuse<B> {
         reply.error(libc::ENOENT);
     }
 
-    fn getattr(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyAttr) {
+    fn getattr(&mut self, _req: &Request<'_>, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
         match self.inodes.get(&ino) {
             None => reply.error(libc::ENOENT),
             Some(file) => {

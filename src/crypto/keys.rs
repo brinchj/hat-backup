@@ -117,10 +117,10 @@ impl Keeper {
 
     pub fn new(key: secstr::SecStr) -> Keeper {
         // Personalize key for Hat and make it 256-bit (32 bytes).
-        let universal_key = Keeper::from_key_and_nonce(&key, &UNIVERSAL_KEY_MSG[..], 32);
+        let universal_key = Keeper::from_key_and_nonce(&key, UNIVERSAL_KEY_MSG, 32);
 
         let mut keeper = Keeper {
-            universal_key: universal_key,
+            universal_key,
             fingerprint_key: None,
             blob_authentication_key: None,
             data_key_pk: None,
@@ -171,8 +171,8 @@ impl Keeper {
     fn from_key_and_nonce(key: &secstr::SecStr, nonce: &[u8], outlen: usize) -> secstr::SecStr {
         let mut out = secstr::SecStr::new(vec![0; outlen]);
         keyed_fingerprint_simple(
-            &key.unsecure(),
-            &nonce[..],
+            key.unsecure(),
+            nonce,
             out.unsecure_mut(),
         );
         out

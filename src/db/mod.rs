@@ -16,11 +16,9 @@
 
 use crate::blob;
 
-use chrono;
 use crate::models;
 use crate::cbor_util;
 
-use diesel;
 use diesel::connection::TransactionManager;
 use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
@@ -68,7 +66,7 @@ fn decode_chunk_ref(
     blob: Option<self::schema::Blob>,
 ) -> Option<blob::ChunkRef> {
     cref.map(|c| {
-        let mut r = blob::ChunkRef::from_bytes(&mut &c[..]).expect("Failed to decode chunk");
+        let mut r = blob::ChunkRef::from_bytes(&c[..]).expect("Failed to decode chunk");
         if r.length > 0 {
             r.blob_name = blob.expect("Non-empty chunk without blob name").name;
         } else {
@@ -182,7 +180,7 @@ impl InternalIndex {
         let conn = SqliteConnection::establish(path)?;
 
         let mut idx = InternalIndex {
-            conn: conn,
+            conn,
             hash_id_counter: Counter::new(0),
             blob_id_counter: Counter::new(0),
             flush_timer: PeriodicTimer::new(Duration::from_secs(10)),
@@ -191,7 +189,7 @@ impl InternalIndex {
 
         idx.conn
             .run_pending_migrations(MIGRATIONS)
-            .map_err(|e| DieselError::SqlMigration(e))?;
+            .map_err(DieselError::Migration)?;
 
         <SqliteConnection as Connection>::TransactionManager::begin_transaction(&mut idx.conn)?;
 
@@ -228,7 +226,7 @@ impl InternalIndex {
                 leaf: From::from(hash_.leaf_type as u64),
                 tag: tags::tag_from_num(hash_.tag),
                 childs: childs_,
-                persistent_ref: persistent_ref,
+                persistent_ref,
             }
         })
     }
@@ -273,7 +271,7 @@ impl InternalIndex {
     }
 
     pub fn hash_next_id(&mut self) -> u64 {
-        self.hash_id_counter.next() as u64
+        self.hash_id_counter.next_id() as u64
     }
 
     pub fn hash_insert_new(&mut self, id_: u64, hash_bytes: Vec<u8>, entry: QueueEntry) {
@@ -466,7 +464,7 @@ impl InternalIndex {
 
         for hash_id_ in hash_ids_ {
             let f = fns.next().expect("Failed to recv update function");
-            self.hash_update_gc_data(hash_id_ as u64, family_id_ as u64, f);
+            self.hash_update_gc_data(hash_id_ as u64, family_id_, f);
         }
     }
 
@@ -555,7 +553,7 @@ impl InternalIndex {
     }
 
     pub fn blob_next_id(&mut self) -> i64 {
-        self.blob_id_counter.next()
+        self.blob_id_counter.next_id()
     }
 
     pub fn blob_in_air(&mut self, blob: &blob::BlobDesc) {
@@ -743,7 +741,7 @@ impl InternalIndex {
                     bytes: snap.hash.unwrap().to_vec(),
                 },
                 snap.hash_ref
-                    .and_then(|r| crate::hash::tree::HashRef::from_bytes(&mut &r[..]).ok()),
+                    .and_then(|r| crate::hash::tree::HashRef::from_bytes(&r[..]).ok()),
             )
         })
     }
@@ -833,7 +831,7 @@ impl InternalIndex {
                         bytes: snap.hash.expect("Snapshot without top hash"),
                     },
                     snap.hash_ref
-                        .and_then(|r| crate::hash::tree::HashRef::from_bytes(&mut &r[..]).ok()),
+                        .and_then(|r| crate::hash::tree::HashRef::from_bytes(&r[..]).ok()),
                 )
             })
         })
@@ -861,7 +859,7 @@ impl InternalIndex {
                     if bytes.is_empty() {
                         None
                     } else {
-                        Some(crate::hash::Hash { bytes: bytes })
+                        Some(crate::hash::Hash { bytes })
                     }
                 });
 
@@ -871,7 +869,7 @@ impl InternalIndex {
                     msg: snap.msg,
                     hash: hash_,
                     hash_ref: snap.hash_ref,
-                    status: status,
+                    status,
                     info: SnapshotInfo {
                         unique_id: snap.id as u64,
                         snapshot_id: snap.snapshot_id as u64,
@@ -892,7 +890,7 @@ impl InternalIndex {
         hash_ref_: &hash::tree::HashRef,
         work_opt_: Option<SnapshotWorkStatus>,
     ) {
-        let family_id_ = self.get_or_create_family_id(&family);
+        let family_id_ = self.get_or_create_family_id(family);
         let insert = match self.snapshot_lookup(family, snapshot_id_) {
             Some((_info, h, _r)) => {
                 if h.bytes != hash_ref_.hash.bytes {

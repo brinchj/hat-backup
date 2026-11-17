@@ -164,7 +164,9 @@ impl SafeMemoryBackend {
             .get(&info.unique_id)
             .unwrap_or(&vec![])
             .clone();
-        refs.iter().map(|id| sender.send(*id)).last();
+        for id in &refs {
+            let _ = sender.send(*id);
+        }
 
         receiver
     }
@@ -179,7 +181,7 @@ impl SafeMemoryBackend {
         let commit = &mut None;
         mem::swap(commit, &mut backend.commit);
         match *commit {
-            None => return,
+            None => (),
             Some(ref mut commit) => {
                 mem::swap(&mut backend.gc_data, &mut commit.gc_data);
                 mem::swap(&mut backend.tags, &mut commit.tags);
@@ -286,7 +288,9 @@ impl GcBackend for SafeMemoryBackend {
         }
 
         let (sender, receiver) = mpsc::channel();
-        ids.iter().map(|id| sender.send(*id)).last();
+        for id in &ids {
+            let _ = sender.send(*id);
+        }
 
         Ok(receiver)
     }
@@ -378,7 +382,7 @@ where
     let mut backend = SafeMemoryBackend::new();
     let mut gc = GC::new(backend.clone());
 
-    let refs = vec![1, 2, 3, 4, 5];
+    let refs = [1, 2, 3, 4, 5];
     let info = SnapshotInfo {
         unique_id: 1,
         family_id: 1,
@@ -400,7 +404,9 @@ where
 
     let receiver = |n| {
         let (sender, receiver) = mpsc::channel();
-        refs[..n].iter().map(|id| sender.send(*id as Id)).last();
+        for id in &refs[..n] {
+            let _ = sender.send(*id as Id);
+        }
         drop(sender);
 
         receiver
@@ -429,7 +435,7 @@ where
     let mut backend = SafeMemoryBackend::new();
     let mut gc = GC::new(backend.clone());
 
-    let refs = vec![1, 2, 3, 4, 5];
+    let refs = [1, 2, 3, 4, 5];
     let info = SnapshotInfo {
         unique_id: 1,
         family_id: 1,
@@ -449,7 +455,9 @@ where
 
     let receiver = |n| {
         let (sender, receiver) = mpsc::channel();
-        refs[..n].iter().map(|id| sender.send(*id as Id)).last();
+        for id in &refs[..n] {
+            let _ = sender.send(*id as Id);
+        }
         drop(sender);
 
         receiver

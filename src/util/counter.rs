@@ -18,10 +18,10 @@ pub struct Counter {
 
 impl Counter {
     pub fn new(previous: i64) -> Counter {
-        Counter { previous: previous }
+        Counter { previous }
     }
 
-    pub fn next(&mut self) -> i64 {
+    pub fn next_id(&mut self) -> i64 {
         self.previous += 1;
         self.previous
     }

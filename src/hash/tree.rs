@@ -94,7 +94,7 @@ pub trait HashTreeBackend: Clone {
     ) -> Result<(u64, HashRef), Self::Err>;
 }
 
-fn hash_refs_to_bytes(refs: &Vec<HashRef>) -> Vec<u8> {
+fn hash_refs_to_bytes(refs: &[HashRef]) -> Vec<u8> {
     let value = models::HashRefs {
         refs: refs.iter().map(|hr| hr.to_model()).collect(),
     };
@@ -107,7 +107,7 @@ fn hash_refs_from_bytes(bytes: &[u8]) -> Option<Vec<HashRef>> {
     }
 
     let hr: models::HashRefs = cbor_util::from_slice(bytes).unwrap();
-    Some(hr.refs.into_iter().map(|r| From::from(r)).collect())
+    Some(hr.refs.into_iter().map(From::from).collect())
 }
 
 #[test]
@@ -175,8 +175,8 @@ impl<B: HashTreeBackend> SimpleHashTreeWriter<B> {
     /// Create a new hash-tree to be stored through 'backend' with node order 'order'.
     pub fn new(leaf_type: LeafType, order: usize, backend: B) -> SimpleHashTreeWriter<B> {
         SimpleHashTreeWriter {
-            backend: backend,
-            order: order,
+            backend,
+            order,
             leaf: leaf_type,
             levels: Vec::new(),
         }
@@ -211,7 +211,7 @@ impl<B: HashTreeBackend> SimpleHashTreeWriter<B> {
     ) -> Result<(), B::Err> {
         let (id, hash_ref) =
             self.backend
-                .insert_chunk(&data, From::from(level as u64), self.leaf, childs, info)?;
+                .insert_chunk(data, From::from(level as u64), self.leaf, childs, info)?;
         self.append_hashref_at(level, id, hash_ref, info)
     }
 
@@ -247,7 +247,8 @@ impl<B: HashTreeBackend> SimpleHashTreeWriter<B> {
 
         // All data from this level (hashes and references):
         let ids: Vec<u64> = level_v.iter().map(|&(id, _)| id).collect();
-        let data = hash_refs_to_bytes(&level_v.into_iter().map(|(_, hr)| hr).collect());
+        let refs: Vec<HashRef> = level_v.into_iter().map(|(_, hr)| hr).collect();
+        let data = hash_refs_to_bytes(&refs);
 
         self.append_at(level + 1, &data[..], Some(ids), info)
     }
@@ -283,7 +284,7 @@ impl<B: HashTreeBackend> SimpleHashTreeWriter<B> {
 
         // After this point, only root exists and root has exactly one entry:
         assert_eq!(self.levels.last().map(|x| x.len()), Some(1));
-        let &(_, ref hashref) = self.levels.last().and_then(|x| x.last()).expect("asserted");
+        let (_, hashref) = self.levels.last().and_then(|x| x.last()).expect("asserted");
 
         Ok(hashref.clone())
     }
@@ -323,7 +324,7 @@ where
 {
     pub fn new(backend: B, root_hash: HashRef) -> Result<Option<Walker<B>>, B::Err> {
         Ok(Some(Walker {
-            backend: backend,
+            backend,
             stack: vec![StackItem::Enter(root_hash)],
         }))
     }

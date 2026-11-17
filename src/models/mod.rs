@@ -153,19 +153,19 @@ impl From<ffi::OsString> for FileName {
     }
 }
 
-impl Into<ffi::OsString> for FileName {
-    fn into(self) -> ffi::OsString {
+impl From<FileName> for ffi::OsString {
+    fn from(val: FileName) -> Self {
         use std::os::unix::ffi::OsStrExt;
-        match self {
+        match val {
             FileName::Utf8(utf8) => utf8.into(),
             FileName::RawAndLossyUtf8(raw, _utf8) => ffi::OsStr::from_bytes(&raw[..]).to_owned(),
         }
     }
 }
 
-impl Into<Vec<u8>> for FileName {
-    fn into(self) -> Vec<u8> {
-        match self {
+impl From<FileName> for Vec<u8> {
+    fn from(val: FileName) -> Self {
+        match val {
             FileName::Utf8(utf8) => utf8.into_bytes(),
             FileName::RawAndLossyUtf8(raw, _utf8) => raw,
         }

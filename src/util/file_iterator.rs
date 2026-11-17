@@ -55,7 +55,7 @@ impl Read for FileIterator {
                 } else {
                     let next = &vec[*pos..cmp::min(*pos + buf.len(), vec.len())];
                     *pos += next.len();
-                    buf[..next.len()].clone_from_slice(&next);
+                    buf[..next.len()].clone_from_slice(next);
                     Ok(next.len())
                 }
             }

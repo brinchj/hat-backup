@@ -21,16 +21,18 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+type ReadCache = BTreeMap<Vec<u8>, Result<Option<Vec<u8>>, String>>;
+
 pub struct FileBackend {
     root: PathBuf,
-    read_cache: Mutex<BTreeMap<Vec<u8>, Result<Option<Vec<u8>>, String>>>,
+    read_cache: Mutex<ReadCache>,
     max_cache_size: usize,
 }
 
 impl FileBackend {
     pub fn new(root: PathBuf) -> FileBackend {
         FileBackend {
-            root: root,
+            root,
             read_cache: Mutex::new(BTreeMap::new()),
             // Checkout/`check` touch many blobs; a tiny cache thrashed on FS-shaped trees.
             max_cache_size: 64,
@@ -50,7 +52,7 @@ impl FileBackend {
         // Read key:
         let path = {
             let mut p = self.root.clone();
-            p.push(&hex::encode(&name));
+            p.push(hex::encode(name));
             p
         };
 
@@ -84,7 +86,7 @@ impl StoreBackend for FileBackend {
         use self::io::Write;
 
         let mut path = self.root.clone();
-        path.push(&hex::encode(&name));
+        path.push(hex::encode(name));
 
         let mut file = match fs::File::create(&path) {
             Err(e) => return Err(e.to_string()),
@@ -122,7 +124,7 @@ impl StoreBackend for FileBackend {
 
         let path = {
             let mut p = self.root.clone();
-            p.push(&hex::encode(&name));
+            p.push(hex::encode(&name));
             p
         };
 
@@ -138,9 +140,8 @@ impl StoreBackend for FileBackend {
         let mut out = vec![];
         for p in fs::read_dir(&self.root).map_err(es)? {
             if let Some(name) = p.map_err(es)?.path().file_name() {
-                name.to_str()
-                    .map(|s| Vec::from_hex(s).unwrap())
-                    .map(|b| out.push(b.into_boxed_slice()));
+                if let Some(b) = name.to_str()
+                    .map(|s| Vec::from_hex(s).unwrap()) { out.push(b.into_boxed_slice()) }
             }
         }
         Ok(out)

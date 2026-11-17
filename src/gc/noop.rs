@@ -15,13 +15,13 @@
 use crate::db::SnapshotInfo;
 use crate::gc;
 use std::sync::mpsc;
-use void::Void;
+use std::convert::Infallible;
 
 #[allow(dead_code)]
 pub struct GcNoop;
 
 impl<B: gc::GcBackend> gc::Gc<B> for GcNoop {
-    type Err = Void;
+    type Err = Infallible;
 
     fn new(_backend: B) -> GcNoop {
         GcNoop

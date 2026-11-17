@@ -25,8 +25,10 @@ const HAT_CMD_GET: &str = "hat-backup-get";
 const HAT_CMD_DELETE: &str = "hat-backup-delete";
 const HAT_CMD_LIST: &str = "hat-backup-list";
 
+type ReadCache = BTreeMap<Vec<u8>, Result<Option<Vec<u8>>, String>>;
+
 pub struct CmdBackend {
-    read_cache: Mutex<BTreeMap<Vec<u8>, Result<Option<Vec<u8>>, String>>>,
+    read_cache: Mutex<ReadCache>,
     max_cache_size: usize,
     max_concurrent: usize,
     queue: Mutex<Vec<CmdPut>>,
@@ -71,8 +73,8 @@ impl CmdPut {
         let child = context.start_child()?;
 
         Ok(CmdPut {
-            child: child,
-            context: context,
+            child,
+            context,
         })
     }
 
@@ -81,7 +83,7 @@ impl CmdPut {
             format!(
                 "failed to query sub-process {}: {}",
                 HAT_CMD_PUT,
-                err.to_string()
+                err
             )
         })
     }
@@ -94,7 +96,7 @@ impl CmdPut {
                     format!(
                         "failed to query sub-process {}: {}",
                         HAT_CMD_PUT,
-                        err.to_string()
+                        err
                     ),
                     self.context,
                 ))
@@ -135,7 +137,7 @@ impl CmdBackend {
 
     fn get(&self, name: &[u8]) -> Result<Option<Vec<u8>>, String> {
         // Read key:
-        let hex_key = hex::encode(&name);
+        let hex_key = hex::encode(name);
 
         match process::Command::new(HAT_CMD_GET)
             .arg(&hex_key[..])
@@ -153,7 +155,7 @@ impl CmdBackend {
                 "{} failed while getting file {}: {}",
                 HAT_CMD_GET,
                 hex_key,
-                err.to_string()
+                err
             )),
         }
     }
@@ -192,7 +194,7 @@ impl CmdBackend {
             match c.try_wait() {
                 Ok(None) => queue.push(c),
                 Err(err) => {
-                    eprintln!("error: {}", err.to_string());
+                    eprintln!("error: {}", err);
                     queue.push(c);
                 }
                 Ok(..) => {
@@ -211,9 +213,15 @@ impl CmdBackend {
     }
 }
 
+impl Default for CmdBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StoreBackend for CmdBackend {
     fn store(&self, name: &[u8], text: CipherText, done: Box<dyn FnOnce() + Send>) -> Result<(), String> {
-        let hex_key = hex::encode(&name);
+        let hex_key = hex::encode(name);
 
         let context = CmdPutContext {
             hex_key,
@@ -252,7 +260,7 @@ impl StoreBackend for CmdBackend {
                 "{} failed while deleting file {}: {}",
                 HAT_CMD_DELETE,
                 hex_key,
-                err.to_string()
+                err
             )),
         }
     }
@@ -268,16 +276,16 @@ impl StoreBackend for CmdBackend {
                     return Err(format!(
                         "{} result encoding is not valid utf8: {}",
                         HAT_CMD_LIST,
-                        err.to_string()
+                        err
                     ));
                 }
             },
-            Err(err) => return Err(format!("{} failed: {}", HAT_CMD_LIST, err.to_string())),
+            Err(err) => return Err(format!("{} failed: {}", HAT_CMD_LIST, err)),
         };
 
         let mut out = vec![];
         for f in listing.lines() {
-            if let Ok(bytes) = Vec::from_hex(&f) {
+            if let Ok(bytes) = Vec::from_hex(f) {
                 out.push(bytes.into_boxed_slice());
             } else {
                 eprintln!("WARNING: ignoring unexpected files name: {}", f);

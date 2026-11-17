@@ -18,8 +18,6 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::str;
 
-use chrono;
-use diesel;
 use diesel::connection::TransactionManager;
 use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
@@ -79,7 +77,7 @@ impl Entry {
         Entry {
             node_id: None,
             parent_id: parent,
-            data: data,
+            data,
             info: Info::new(name, meta),
         }
     }
@@ -142,7 +140,7 @@ impl Info {
         let accessed = meta.and_then(|m| m.accessed().ok()).map(system_time_secs);
 
         Info {
-            name: name,
+            name,
 
             created_ts_secs: created,
             modified_ts_secs: modified,
@@ -169,15 +167,15 @@ impl Info {
 
         models::FileInfo {
             name: self.name.clone(),
-            created_ts: self.created_ts_secs.unwrap_or(0) as i64,
-            modified_ts: self.modified_ts_secs.unwrap_or(0) as i64,
-            accessed_ts: self.accessed_ts_secs.unwrap_or(0) as i64,
+            created_ts: self.created_ts_secs.unwrap_or(0),
+            modified_ts: self.modified_ts_secs.unwrap_or(0),
+            accessed_ts: self.accessed_ts_secs.unwrap_or(0),
             permissions: match self.permissions {
                 None => models::Permissions::None,
                 Some(ref perm) => models::Permissions::Mode(perm.mode()),
             },
             byte_length: self.byte_length.unwrap_or(0) as i64,
-            owner: owner,
+            owner,
             snapshot_ts_utc: self.snapshot_ts_utc,
         }
     }
@@ -197,7 +195,7 @@ impl InternalKeyIndex {
         let conn = SqliteConnection::establish(path)?;
 
         let mut ki = InternalKeyIndex {
-            conn: conn,
+            conn,
             flush_timer: PeriodicTimer::new(Duration::from_secs(5)),
         };
 
@@ -208,7 +206,7 @@ impl InternalKeyIndex {
 
         ki.conn
             .run_pending_migrations(MIGRATIONS)
-            .map_err(|e| DieselError::SqlMigration(e))?;
+            .map_err(DieselError::Migration)?;
 
         <SqliteConnection as Connection>::TransactionManager::begin_transaction(&mut ki.conn)?;
 
@@ -274,7 +272,7 @@ impl InternalKeyIndex {
         {
             let link_path = match &entry.data {
                 &Data::DirPlaceholder | &Data::FilePlaceholder => None,
-                &Data::Symlink(ref path) => path.to_str(),
+                Data::Symlink(path) => path.to_str(),
                 &Data::FileHash(_) => unreachable!("Unexpected FileHash"),
             };
             assert!(!(link_path.is_some() && hash_ref_opt.is_some()));
@@ -284,9 +282,9 @@ impl InternalKeyIndex {
                 node_id: entry.node_id.map(|i| i as i64),
                 committed: false,
                 tag: Tag::Reserved as i64,
-                created: entry.info.created_ts_secs.map(|u| u as i64),
-                modified: entry.info.modified_ts_secs.map(|u| u as i64),
-                accessed: entry.info.accessed_ts_secs.map(|u| u as i64),
+                created: entry.info.created_ts_secs,
+                modified: entry.info.modified_ts_secs,
+                accessed: entry.info.accessed_ts_secs,
                 permissions: entry.info.permissions.as_ref().map(|p| p.mode() as i64),
                 group_id: entry.info.group_id.map(|u| u as i64),
                 user_id: entry.info.user_id.map(|u| u as i64),
@@ -342,7 +340,7 @@ impl InternalKeyIndex {
                 parent_id: node.parent_id.map(|p| p as u64),
                 data: data
                     .hash
-                    .map(|h| Data::FileHash(h))
+                    .map(Data::FileHash)
                     .unwrap_or(Data::DirPlaceholder),
 
                 info: Info {
@@ -420,7 +418,7 @@ impl InternalKeyIndex {
                     },
                     data.hash_ref
                         .as_mut()
-                        .map(|p| crate::hash::tree::HashRef::from_bytes(&mut &p[..]).unwrap()),
+                        .map(|p| crate::hash::tree::HashRef::from_bytes(&p[..]).unwrap()),
                 )
             })
             .collect())

@@ -81,7 +81,7 @@ impl FileReader {
         if size <= avail {
             Some(Cow::Borrowed(self.take(offset, size)))
         } else {
-            let mut buf = Vec::with_capacity(size as usize);
+            let mut buf = Vec::with_capacity(size);
             buf.extend_from_slice(self.take(offset, avail));
             if let Some(slice) = self.read(offset + (avail as u64), size - avail) {
                 buf.extend_from_slice(&slice);
@@ -139,7 +139,7 @@ impl<B: StoreBackend> Filesystem<B> {
                         let name: FileName = name.as_os_str().to_owned().into();
                         if let Some((entry, content)) = listing
                             .into_iter()
-                            .find(|&(ref e, ref _c)| e.info.name == name)
+                            .find(|(e, _c)| e.info.name == name)
                         {
                             match content {
                                 Content::Data(..) | Content::Link(..) => {
@@ -166,6 +166,6 @@ impl<B: StoreBackend> Filesystem<B> {
 
     pub fn ls_ref(&mut self, hash_ref: HashRef) -> Result<Vec<(Entry, Content)>, HatError> {
         let backend = self.hat.hash_backend();
-        Ok(hat::Family::<B>::fetch_dir_data(hash_ref, backend)?)
+        hat::Family::<B>::fetch_dir_data(hash_ref, backend)
     }
 }

@@ -85,6 +85,7 @@ impl<B: StoreBackend> HashTreeReaderInitializer<B> {
 }
 
 // Public structs
+#[allow(clippy::large_enum_variant)]
 pub enum Msg<IT> {
     /// Insert a key into the index. If this key has associated data a "chunk-iterator creator"
     /// can be passed along with it. If the data turns out to be unreadable, this iterator proc
@@ -263,12 +264,12 @@ impl<IT: io::Read, B: StoreBackend> MsgHandler<Msg<IT>, Reply<B>> for Store<B> {
                 if let Some(parent) = clean_parent_opt {
                     self.index.cleanup_unused(parent)?;
                 }
-                return reply_ok!(Reply::Ok);
+                reply_ok!(Reply::Ok)
             }
 
             Msg::ResetEntryTags => {
                 self.index.reset_entry_tags()?;
-                return reply_ok!(Reply::Ok);
+                reply_ok!(Reply::Ok)
             }
 
             Msg::Insert(insert_entry, chunk_it_opt) => {
@@ -347,9 +348,7 @@ impl<IT: io::Read, B: StoreBackend> MsgHandler<Msg<IT>, Reply<B>> for Store<B> {
                 }
 
                 // Warn the user if we did not read the expected size:
-                entry.info.byte_length.map(|s| {
-                    file_size_warning(entry.info.name.utf8(), s, file_len);
-                });
+                if let Some(s) = entry.info.byte_length { file_size_warning(entry.info.name.utf8(), s, file_len); }
 
                 let mut entry = entry;
                 entry.info.byte_length = Some(file_len);
@@ -361,7 +360,7 @@ impl<IT: io::Read, B: StoreBackend> MsgHandler<Msg<IT>, Reply<B>> for Store<B> {
                 debug!("Insert entry: {:?}", entry.info.name);
                 let entry = self.index.insert(entry, Some(&hash_ref))?;
 
-                return reply_ok!(Reply::Id(entry.node_id.unwrap()));
+                reply_ok!(Reply::Id(entry.node_id.unwrap()))
             }
         }
     }

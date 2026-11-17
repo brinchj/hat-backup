@@ -65,6 +65,11 @@ impl MemoryBackend {
     }
 
     #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[cfg(test)]
     pub fn keys(&self) -> Vec<Vec<u8>> {
         self.files.lock().unwrap().keys().cloned().collect()
     }
@@ -72,6 +77,12 @@ impl MemoryBackend {
     #[cfg(test)]
     pub fn remove(&self, name: &[u8]) {
         self.files.lock().unwrap().remove(name);
+    }
+}
+
+impl Default for MemoryBackend {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

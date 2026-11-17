@@ -39,24 +39,28 @@ impl<P: Clone + Ord, K: Clone + Ord, V> UniquePriorityQueue<P, K, V> {
         self.priority.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.priority.is_empty()
+    }
+
     pub fn find_key(&self, k: &K) -> Option<&P> {
         self.key_to_priority.get(k)
     }
 
-    pub fn put_value(&mut self, p: P, k: K, v: V) -> Result<(), ()> {
-        if self.priority.get(&p).is_some() || self.key_to_priority.contains_key(&k) {
-            return Err(());
+    /// Insert `(p, k, v)`. Returns `false` if priority or key already exists.
+    pub fn put_value(&mut self, p: P, k: K, v: V) -> bool {
+        if self.priority.contains_key(&p) || self.key_to_priority.contains_key(&k) {
+            return false;
         }
         self.priority
             .insert_unique(p.clone(), (Status::Pending, k.clone(), v));
         self.key_to_priority.insert(k, p);
-
-        Ok(())
+        true
     }
 
     pub fn find_value_of_key(&self, k: &K) -> Option<&V> {
         let prio_opt = self.key_to_priority.get(k);
-        prio_opt.and_then(|prio| self.priority.get(prio).map(|&(_, _, ref v_opt)| v_opt))
+        prio_opt.and_then(|prio| self.priority.get(prio).map(|(_, _, v_opt)| v_opt))
     }
 
     pub fn find_mut_value_of_priority(&mut self, p: &P) -> Option<&mut V> {
@@ -94,6 +98,12 @@ impl<P: Clone + Ord, K: Clone + Ord, V> UniquePriorityQueue<P, K, V> {
     }
 }
 
+impl<P: Clone + Ord, K: Clone + Ord, V> Default for UniquePriorityQueue<P, K, V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use quickcheck;
@@ -105,7 +115,7 @@ mod tests {
     fn insert1() {
         fn prop(priority: i8, key: isize, value: i8) -> bool {
             let mut upq = UniquePriorityQueue::new();
-            assert!(upq.put_value(priority, key, value).is_ok());
+            assert!(upq.put_value(priority, key, value));
             assert_eq!(upq.pop_min_if_complete(), None);
             upq.set_ready(&priority);
             assert_eq!(upq.pop_min_if_complete(), Some((priority, key, value)));
@@ -123,20 +133,17 @@ mod tests {
 
             // Insert priorities
             let mut in_use = BTreeMap::new();
-            for &(ref p, ref k, ref v) in keys.iter() {
-                match upq.put_value(*p, *k, *v) {
-                    Err(()) => {} // Already reserved this priority or key; skip
-                    Ok(()) => {
-                        in_use.insert(*p, (*k, *v));
-                        assert_eq!(upq.find_key(k), Some(p));
-                        assert_eq!(upq.find_value_of_key(k), Some(v));
-                    }
+            for (p, k, v) in keys.iter() {
+                if upq.put_value(*p, *k, *v) {
+                    in_use.insert(*p, (*k, *v));
+                    assert_eq!(upq.find_key(k), Some(p));
+                    assert_eq!(upq.find_value_of_key(k), Some(v));
                 }
             }
             assert_eq!(upq.pop_min_if_complete(), None);
 
             // Commit all
-            for (p, _) in in_use.iter() {
+            for p in in_use.keys() {
                 upq.set_ready(p);
             }
 

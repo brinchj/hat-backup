@@ -187,13 +187,13 @@ fn parse_dir_data(chunk: &[u8], out: &mut Vec<walker::FileEntry>) -> Result<(), 
 
         let entry = key::Entry {
             info: From::from(f.info),
-            data: data,
+            data,
             parent_id: None,
             node_id: Some(f.id),
         };
 
         out.push(walker::FileEntry {
-            hash_ref: hash_ref,
+            hash_ref,
             meta: entry,
         });
     }
@@ -461,7 +461,7 @@ impl<B: StoreBackend> Family<B> {
             if files.is_empty() {
                 break;
             } else {
-                tree.append(&cbor_util::to_vec(&models::Files { files: files }).unwrap()[..])?;
+                tree.append(&cbor_util::to_vec(&models::Files { files }).unwrap()[..])?;
             }
         }
 

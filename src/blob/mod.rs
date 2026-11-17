@@ -29,6 +29,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use crate::tags;
 
+#[allow(clippy::module_inception)]
 mod blob;
 mod chunk;
 mod index;
@@ -94,7 +95,7 @@ impl<B: StoreBackend> StoreInner<B> {
     ) -> StoreInner<B> {
         let mut bs = StoreInner {
             keys: keys.clone(),
-            backend: backend,
+            backend,
             blob_index: index,
             blob_desc: Default::default(),
             blob_refs: Vec::new(),
@@ -110,7 +111,7 @@ impl<B: StoreBackend> StoreInner<B> {
     }
 
     fn flush(&mut self) {
-        let ct = match self.blob.to_ciphertext() {
+        let ct = match self.blob.finish() {
             None => return,
             Some(ct) => ct,
         };
@@ -141,9 +142,9 @@ impl<B: StoreBackend> StoreInner<B> {
         callback: Box<dyn FnOnce() + Send>,
     ) -> HashRef {
         let mut href = HashRef {
-            hash: hash,
-            node: node,
-            leaf: leaf,
+            hash,
+            node,
+            leaf,
             info: info.cloned(),
             persistent_ref: ChunkRef {
                 blob_id: Some(0),
@@ -158,7 +159,7 @@ impl<B: StoreBackend> StoreInner<B> {
 
         if chunk.is_empty() {
             // We are not going to store an empty chunk, so commit it ASAP.
-            thread::spawn(move || callback());
+            thread::spawn(callback);
         } else {
             href.persistent_ref.blob_id = Some(self.blob_desc.id);
             href.persistent_ref.blob_name = self.blob_desc.name.clone();
@@ -210,7 +211,7 @@ impl<B: StoreBackend> StoreInner<B> {
             Some(ct) => {
                 let hrefs = BlobReader::new(self.keys.clone(), crypto::CipherTextRef::new(&ct[..]))?
                     .refs()?;
-                if hrefs.len() == 0 {
+                if hrefs.is_empty() {
                     Ok(None)
                 } else {
                     assert_eq!(&blob.name[..], &hrefs[0].persistent_ref.blob_name[..]);
@@ -222,11 +223,9 @@ impl<B: StoreBackend> StoreInner<B> {
 
     fn recover(&mut self) -> Result<(), String> {
         // Blob names are sealed i64 ids (always longer than the old literal "root" marker).
-        self.backend
-            .list()?
-            .into_iter()
-            .map(|b| self.blob_index.recover(b.into_vec()))
-            .last();
+        for b in self.backend.list()? {
+            self.blob_index.recover(b.into_vec());
+        }
         Ok(())
     }
 
@@ -321,7 +320,7 @@ impl<B: StoreBackend> BlobStore<B> {
     }
 
     pub fn find(&self, name: &[u8]) -> Option<BlobDesc> {
-        if &name[..] == [0] {
+        if name == [0] {
             Some(BlobDesc {
                 name: vec![0],
                 id: 0,

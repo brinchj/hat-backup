@@ -32,7 +32,7 @@ impl<B: gc::GcBackend> gc::Gc<B> for GcRc<B> {
     where
         B: gc::GcBackend,
     {
-        GcRc { backend: backend }
+        GcRc { backend }
     }
 
     fn is_exact() -> bool {
@@ -55,7 +55,7 @@ impl<B: gc::GcBackend> gc::Gc<B> for GcRc<B> {
                 .update_data(r, DATA_FAMILY, move |GcData { num, bytes }| {
                     Some(GcData {
                         num: num + 1,
-                        bytes: bytes,
+                        bytes,
                     })
                 })?;
         }
@@ -100,7 +100,7 @@ impl<B: gc::GcBackend> gc::Gc<B> for GcRc<B> {
                 .update_data(r, DATA_FAMILY, move |GcData { num, bytes }| {
                     Some(GcData {
                         num: num - 1,
-                        bytes: bytes,
+                        bytes,
                     })
                 })?;
         }

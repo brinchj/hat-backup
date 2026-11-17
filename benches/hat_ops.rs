@@ -175,7 +175,7 @@ fn write_filesystem_fixture(root: &Path, salt: u64) -> FsTreeStats {
     }
     for i in 0..40u64 {
         let mut body = format!("note-{salt}-{i}\n").into_bytes();
-        body.extend(std::iter::repeat((i as u8).wrapping_add(salt as u8)).take(64));
+        body.extend(std::iter::repeat_n((i as u8).wrapping_add(salt as u8), 64));
         write_file(
             &deep.join(format!("note_{i}.txt")),
             &body,

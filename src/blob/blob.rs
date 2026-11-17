@@ -33,17 +33,17 @@ pub struct Blob {
 impl Blob {
     pub fn new(keys: Arc<crypto::keys::Keeper>, max_len: usize) -> Blob {
         Blob {
-            keys: keys,
+            keys,
             access_key: crypto::FixedKey::new_access_partial_key(),
             chunks: CipherText::empty(),
             footer: Vec::with_capacity(max_len / 2),
             overhead: crypto::sealed::desc::overhead() + crypto::authed::hash::DIGESTBYTES as usize,
-            max_len: max_len,
+            max_len,
         }
     }
 
     pub fn upperbound_len(&self) -> usize {
-        if self.chunks.len() == 0 {
+        if self.chunks.is_empty() {
             0
         } else {
             self.chunks.len() + self.footer.len() + self.overhead
@@ -51,15 +51,15 @@ impl Blob {
     }
 
     #[cfg_attr(feature = "flame_it", flame)]
-    pub fn try_append(&mut self, chunk: &[u8], mut href: &mut HashRef) -> Result<(), ()> {
-        let ct = crypto::RefKey::seal(&mut href, &self.access_key, PlainTextRef::new(chunk));
+    pub fn try_append(&mut self, chunk: &[u8], href: &mut HashRef) -> Result<(), ()> {
+        let ct = crypto::RefKey::seal(href, &self.access_key, PlainTextRef::new(chunk));
 
         href.persistent_ref.offset = self.chunks.len();
         let mut href_bytes = href.as_bytes();
         assert!(href_bytes.len() < 65535);
 
         if self.upperbound_len() + 1 + href_bytes.len() + ct.len() >= self.max_len {
-            if self.chunks.len() == 0 {
+            if self.chunks.is_empty() {
                 panic!(
                     "Can never fit chunk of size {} in blob of size {}",
                     chunk.len(),
@@ -80,8 +80,8 @@ impl Blob {
     }
 
     #[cfg_attr(feature = "flame_it", flame)]
-    pub fn to_ciphertext(&mut self) -> Option<CipherText> {
-        if self.chunks.len() == 0 {
+    pub fn finish(&mut self) -> Option<CipherText> {
+        if self.chunks.is_empty() {
             return None;
         }
 
@@ -94,7 +94,7 @@ impl Blob {
         let footer_overhead = self.footer.len() + self.overhead;
         let footer = crypto::FixedKey::new(&self.keys)
             .seal(&access_key, PlainTextRef::new(&self.footer[..]));
-        self.footer.truncate(0);
+        self.footer.clear();
 
         assert!(self.chunks.len() + footer_overhead <= self.max_len);
 
@@ -131,8 +131,8 @@ impl BlobReader {
         let (access_key, footer_ct, rest) = crypto::FixedKey::new(&keys).unseal_access_ctx(rest)?;
 
         Ok(BlobReader {
-            keys: keys,
-            access_key: access_key,
+            keys,
+            access_key,
             footer_ct: footer_ct.to_vec(),
             blob: rest.to_owned(),
         })
@@ -146,11 +146,11 @@ impl BlobReader {
         let mut footer_pos = footer_vec.as_bytes();
 
         let mut hrefs = Vec::new();
-        while footer_pos.len() > 0 {
+        while !footer_pos.is_empty() {
             let len = footer_pos[0] as usize + 256 * (footer_pos[1] as usize);
             assert!(footer_pos.len() > len);
 
-            hrefs.push(HashRef::from_bytes(&mut &footer_pos[2..2 + len])?);
+            hrefs.push(HashRef::from_bytes(&footer_pos[2..2 + len])?);
             footer_pos = &footer_pos[len + 2..];
         }
 

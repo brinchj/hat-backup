@@ -42,44 +42,44 @@ impl InternalBlobIndex {
         index: Arc<db::Index>,
     ) -> Result<InternalBlobIndex, DieselError> {
         Ok(InternalBlobIndex {
-            index: index,
-            keys: keys,
+            index,
+            keys,
         })
     }
 
     fn name_of_id(&self, id: i64) -> Vec<u8> {
-        return crypto::FixedKey::new(&self.keys)
+        crypto::FixedKey::new(&self.keys)
             .seal_blob_name(crypto::PlainText::from_i64(id).as_ref())
-            .to_vec();
+            .to_vec()
     }
 
     fn id_of_name(&self, name: &[u8]) -> Result<i64, String> {
-        return Ok(crypto::FixedKey::new(&self.keys)
+        Ok(crypto::FixedKey::new(&self.keys)
             .unseal_blob_name(crypto::CipherTextRef::new(name))
             .as_ref()
             .read_i64()
-            .unwrap());
+            .unwrap())
     }
 
     fn new_blob_desc(&self) -> BlobDesc {
         let id = self.index.lock().blob_next_id();
         BlobDesc {
             name: self.name_of_id(id),
-            id: id,
+            id,
         }
     }
 
     fn recover(&self, name: Vec<u8>) -> BlobDesc {
         let wanted_id = self.id_of_name(&name).unwrap();
-        if let Some(id) = { self.index.lock().blob_id_from_name(&name[..]) } {
+        if let Some(id) = self.index.lock().blob_id_from_name(&name[..]) {
             assert_eq!(id, wanted_id);
 
             // Blob exists.
-            return BlobDesc { name: name, id: id };
+            return BlobDesc { name, id };
         }
 
         let blob = BlobDesc {
-            name: name,
+            name,
             id: wanted_id,
         };
         self.index.lock().blob_in_air(&blob);
@@ -98,7 +98,7 @@ impl BlobIndex {
         keys: Arc<crypto::keys::Keeper>,
         index: Arc<db::Index>,
     ) -> Result<BlobIndex, DieselError> {
-        InternalBlobIndex::new(keys, index).map(|bi| BlobIndex(bi))
+        InternalBlobIndex::new(keys, index).map(BlobIndex)
     }
 
     /// Reserve an internal `BlobDesc` for a new blob.
@@ -126,14 +126,10 @@ impl BlobIndex {
     }
 
     pub fn find(&self, name: &[u8]) -> Option<BlobDesc> {
-        if let Some(id) = self.0.index.lock().blob_id_from_name(&name) {
-            Some(BlobDesc {
+        self.0.index.lock().blob_id_from_name(name).map(|id| BlobDesc {
                 name: name.to_vec(),
-                id: id,
+                id,
             })
-        } else {
-            None
-        }
     }
 
     pub fn tag(&self, blob: &BlobDesc, tag: tags::Tag) {

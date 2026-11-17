@@ -44,9 +44,9 @@ impl<B: StoreBackend> HashStoreBackend<B> {
         keys: Arc<crypto::keys::Keeper>,
     ) -> HashStoreBackend<B> {
         HashStoreBackend {
-            hash_index: hash_index,
-            blob_store: blob_store,
-            keys: keys,
+            hash_index,
+            blob_store,
+            keys,
         }
     }
 }
@@ -57,7 +57,7 @@ impl<B: StoreBackend> HashTreeBackend for HashStoreBackend<B> {
     fn fetch_chunk(&self, href: &hash::tree::HashRef) -> Result<Option<Vec<u8>>, MsgError> {
         assert!(!href.hash.bytes.is_empty());
 
-        Ok(self.blob_store.retrieve(&href)?.and_then(|data| {
+        Ok(self.blob_store.retrieve(href)?.and_then(|data| {
             let actual_hash = hash::Hash::new(&self.keys, href.node, href.leaf, &data[..]);
             if href.hash == actual_hash {
                 Some(data)
@@ -83,10 +83,7 @@ impl<B: StoreBackend> HashTreeBackend for HashStoreBackend<B> {
     }
 
     fn fetch_childs(&self, hash: &hash::Hash) -> Option<Vec<u64>> {
-        match self.hash_index.fetch_childs(hash) {
-            Some(p) => p, // done
-            None => None, // done
-        }
+        self.hash_index.fetch_childs(hash).unwrap_or_default()
     }
 
     fn insert_chunk(
@@ -99,9 +96,9 @@ impl<B: StoreBackend> HashTreeBackend for HashStoreBackend<B> {
     ) -> Result<(u64, hash::tree::HashRef), MsgError> {
         let mut hash_entry = hash::Entry {
             hash: hash::Hash::new(&self.keys, node, leaf, chunk),
-            node: node,
-            leaf: leaf,
-            childs: childs,
+            node,
+            leaf,
+            childs,
             persistent_ref: None,
         };
 
@@ -123,8 +120,8 @@ impl<B: StoreBackend> HashTreeBackend for HashStoreBackend<B> {
                     id,
                     hash::tree::HashRef {
                         hash: hash_entry.hash,
-                        node: node,
-                        leaf: leaf,
+                        node,
+                        leaf,
                         info: None,
                         persistent_ref: pref,
                     },

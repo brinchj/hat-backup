@@ -36,7 +36,7 @@ fn kill_after_full_commit_reopen_ok() {
     let barrier = sb.root.path().join("barrier");
 
     let mut child = worker()
-        .args(&[
+        .args([
             "done-barrier",
             sb.repo.to_str().unwrap(),
             sb.backend.to_str().unwrap(),
@@ -75,7 +75,7 @@ fn kill_mid_commit_at(fault: &str) {
     let mut child = worker()
         .env("HAT_TEST_FAULT", fault)
         .env("HAT_TEST_BARRIER", &barrier)
-        .args(&[
+        .args([
             "commit",
             sb.repo.to_str().unwrap(),
             sb.backend.to_str().unwrap(),
@@ -141,7 +141,7 @@ fn kill_mid_delete_resume_then_gc() {
     let mut child = worker()
         .env("HAT_TEST_FAULT", "AfterGcDeregister")
         .env("HAT_TEST_BARRIER", &barrier)
-        .args(&[
+        .args([
             "delete",
             sb.repo.to_str().unwrap(),
             sb.backend.to_str().unwrap(),

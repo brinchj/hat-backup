@@ -33,7 +33,7 @@ use std::str;
 use std::sync::{mpsc, Arc};
 use crate::tags;
 use crate::util::Process;
-use void::Void;
+use std::convert::Infallible;
 
 mod family;
 mod insert_path_handler;
@@ -50,7 +50,7 @@ pub struct GcBackend {
 }
 
 impl gc::GcBackend for GcBackend {
-    type Err = Void;
+    type Err = Infallible;
 
     fn get_data(&self, hash_id: gc::Id, family_id: gc::Id) -> Result<db::GcData, Self::Err> {
         Ok(self.hash_index.read_gc_data(hash_id, family_id))
@@ -87,7 +87,7 @@ impl gc::GcBackend for GcBackend {
     }
 
     fn reverse_refs(&self, hash_id: gc::Id) -> Result<Vec<gc::Id>, Self::Err> {
-        // Err = Void: missing hash is a hard invariant failure.
+        // Err = Infallible: missing hash is a hard invariant failure.
         let entry = self
             .hash_index
             .get_hash(hash_id)
@@ -100,8 +100,9 @@ impl gc::GcBackend for GcBackend {
         self.hash_index
             .get_ids_by_tag(tag as u64)
             .iter()
-            .map(|i| sender.send(*i))
-            .last();
+            .for_each(|i| {
+                let _ = sender.send(*i);
+            });
 
         Ok(receiver)
     }
@@ -191,10 +192,7 @@ impl<'a, B: StoreBackend> SnapshotLister<'a, B> {
     fn fetch(&mut self, hash_ref: hash::tree::HashRef) -> Result<(), HatError> {
         let res = family::Family::<B>::fetch_dir_data(hash_ref, self.backend.clone())?;
         for (_entry, hash_ref) in res.into_iter().rev() {
-            let is_dir = match &hash_ref {
-                &walker::Content::Dir(_) => true,
-                _ => false,
-            };
+            let is_dir = matches!(hash_ref, walker::Content::Dir(_));
             self.queue.push((hash_ref, is_dir));
         }
         Ok(())
@@ -207,7 +205,7 @@ impl<'a, B: StoreBackend> Iterator for SnapshotLister<'a, B> {
         match self.queue.pop() {
             Some((ref hash_ref, ref fetch_dir)) if *fetch_dir => {
                 match hash_ref {
-                    &walker::Content::Dir(ref href) => {
+                    walker::Content::Dir(href) => {
                         if let Err(e) = self.fetch(href.clone()) {
                             // We yield the error now, but save the hash so
                             // we can output it next time (without recursion)
@@ -230,7 +228,7 @@ fn list_snapshot<'a, B: StoreBackend>(
     dir_hash: hash::tree::HashRef,
 ) -> SnapshotLister<'a, B> {
     SnapshotLister {
-        backend: backend,
+        backend,
         queue: vec![(walker::Content::Dir(dir_hash), true)],
     }
 }
@@ -267,17 +265,17 @@ impl<B: StoreBackend> HatRc<B> {
         let gc = gc::Gc::new(gc_backend);
 
         let mut hat = Hat {
-            keys: keys,
+            keys,
             repository_root: Some(repository_root),
             families: vec![],
             db: db_p,
             snapshot_index: si_p,
             hash_index: hi_p.clone(),
-            backend: backend,
+            backend,
             blob_index: bi_p,
             blob_store: bs_p,
             blob_max_size: max_blob_size,
-            gc: gc,
+            gc,
             commit_fault: None,
             delete_fault: None,
         };
@@ -310,7 +308,7 @@ impl<B: StoreBackend> HatRc<B> {
         let gc = gc::Gc::new(gc_backend);
 
         let mut hat = Hat {
-            keys: keys,
+            keys,
             repository_root: None,
             families: vec![],
             db: db_p,
@@ -319,8 +317,8 @@ impl<B: StoreBackend> HatRc<B> {
             blob_index: bi_p,
             blob_store: bs_p,
             blob_max_size: max_blob_size,
-            backend: backend,
-            gc: gc,
+            backend,
+            gc,
             commit_fault: None,
             delete_fault: None,
         };
@@ -602,7 +600,7 @@ impl<B: StoreBackend> HatRc<B> {
         };
 
         self.snapshot_index.recover(
-            next_id as u64,
+            next_id,
             &synthetic_roots_family(),
             max_created,
             "",
@@ -639,22 +637,17 @@ impl<B: StoreBackend> HatRc<B> {
                     persistent_ref: Some(href.persistent_ref),
                     node: href.node,
                     leaf: href.leaf,
-                    childs: childs,
+                    childs,
                 }
             }
 
             // Convert child hashes to child IDs.
-            let child_ids = match node.childs {
-                Some(ref hs) => Some(
-                    hs.iter()
+            let child_ids = node.childs.as_ref().map(|hs| hs.iter()
                         .map(|h| match hashes.reserve(&entry(h.clone(), None)) {
                             hash::ReserveResult::HashKnown(id)
                             | hash::ReserveResult::ReserveOk(id) => id,
                         })
-                        .collect(),
-                ),
-                None => None,
-            };
+                        .collect());
 
             // Now insert the hash information if needed.
             let entry = hash::Entry {
@@ -752,7 +745,7 @@ impl<B: StoreBackend> HatRc<B> {
                                 .hash_ref
                                 .ok_or("Recovered hash tree has no root hash")?;
                             let hash_ref =
-                                hash::tree::HashRef::from_bytes(&mut &hash_ref_bytes[..])?;
+                                hash::tree::HashRef::from_bytes(&hash_ref_bytes[..])?;
                             self.recover_snapshot(snapshot.info, &hash_ref)?
                         }
                         (hash, status) => {
@@ -962,6 +955,7 @@ impl<B: StoreBackend> HatRc<B> {
         self.checkout_dir_ref(&family, &mut output_dir, dir_ref)
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn checkout_dir_ref(
         &self,
         family: &Family<B>,
@@ -1001,7 +995,7 @@ impl<B: StoreBackend> HatRc<B> {
             }
 
             if let (Some(m), Some(a)) = (entry.info.modified_ts_secs, entry.info.accessed_ts_secs) {
-                crate::util::set_times_nofollow(&output, a, m)?;
+                crate::util::set_times_nofollow(output, a, m)?;
             }
 
             output.pop();
@@ -1127,7 +1121,8 @@ impl<B: StoreBackend> HatRc<B> {
 
         self.snapshot_index.flush();
 
-        Ok(self.flush_snapshot_index())
+        self.flush_snapshot_index();
+        Ok(())
     }
 
     pub fn gc(&mut self) -> Result<(u64, u64), HatError> {

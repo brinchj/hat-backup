@@ -106,7 +106,7 @@ where
             }
         });
 
-        Process { sender: sender }
+        Process { sender }
     }
 
     /// Synchronous send.

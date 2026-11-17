@@ -33,9 +33,9 @@ mod hat_error {
     use crate::blob;
     use crate::key;
     use std::borrow::Cow;
+    use std::convert::Infallible;
     use std::sync::mpsc;
     use std::{io, str};
-    use void;
 
     #[derive(Debug, thiserror::Error)]
     pub enum HatError {
@@ -71,9 +71,9 @@ mod hat_error {
         }
     }
 
-    impl From<void::Void> for HatError {
-        fn from(val: void::Void) -> HatError {
-            void::unreachable(val)
+    impl From<Infallible> for HatError {
+        fn from(val: Infallible) -> HatError {
+            match val {}
         }
     }
 
@@ -85,22 +85,19 @@ mod hat_error {
 }
 
 mod diesel_error {
-    use diesel;
-    use diesel_migrations;
-
     #[derive(Debug, thiserror::Error)]
     pub enum DieselError {
         #[error(transparent)]
-        SqlConnection(#[from] diesel::ConnectionError),
+        Connection(#[from] diesel::ConnectionError),
         #[error(transparent)]
-        SqlMigration(#[from] Box<dyn std::error::Error + Send + Sync>),
+        Migration(#[from] Box<dyn std::error::Error + Send + Sync>),
         #[error(transparent)]
-        SqlExecute(#[from] diesel::result::Error),
+        Execute(#[from] diesel::result::Error),
     }
 
     impl From<diesel_migrations::MigrationError> for DieselError {
         fn from(e: diesel_migrations::MigrationError) -> Self {
-            DieselError::SqlMigration(Box::new(e))
+            DieselError::Migration(Box::new(e))
         }
     }
 }

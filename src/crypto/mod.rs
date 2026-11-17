@@ -58,8 +58,8 @@ pub mod authed {
             let mut mixed_key = [0u8; super::hash::DIGESTBYTES as usize];
             let salt: &[u8; 16] = b"mixkey~~mixkey~~";
             crate::crypto::keys::keyed_fingerprint(
-                &access_key.unsecure()[..],
-                &other_key.unsecure()[..],
+                access_key.unsecure(),
+                other_key.unsecure(),
                 salt,
                 &mut mixed_key[..],
             );
@@ -122,8 +122,11 @@ impl<'a> PlainTextRef<'a> {
     pub fn len(&self) -> usize {
         self.0.len()
     }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
     pub fn read_i64(&self) -> Result<i64, io::Error> {
-        return (&self.0[..]).read_i64::<LittleEndian>();
+        (&self.0[..]).read_i64::<LittleEndian>()
     }
     pub fn slice(&self, from: usize, to: usize) -> PlainTextRef<'a> {
         PlainTextRef(&self.0[from..to])
@@ -163,6 +166,9 @@ impl PlainText {
     pub fn len(&self) -> usize {
         self.0.len()
     }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
     pub fn as_ref(&self) -> PlainTextRef<'_> {
         PlainTextRef::new(&self.0[..])
     }
@@ -175,7 +181,7 @@ impl PlainText {
     pub fn from_i64(n: i64) -> Self {
         let mut buf = PlainText::new(Vec::with_capacity(8));
         buf.0.write_i64::<LittleEndian>(n).unwrap();
-        return buf;
+        buf
     }
 }
 
@@ -190,7 +196,7 @@ impl CipherText {
         let len = ct.len();
         CipherText {
             chunks: vec![ct],
-            len: len,
+            len,
         }
     }
     pub fn append(&mut self, mut other: CipherText) {
@@ -207,6 +213,9 @@ impl CipherText {
     }
     pub fn len(&self) -> usize {
         self.len
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
     }
     pub fn random_pad_upto(&mut self, final_len: usize) {
         let len = self.len;
@@ -267,7 +276,7 @@ impl<'a> CipherTextRef<'a> {
         CipherTextRef(bytes)
     }
     pub fn as_ref(&self) -> CipherTextRef<'_> {
-        CipherTextRef(&self.0[..])
+        CipherTextRef(self.0)
     }
     pub fn to_owned(&self) -> CipherText {
         CipherText::new(self.0.to_vec())
@@ -277,6 +286,9 @@ impl<'a> CipherTextRef<'a> {
     }
     pub fn len(&self) -> usize {
         self.0.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
     pub fn split_from_right(
         &self,
@@ -299,7 +311,7 @@ impl<'a> CipherTextRef<'a> {
     ) -> Result<PlainText, CryptoError> {
         Ok(PlainText::new(keys::Keeper::symmetric_unlock(
             key.unsecure(),
-            &self.0,
+            self.0,
             additional_data,
             nonce.unsecure(),
         )))
@@ -309,7 +321,7 @@ impl<'a> CipherTextRef<'a> {
         let (rest, want) = self.split_from_right(authed::hash::DIGESTBYTES as usize)?;
 
         let mut got = vec![0u8; authed::hash::DIGESTBYTES as usize];
-        keys.blob_authentication(&rest.0[..], &mut got[..]);
+        keys.blob_authentication(rest.0, &mut got[..]);
 
         if want.0 == &got[..] {
             Ok(rest)
@@ -331,7 +343,7 @@ impl RefKey {
         href.persistent_ref.key = Some(wrap_key(partial_key.clone()));
 
         let nonce = authed::desc::Nonce::from(&href.hash.bytes[..authed::desc::NONCEBYTES]);
-        let key = crate::crypto::authed::imp::mix_keys(&access_key, &partial_key);
+        let key = crate::crypto::authed::imp::mix_keys(access_key, &partial_key);
 
         let additional_data = keys::compute_salt(href.node, href.leaf);
         let ct = pt.to_ciphertext(&additional_data, &nonce, &key);
@@ -357,7 +369,7 @@ impl RefKey {
                 let nonce = authed::desc::Nonce::from(&href.hash.bytes[..authed::desc::NONCEBYTES]);
 
                 let additional_data = keys::compute_salt(href.node, href.leaf);
-                let real_key = crate::crypto::authed::imp::mix_keys(access_key, &key);
+                let real_key = crate::crypto::authed::imp::mix_keys(access_key, key);
                 Ok(ct.to_plaintext(&additional_data, &nonce, &real_key)?)
             }
             _ => Err("crypto read failed: unseal".into()),
@@ -371,7 +383,7 @@ pub struct FixedKey<'k> {
 
 impl<'k> FixedKey<'k> {
     pub fn new(keeper: &'k keys::Keeper) -> FixedKey<'k> {
-        FixedKey { keeper: keeper }
+        FixedKey { keeper }
     }
 
     pub fn seal_blob_name(&self, pt: PlainTextRef) -> CipherText {

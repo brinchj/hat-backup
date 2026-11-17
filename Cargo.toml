@@ -3,7 +3,7 @@ authors = ["Johan Nielsen <sejr@google.com>"]
 name = "hat-backup"
 version = "0.0.1-pre"
 edition = "2021"
-rust-version = "1.74"
+rust-version = "1.99"
 
 [[bin]]
 name = "hatbin"
@@ -17,19 +17,16 @@ ciborium = "0.2"
 diesel = { version = "2", default-features = false, features = ["sqlite", "chrono", "returning_clauses_for_sqlite_3_35"] }
 diesel_migrations = { version = "2", features = ["sqlite"] }
 env_logger = "0.11"
-fuser = { version = "0.15", optional = true }
+fuser = { version = "0.16", optional = true, features = ["libfuse"] }
 hex = "0.4"
 libc = "0.2"
 libsodium-sys = "0.2"
 log = "0.4"
-lru = "0.12"
-quickcheck = "1"
-rand = "0.8"
+lru = "0.19"
 scoped-thread-pool = "1"
 secstr = "0.5"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
-void = "1.0.2"
 
 [features]
 benchmarks = []
@@ -49,6 +46,8 @@ path = "src/bin/hat_crash_worker.rs"
 assert_cmd = "2"
 criterion = { version = "0.5", features = ["html_reports"] }
 libsodium-sys = "0.2"
+quickcheck = "1"
+rand = "0.8"
 tempfile = "3"
 
 [[bench]]
