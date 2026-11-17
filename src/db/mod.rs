@@ -42,7 +42,7 @@ impl Index {
     pub fn new(path: &str) -> Result<Index, DieselError> {
         Ok(Index(Mutex::new(InternalIndex::new(path)?)))
     }
-    pub fn lock(&self) -> MutexGuard<InternalIndex> {
+    pub fn lock(&self) -> MutexGuard<'_, InternalIndex> {
         self.0.lock().expect("Database mutex is poisoned")
     }
     #[cfg(test)]
@@ -861,7 +861,7 @@ impl InternalIndex {
 
                 SnapshotStatus {
                     family_name: fam.name,
-                    created: chrono::DateTime::from_utc(snap.utc_datetime, chrono::Utc),
+                    created: chrono::DateTime::from_naive_utc_and_offset(snap.utc_datetime, chrono::Utc),
                     msg: snap.msg,
                     hash: hash_,
                     hash_ref: snap.hash_ref,

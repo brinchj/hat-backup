@@ -30,3 +30,32 @@ pub use self::periodic_timer::PeriodicTimer;
 pub use self::process::{MsgHandler, Process};
 pub use self::sync_pool::{SyncPool, SyncPoolGuard};
 pub use self::unique_priority_queue::UniquePriorityQueue;
+
+/// Convert whole seconds since the Unix epoch (possibly negative) to a `SystemTime`.
+fn unix_secs_to_system_time(secs: i64) -> std::time::SystemTime {
+    use std::time::{Duration, UNIX_EPOCH};
+    if secs >= 0 {
+        UNIX_EPOCH + Duration::from_secs(secs as u64)
+    } else {
+        UNIX_EPOCH - Duration::from_secs(secs.unsigned_abs())
+    }
+}
+
+/// Set access and modification times (in Unix seconds) on `path` without following symlinks.
+pub fn set_times_nofollow(
+    path: &std::path::Path,
+    atime_secs: i64,
+    mtime_secs: i64,
+) -> std::io::Result<()> {
+    let times = std::fs::FileTimes::new()
+        .set_accessed(unix_secs_to_system_time(atime_secs))
+        .set_modified(unix_secs_to_system_time(mtime_secs));
+    std::fs::set_times_nofollow(path, times)
+}
+
+/// Convert a `SystemTime` to whole seconds since the Unix epoch (0 if before the epoch).
+pub fn system_time_secs(t: std::time::SystemTime) -> i64 {
+    t.duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}

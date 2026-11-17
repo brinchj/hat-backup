@@ -73,6 +73,7 @@ pub struct NewKeyNode<'a> {
 }
 
 #[derive(Queryable)]
+#[allow(dead_code)]
 pub struct KeyData {
     pub node_id: Option<i64>,
     pub committed: bool,

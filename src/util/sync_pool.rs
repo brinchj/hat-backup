@@ -56,7 +56,7 @@ impl<V> SyncPool<V> {
         }
     }
 
-    pub fn lock(&self) -> Result<SyncPoolGuard<V>, PoisonError<MutexGuard<Vec<V>>>> {
+    pub fn lock(&self) -> Result<SyncPoolGuard<'_, V>, PoisonError<MutexGuard<'_, Vec<V>>>> {
         let v = {
             let mut vs = self.vals.lock()?;
             while vs.len() == 0 {

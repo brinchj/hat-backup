@@ -27,6 +27,7 @@ use crate::tags;
 
 mod noop;
 mod rc;
+#[allow(unused_imports)]
 pub use self::noop::GcNoop;
 pub use self::rc::GcRc;
 

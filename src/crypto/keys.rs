@@ -64,8 +64,7 @@ pub fn keyed_fingerprint_simple(sk: &[u8], msg: &[u8], out: &mut [u8]) {
 
 #[cfg_attr(feature = "flame_it", flame)]
 pub fn keyed_fingerprint(sk: &[u8], msg: &[u8], salt: &[u8], out: &mut [u8]) {
-    use libsodium_sys::{crypto_generichash_blake2b_PERSONALBYTES,
-                        crypto_generichash_blake2b_SALTBYTES};
+    use libsodium_sys::crypto_generichash_blake2b_SALTBYTES;
     assert_eq!(crypto_generichash_blake2b_SALTBYTES, salt.len() as u32);
 
     let outlen = out.len();

@@ -18,20 +18,17 @@ use chrono;
 use crate::crypto;
 use crate::db;
 use crate::errors::HatError;
-use filetime;
 use crate::gc::{self, Gc, GcRc};
 use crate::hash;
 use hex;
 use crate::key;
 use crate::models;
-use secstr::SecStr;
 use crate::cbor_util;
 use crate::snapshot;
 use std::cmp;
 use std::ffi;
 use std::fs;
-use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::str;
 use std::sync::{mpsc, Arc};
 use crate::tags;
@@ -459,13 +456,13 @@ impl<B: StoreBackend> HatRc<B> {
         );
 
         use chrono::TimeZone;
-        let mut max_created = chrono::Utc.timestamp(0, 0);
+        let mut max_created = chrono::Utc.timestamp_opt(0, 0).single().unwrap();
 
         for msg in hash::tree::LeafIterator::new(self.hash_backend(), root_href.clone())?.unwrap() {
             let snapshot_list: models::Snapshots = cbor_util::from_slice(&msg[..])?;
 
             for s in snapshot_list.snapshots {
-                let created = chrono::Utc.timestamp(s.created_ts_utc, 0);
+                let created = chrono::Utc.timestamp_opt(s.created_ts_utc, 0).single().unwrap();
                 max_created = cmp::max(max_created, created);
 
                 let hash_ref = From::from(s.hash_ref);
@@ -880,9 +877,7 @@ impl<B: StoreBackend> HatRc<B> {
             }
 
             if let (Some(m), Some(a)) = (entry.info.modified_ts_secs, entry.info.accessed_ts_secs) {
-                let atime = filetime::FileTime::from_unix_time(a, 0 /* nanos */);
-                let mtime = filetime::FileTime::from_unix_time(m, 0 /* nanos */);
-                filetime::set_symlink_file_times(&output, atime, mtime)?;
+                crate::util::set_times_nofollow(&output, a, m)?;
             }
 
             output.pop();

@@ -14,7 +14,6 @@
 
 //! Local state for keys in the snapshot in progress (the "index").
 
-use std::ffi;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::str;
@@ -26,7 +25,6 @@ use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
 use diesel_migrations::MigrationHarness;
 use crate::errors::DieselError;
-use filetime::FileTime;
 use crate::hash;
 use crate::models;
 
@@ -137,11 +135,11 @@ impl Info {
     pub fn new(name: models::FileName, meta: Option<&fs::Metadata>) -> Info {
         use std::os::unix::fs::MetadataExt;
 
-        let created = meta
-            .and_then(|m| FileTime::from_creation_time(m))
-            .map(|t| t.seconds());
-        let modified = meta.map(|m| FileTime::from_last_modification_time(m).seconds());
-        let accessed = meta.map(|m| FileTime::from_last_access_time(m).seconds());
+        use crate::util::system_time_secs;
+
+        let created = meta.and_then(|m| m.created().ok()).map(system_time_secs);
+        let modified = meta.and_then(|m| m.modified().ok()).map(system_time_secs);
+        let accessed = meta.and_then(|m| m.accessed().ok()).map(system_time_secs);
 
         Info {
             name: name,
@@ -496,7 +494,7 @@ impl KeyIndex {
         KeyIndex::new(":memory:")
     }
 
-    fn lock(&self) -> MutexGuard<InternalKeyIndex> {
+    fn lock(&self) -> MutexGuard<'_, InternalKeyIndex> {
         self.0.lock().expect("index-process has failed")
     }
 

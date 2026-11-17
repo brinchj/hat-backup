@@ -40,7 +40,7 @@ pub mod tests;
 mod benchmarks;
 
 pub use self::blob::{Blob, BlobReader};
-pub use self::chunk::{ChunkRef, Key, LeafType, NodeType, Packing};
+pub use self::chunk::{ChunkRef, Key, LeafType, NodeType};
 pub use self::index::{BlobDesc, BlobIndex};
 
 #[derive(Debug, thiserror::Error)]
@@ -74,7 +74,7 @@ pub struct StoreInner<B> {
     backend: Arc<B>,
     blob_index: Arc<BlobIndex>,
     blob_desc: BlobDesc,
-    blob_refs: Vec<(Box<dyn FnBox<(), ()>>)>,
+    blob_refs: Vec<Box<dyn FnBox<(), ()>>>,
     blob: Blob,
     read_cache: LruCache<Vec<u8>, BlobReader>,
 }
@@ -267,7 +267,7 @@ impl<B: StoreBackend> BlobStore<B> {
         ))))
     }
 
-    fn lock(&self) -> MutexGuard<StoreInner<B>> {
+    fn lock(&self) -> MutexGuard<'_, StoreInner<B>> {
         self.0.lock().expect("Blob store was poisoned")
     }
 

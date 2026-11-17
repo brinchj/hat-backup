@@ -319,7 +319,7 @@ fn blob_ciphertext_authed_allbytes() {
             vs.push(reader.read_chunk(&r)?);
         }
         Ok(vs)
-    };
+    }
 
     fn with_modified<F>(bytes: &mut [u8], i: usize, b: u8, f: F) -> Result<Vec<Vec<u8>>, BlobError>
     where
@@ -333,7 +333,7 @@ fn blob_ciphertext_authed_allbytes() {
             bytes[i] ^= b;
         }
         res
-    };
+    }
 
     // Blob is valid.
     let vs = verify(&keys, &bytes[..]).unwrap();

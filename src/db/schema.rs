@@ -83,6 +83,7 @@ pub struct RowId {
 }
 
 #[derive(Queryable)]
+#[allow(dead_code)]
 pub struct Hash {
     pub id: i64,
     pub hash: Vec<u8>,
@@ -110,6 +111,7 @@ pub struct NewHash<'a> {
 }
 
 #[derive(Queryable)]
+#[allow(dead_code)]
 pub struct GcMetadata {
     pub id: i64,
     pub hash_id: i64,
@@ -128,6 +130,7 @@ pub struct NewGcMetadata<'a> {
 }
 
 #[derive(Queryable)]
+#[allow(dead_code)]
 pub struct Blob {
     pub id: i64,
     pub name: Vec<u8>,

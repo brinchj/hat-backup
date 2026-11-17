@@ -9,7 +9,7 @@ use crate::models::FileName;
 
 use std::borrow::Cow;
 use std::mem;
-use std::path::{self, Path, PathBuf};
+use std::path::{self, Path};
 
 pub struct FileReader {
     rest: Option<Box<dyn Iterator<Item = Vec<u8>>>>,
@@ -69,7 +69,7 @@ impl FileReader {
         &self.from(offset)[..size]
     }
 
-    pub fn read(&mut self, offset: u64, size: usize) -> Option<Cow<[u8]>> {
+    pub fn read(&mut self, offset: u64, size: usize) -> Option<Cow<'_, [u8]>> {
         self.advance(offset);
 
         if self.eof || self.from(offset).is_empty() {
@@ -135,11 +135,11 @@ impl<B: StoreBackend> Filesystem<B> {
                 match (href_opt, components.next()) {
                     (_, None) => return Ok(Some(List::Dir(listing))),
                     (None, _) => return Ok(None),
-                    (Some(href), Some(name)) => {
+                    (Some(_href), Some(name)) => {
                         let name: FileName = name.as_os_str().to_owned().into();
                         if let Some((entry, content)) = listing
                             .into_iter()
-                            .find(|&(ref e, ref c)| e.info.name == name)
+                            .find(|&(ref e, ref _c)| e.info.name == name)
                         {
                             match content {
                                 Content::Data(..) | Content::Link(..) => {

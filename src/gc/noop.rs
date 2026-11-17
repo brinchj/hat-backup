@@ -17,6 +17,7 @@ use crate::gc;
 use std::sync::mpsc;
 use void::Void;
 
+#[allow(dead_code)]
 pub struct GcNoop;
 
 impl<B: gc::GcBackend> gc::Gc<B> for GcNoop {

@@ -105,11 +105,11 @@ impl InternalHashIndex {
         })
     }
 
-    pub fn queue_lock(&self) -> MutexGuard<Queue> {
+    pub fn queue_lock(&self) -> MutexGuard<'_, Queue> {
         self.queue.lock().expect("Hash queue mutex poisoned")
     }
 
-    pub fn lock(&self) -> (MutexGuard<Queue>, db::IndexGuard) {
+    pub fn lock(&self) -> (MutexGuard<'_, Queue>, db::IndexGuard<'_>) {
         let queue = self.queue_lock();
         let index = self.index.lock();
         (queue, index)

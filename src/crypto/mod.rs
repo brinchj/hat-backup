@@ -17,8 +17,6 @@ use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 pub use crate::errors::CryptoError;
 use crate::hash::tree::HashRef;
 use std::io;
-use std::mem;
-
 pub mod keys;
 
 pub struct PlainText(Vec<u8>);
@@ -118,7 +116,7 @@ fn wrap_key(key: authed::desc::Key) -> Key {
 }
 
 impl<'a> PlainTextRef<'a> {
-    pub fn new(bytes: &[u8]) -> PlainTextRef {
+    pub fn new(bytes: &[u8]) -> PlainTextRef<'_> {
         PlainTextRef(bytes)
     }
     pub fn len(&self) -> usize {
@@ -165,7 +163,7 @@ impl PlainText {
     pub fn len(&self) -> usize {
         self.0.len()
     }
-    pub fn as_ref(&self) -> PlainTextRef {
+    pub fn as_ref(&self) -> PlainTextRef<'_> {
         PlainTextRef::new(&self.0[..])
     }
     pub fn as_bytes(&self) -> &[u8] {
@@ -199,10 +197,10 @@ impl CipherText {
         self.len += other.len();
         self.chunks.append(&mut other.chunks);
     }
-    pub fn collapse(&mut self) -> CipherTextRef {
+    pub fn collapse(&mut self) -> CipherTextRef<'_> {
         if self.chunks.len() > 1 {
             let v = self.chunks.concat();
-            mem::replace(&mut self.chunks, vec![v]);
+            self.chunks = vec![v];
             assert_eq!(self.chunks[0].len(), self.len);
         }
         CipherTextRef::new(&self.chunks[0][..])
@@ -268,7 +266,7 @@ impl<'a> CipherTextRef<'a> {
     pub fn new(bytes: &'a [u8]) -> CipherTextRef<'a> {
         CipherTextRef(bytes)
     }
-    pub fn as_ref(&self) -> CipherTextRef {
+    pub fn as_ref(&self) -> CipherTextRef<'_> {
         CipherTextRef(&self.0[..])
     }
     pub fn to_owned(&self) -> CipherText {
@@ -307,7 +305,7 @@ impl<'a> CipherTextRef<'a> {
         )))
     }
 
-    pub fn strip_authentication(&self, keys: &keys::Keeper) -> Result<CipherTextRef, CryptoError> {
+    pub fn strip_authentication(&self, keys: &keys::Keeper) -> Result<CipherTextRef<'_>, CryptoError> {
         let (rest, want) = self.split_from_right(authed::hash::DIGESTBYTES as usize)?;
 
         let mut got = vec![0u8; authed::hash::DIGESTBYTES as usize];

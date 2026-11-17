@@ -15,7 +15,6 @@
 use crate::backend::StoreBackend;
 use crate::blob;
 use crate::errors::HatError;
-use filetime;
 use crate::hash;
 use crate::hat::insert_path_handler::InsertPathHandler;
 use crate::hat::walker;
@@ -378,9 +377,7 @@ impl<B: StoreBackend> Family<B> {
             }
 
             if let (Some(m), Some(a)) = (entry.info.modified_ts_secs, entry.info.accessed_ts_secs) {
-                let atime = filetime::FileTime::from_unix_time(a, 0 /* nanos */);
-                let mtime = filetime::FileTime::from_unix_time(m, 0 /* nanos */);
-                filetime::set_symlink_file_times(&path, atime, mtime)?;
+                crate::util::set_times_nofollow(&path, a, m)?;
             }
 
             // Prepare for next filename:
