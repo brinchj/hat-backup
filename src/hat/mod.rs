@@ -124,16 +124,13 @@ pub struct Hat<B: StoreBackend, G: gc::Gc<GcBackend>> {
     blob_store: Arc<blob::BlobStore<B>>,
     blob_max_size: usize,
     gc: G,
-    #[cfg(test)]
     commit_fault: Option<CommitFault>,
-    #[cfg(test)]
     delete_fault: Option<DeleteFault>,
 }
 
 pub type HatRc<B> = Hat<B, GcRc<GcBackend>>;
 
-/// Test-only injection points for simulating crash mid-commit.
-#[cfg(test)]
+/// Injection points for simulating crash mid-commit (tests / debug env).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommitFault {
     AfterReserve,
@@ -142,12 +139,33 @@ pub enum CommitFault {
     AfterReadyCommit,
 }
 
-/// Test-only injection points for simulating crash mid-delete.
-#[cfg(test)]
+impl CommitFault {
+    pub fn parse(s: &str) -> Option<CommitFault> {
+        match s {
+            "AfterReserve" => Some(CommitFault::AfterReserve),
+            "AfterHashUpdate" => Some(CommitFault::AfterHashUpdate),
+            "AfterRegisterFinal" => Some(CommitFault::AfterRegisterFinal),
+            "AfterReadyCommit" => Some(CommitFault::AfterReadyCommit),
+            _ => None,
+        }
+    }
+}
+
+/// Injection points for simulating crash mid-delete (tests / debug env).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeleteFault {
     AfterMark,
     AfterGcDeregister,
+}
+
+impl DeleteFault {
+    pub fn parse(s: &str) -> Option<DeleteFault> {
+        match s {
+            "AfterMark" => Some(DeleteFault::AfterMark),
+            "AfterGcDeregister" => Some(DeleteFault::AfterGcDeregister),
+            _ => None,
+        }
+    }
 }
 
 fn concat_filename(mut a: PathBuf, b: &str) -> String {
@@ -260,9 +278,7 @@ impl<B: StoreBackend> HatRc<B> {
             blob_store: bs_p,
             blob_max_size: max_blob_size,
             gc: gc,
-            #[cfg(test)]
             commit_fault: None,
-            #[cfg(test)]
             delete_fault: None,
         };
 
@@ -315,37 +331,73 @@ impl<B: StoreBackend> HatRc<B> {
         Ok(hat)
     }
 
-    #[cfg(test)]
     pub fn inject_commit_fault(&mut self, fault: CommitFault) {
         self.commit_fault = Some(fault);
     }
 
-    #[cfg(test)]
     pub fn inject_delete_fault(&mut self, fault: DeleteFault) {
         self.delete_fault = Some(fault);
     }
 
-    #[cfg(test)]
     pub fn list_not_done_snapshots(&mut self) -> Vec<db::SnapshotStatus> {
         self.snapshot_index.list_not_done()
     }
 
-    #[cfg(test)]
-    fn maybe_commit_fault(&mut self, stage: CommitFault) -> Result<(), HatError> {
-        if self.commit_fault == Some(stage) {
-            self.commit_fault = None;
-            return Err("injected commit fault".into());
-        }
-        Ok(())
+    pub fn unfinished_snapshot_count(&mut self) -> usize {
+        self.snapshot_index.list_not_done().len()
     }
 
-    #[cfg(test)]
-    fn maybe_delete_fault(&mut self, stage: DeleteFault) -> Result<(), HatError> {
-        if self.delete_fault == Some(stage) {
-            self.delete_fault = None;
-            return Err("injected delete fault".into());
+    pub fn latest_snapshot_id(&mut self, family_name: &str) -> Option<u64> {
+        self.snapshot_index
+            .latest(family_name)
+            .map(|(info, _, _)| info.snapshot_id)
+    }
+
+    fn hang_at_barrier_if_requested() {
+        if let Ok(path) = std::env::var("HAT_TEST_BARRIER") {
+            let _ = std::fs::write(&path, b"ready");
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(60));
+            }
         }
-        Ok(())
+    }
+
+    fn env_commit_fault() -> Option<CommitFault> {
+        std::env::var("HAT_TEST_FAULT")
+            .ok()
+            .and_then(|s| CommitFault::parse(&s))
+    }
+
+    fn env_delete_fault() -> Option<DeleteFault> {
+        std::env::var("HAT_TEST_FAULT")
+            .ok()
+            .and_then(|s| DeleteFault::parse(&s))
+    }
+
+    fn maybe_commit_fault(&mut self, stage: CommitFault) -> Result<(), HatError> {
+        let from_inject = self.commit_fault == Some(stage);
+        let from_env = Self::env_commit_fault() == Some(stage);
+        if !(from_inject || from_env) {
+            return Ok(());
+        }
+        if from_inject {
+            self.commit_fault = None;
+        }
+        Self::hang_at_barrier_if_requested();
+        Err("injected commit fault".into())
+    }
+
+    fn maybe_delete_fault(&mut self, stage: DeleteFault) -> Result<(), HatError> {
+        let from_inject = self.delete_fault == Some(stage);
+        let from_env = Self::env_delete_fault() == Some(stage);
+        if !(from_inject || from_env) {
+            return Ok(());
+        }
+        if from_inject {
+            self.delete_fault = None;
+        }
+        Self::hang_at_barrier_if_requested();
+        Err("injected delete fault".into())
     }
 
     pub fn hash_tree_writer(
@@ -795,7 +847,6 @@ impl<B: StoreBackend> HatRc<B> {
             }
         };
         self.meta_flush();
-        #[cfg(test)]
         self.maybe_commit_fault(CommitFault::AfterReserve)?;
 
         // Commit metadata while registering needed data-hashes (files and dirs).
@@ -813,10 +864,11 @@ impl<B: StoreBackend> HatRc<B> {
         // Tag 2:
         // We update the snapshot entry with the tree hash, which we then register.
         // When the GC has seen the final hash, we flush everything so far.
+        // Blob data for top_ref must hit the backend before SQLite records the hash.
+        self.flush_blob_store();
         self.snapshot_index
             .update(&snap_info, &top_ref.hash, &top_ref);
         self.meta_flush();
-        #[cfg(test)]
         self.maybe_commit_fault(CommitFault::AfterHashUpdate)?;
 
         // Register the final hash.
@@ -828,8 +880,8 @@ impl<B: StoreBackend> HatRc<B> {
             .get_id(&top_ref.hash)
             .expect("Hash does not exist");
         self.gc.register_final(&snap_info, hash_id)?;
+        self.flush_blob_store();
         self.meta_flush();
-        #[cfg(test)]
         self.maybe_commit_fault(CommitFault::AfterRegisterFinal)?;
 
         self.commit_finalize(snap_info, &top_ref.hash)?;
@@ -844,12 +896,13 @@ impl<B: StoreBackend> HatRc<B> {
     ) -> Result<(), HatError> {
         // Commit locally. Let the GC perform any needed cleanup.
         self.snapshot_index.ready_commit(&snap_info);
+        self.flush_blob_store();
         self.meta_flush();
-        #[cfg(test)]
         self.maybe_commit_fault(CommitFault::AfterReadyCommit)?;
 
         let hash_id = self.hash_index.get_id(hash).expect("Hash does not exist");
         self.gc.register_cleanup(&snap_info, hash_id)?;
+        self.flush_blob_store();
         self.meta_flush();
 
         // Tag 0: All is done.
@@ -984,7 +1037,6 @@ impl<B: StoreBackend> HatRc<B> {
         // Make the snapshot to enable resuming.
         self.snapshot_index.will_delete(&info);
         self.flush_snapshot_index();
-        #[cfg(test)]
         self.maybe_delete_fault(DeleteFault::AfterMark)?;
 
         let final_ref = self
@@ -1039,7 +1091,6 @@ impl<B: StoreBackend> HatRc<B> {
             gc.deregister(&info, final_ref, move || id_receiver)?;
         }
         family.flush()?;
-        #[cfg(test)]
         self.maybe_delete_fault(DeleteFault::AfterGcDeregister)?;
 
         self.deregister_finalize(family, info, final_ref)
@@ -1115,5 +1166,51 @@ impl<B: StoreBackend> HatRc<B> {
             self.blob_store.clone(),
             self.keys.clone(),
         )
+    }
+
+    /// Verify every indexed hash chunk is present in the backend and matches its content hash.
+    pub fn check(&self) -> Result<(), HatError> {
+        let mut problems = Vec::new();
+        for entry in self.hash_index.list() {
+            let Some(pref) = entry.persistent_ref else {
+                continue;
+            };
+            let href = hash::tree::HashRef {
+                hash: entry.hash.clone(),
+                node: entry.node,
+                leaf: entry.leaf,
+                persistent_ref: pref,
+                info: None,
+            };
+            match self.blob_store.retrieve(&href) {
+                Ok(Some(data)) => {
+                    let actual = hash::Hash::new(&self.keys, href.node, href.leaf, &data);
+                    if actual != href.hash {
+                        problems.push(format!(
+                            "hash mismatch for {}",
+                            hex::encode(&href.hash.bytes)
+                        ));
+                    }
+                }
+                Ok(None) => {
+                    problems.push(format!(
+                        "missing blob data for {}",
+                        hex::encode(&href.hash.bytes)
+                    ));
+                }
+                Err(e) => {
+                    problems.push(format!(
+                        "retrieve failed for {}: {}",
+                        hex::encode(&href.hash.bytes),
+                        e
+                    ));
+                }
+            }
+        }
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("hat check failed: {}", problems.join("; ")).into())
+        }
     }
 }

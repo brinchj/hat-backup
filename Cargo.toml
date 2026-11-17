@@ -41,5 +41,14 @@ fuse = ["dep:fuser"]
 name = "hat"
 path = "src/lib.rs"
 
+[[bin]]
+name = "hat-crash-worker"
+path = "src/bin/hat_crash_worker.rs"
+
+[dev-dependencies]
+assert_cmd = "2"
+libsodium-sys = "0.2"
+tempfile = "3"
+
 [profile.release]
 debug = true

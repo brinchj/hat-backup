@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use clap::{Arg, Command};
-use hat::backend;
+use clap::{Arg, ArgMatches, Command};
+use hat::backend::{self, StoreBackend};
+use hat::hat::HatRc;
+use hat::Hat;
 use std::collections::BTreeSet;
 use std::env;
 use std::ffi;
@@ -29,8 +31,102 @@ fn license() {
     println!(include_str!("../LICENSE-CLAP"));
 }
 
+fn backend_kind(matches: &ArgMatches) -> &str {
+    matches
+        .get_one::<String>("backend")
+        .map(|s| s.as_str())
+        .unwrap_or("cmd")
+}
+
+fn open_hat_cmd(cache_dir: PathBuf) -> HatRc<backend::CmdBackend> {
+    let backend = Arc::new(backend::CmdBackend::new());
+    Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap()
+}
+
+fn open_hat_file(cache_dir: PathBuf, matches: &ArgMatches) -> HatRc<backend::FileBackend> {
+    let path = matches
+        .get_one::<String>("backend_path")
+        .cloned()
+        .or_else(|| env::var("HAT_BACKEND_PATH").ok())
+        .unwrap_or_else(|| {
+            eprintln!("Error: --backend-path or HAT_BACKEND_PATH required for file backend");
+            std::process::exit(1);
+        });
+    let backend = Arc::new(backend::FileBackend::new(PathBuf::from(path)));
+    Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap()
+}
+
+fn do_commit<B: StoreBackend>(mut hat: HatRc<B>, name: String, path: PathBuf) {
+    let mut family = hat.open_family(name.clone()).unwrap_or_else(|e| {
+        eprintln!("Error: could not open family '{}': {}", name, e);
+        std::process::exit(1);
+    });
+    family.snapshot_dir(path).unwrap();
+    hat.commit(&mut family, None).unwrap();
+    hat.meta_commit().unwrap();
+    hat.data_flush().unwrap();
+}
+
+fn do_checkout<B: StoreBackend>(mut hat: HatRc<B>, name: String, path: PathBuf) {
+    hat.checkout_in_dir(name, path).unwrap();
+}
+
+fn do_recover<B: StoreBackend>(mut hat: HatRc<B>) {
+    hat.recover().unwrap();
+}
+
+fn do_delete<B: StoreBackend>(mut hat: HatRc<B>, name: String, id: u64) {
+    hat.deregister_by_name(name, id).unwrap();
+}
+
+fn do_gc<B: StoreBackend>(mut hat: HatRc<B>) {
+    let (deleted_hashes, live_blobs) = hat.gc().unwrap();
+    println!("Deleted hashes: {:?}", deleted_hashes);
+    println!("Live data blobs after deletion: {:?}", live_blobs);
+}
+
+fn do_check<B: StoreBackend>(hat: HatRc<B>) {
+    match hat.check() {
+        Ok(()) => println!("check: ok"),
+        Err(e) => {
+            eprintln!("check: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn do_ls<B: StoreBackend>(hat: HatRc<B>, path: PathBuf) {
+    if let Some(f) = hat::vfs::Filesystem::new(hat).ls(&path).unwrap() {
+        match f {
+            hat::vfs::fs::List::Root(snapshots) => {
+                snapshots
+                    .into_iter()
+                    .map(|s| s.family_name)
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .for_each(|name| println!("{}", name));
+            }
+            hat::vfs::fs::List::Snapshots(snapshots) => {
+                for si in snapshots {
+                    println!(
+                        "{}",
+                        PathBuf::from(si.family_name)
+                            .join(format!("{}", si.info.snapshot_id))
+                            .display()
+                    );
+                }
+            }
+            hat::vfs::fs::List::Dir(files) => {
+                for (entry, _) in files {
+                    let name_os_string: ffi::OsString = entry.info.name.into();
+                    println!("{}", path.join(name_os_string).display());
+                }
+            }
+        }
+    }
+}
+
 fn main() {
-    // Initialize libraries
     unsafe {
         libsodium_sys::sodium_init();
     }
@@ -52,6 +148,20 @@ fn main() {
                 .value_name("DIR")
                 .help("Location of Hat's local state")
                 .env("HAT_STATE_DIR"),
+        )
+        .arg(
+            Arg::new("backend")
+                .long("backend")
+                .value_name("KIND")
+                .help("Storage backend: cmd (default) or file")
+                .env("HAT_BACKEND"),
+        )
+        .arg(
+            Arg::new("backend_path")
+                .long("backend-path")
+                .value_name("DIR")
+                .help("Directory for file backend blob storage")
+                .env("HAT_BACKEND_PATH"),
         )
         .subcommand(
             Command::new("init")
@@ -88,6 +198,7 @@ fn main() {
                         .help("Do not modify any data"),
                 ),
         )
+        .subcommand(Command::new("check").about("Verify live hash chunks against the backend"))
         .subcommand(Command::new("resume").about("Resume previous failed command."))
         .subcommand(
             Command::new("mount")
@@ -112,12 +223,16 @@ fn main() {
             .cloned()
             .or_else(|| env::var_os(name.to_uppercase()).map(|s| s.into_string().unwrap()))
             .unwrap_or_else(|| {
-                eprintln!("Error: {} required (pass --{} or set {})", name, name, name.to_uppercase());
+                eprintln!(
+                    "Error: {} required (pass --{} or set {})",
+                    name,
+                    name,
+                    name.to_uppercase()
+                );
                 std::process::exit(1);
             })
     };
 
-    // Special cased one-off commands
     if let Some(("init", dir)) = matches.subcommand() {
         let dir = PathBuf::from(dir.get_one::<String>("DIR").expect("missing DIR to initialize"));
         if dir.exists() {
@@ -132,80 +247,68 @@ fn main() {
         std::process::exit(0);
     }
 
-    // Setup config variables that can take their value from either flag or environment.
     let cache_dir = PathBuf::from(flag_or_env("hat_state_dir"));
+    let kind = backend_kind(&matches);
 
     match matches.subcommand() {
-        Some(("resume", _)) => {
-            // Setting up the repository triggers automatic resume.
-            let backend = Arc::new(backend::CmdBackend::new());
-            hat::Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap();
-        }
+        Some(("resume", _)) => match kind {
+            "file" => {
+                let _ = open_hat_file(cache_dir, &matches);
+            }
+            _ => {
+                let _ = open_hat_cmd(cache_dir);
+            }
+        },
         Some(("commit", cmd)) => {
             let name = cmd.get_one::<String>("NAME").unwrap().to_owned();
-            let path = cmd.get_one::<String>("PATH").unwrap();
-
-            let backend = Arc::new(backend::CmdBackend::new());
-            let mut hat = hat::Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap();
-
-            // Update the family index.
-            let mut family = hat
-                .open_family(name.clone())
-                .unwrap_or_else(|e| {
-                    eprintln!("Error: could not open family '{}': {}", name, e);
-                    std::process::exit(1);
-                });
-            family.snapshot_dir(PathBuf::from(path)).unwrap();
-
-            // Commit the updated index.
-            hat.commit(&mut family, None).unwrap();
-
-            // Meta commit.
-            hat.meta_commit().unwrap();
-
-            // Flush any remaining blobs.
-            hat.data_flush().unwrap();
+            let path = PathBuf::from(cmd.get_one::<String>("PATH").unwrap());
+            match kind {
+                "file" => do_commit(open_hat_file(cache_dir, &matches), name, path),
+                _ => do_commit(open_hat_cmd(cache_dir), name, path),
+            }
         }
         Some(("checkout", cmd)) => {
             let name = cmd.get_one::<String>("NAME").unwrap().to_owned();
-            let path = cmd.get_one::<String>("PATH").unwrap();
-
-            let backend = Arc::new(backend::CmdBackend::new());
-            let mut hat = hat::Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap();
-
-            hat.checkout_in_dir(name, PathBuf::from(path)).unwrap();
+            let path = PathBuf::from(cmd.get_one::<String>("PATH").unwrap());
+            match kind {
+                "file" => do_checkout(open_hat_file(cache_dir, &matches), name, path),
+                _ => do_checkout(open_hat_cmd(cache_dir), name, path),
+            }
         }
-        Some(("recover", _)) => {
-            let backend = Arc::new(backend::CmdBackend::new());
-            let mut hat = hat::Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap();
-
-            hat.recover().unwrap();
-        }
+        Some(("recover", _)) => match kind {
+            "file" => do_recover(open_hat_file(cache_dir, &matches)),
+            _ => do_recover(open_hat_cmd(cache_dir)),
+        },
         Some(("delete", cmd)) => {
             let name = cmd.get_one::<String>("NAME").unwrap().to_owned();
-            let id = cmd.get_one::<String>("ID").unwrap().to_owned();
-
-            let backend = Arc::new(backend::CmdBackend::new());
-            let mut hat = hat::Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap();
-
-            hat.deregister_by_name(name, id.parse::<u64>().unwrap())
-                .unwrap();
+            let id = cmd.get_one::<String>("ID").unwrap().parse::<u64>().unwrap();
+            match kind {
+                "file" => do_delete(open_hat_file(cache_dir, &matches), name, id),
+                _ => do_delete(open_hat_cmd(cache_dir), name, id),
+            }
         }
-        Some(("gc", _)) => {
-            let backend = Arc::new(backend::CmdBackend::new());
-            let mut hat = hat::Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap();
-            let (deleted_hashes, live_blobs) = hat.gc().unwrap();
-            println!("Deleted hashes: {:?}", deleted_hashes);
-            println!("Live data blobs after deletion: {:?}", live_blobs);
-        }
+        Some(("gc", _)) => match kind {
+            "file" => do_gc(open_hat_file(cache_dir, &matches)),
+            _ => do_gc(open_hat_cmd(cache_dir)),
+        },
+        Some(("check", _)) => match kind {
+            "file" => do_check(open_hat_file(cache_dir, &matches)),
+            _ => do_check(open_hat_cmd(cache_dir)),
+        },
         Some(("mount", cmd)) => {
             #[cfg(feature = "fuse")]
             {
                 let path = cmd.get_one::<String>("PATH").unwrap();
-                let backend = Arc::new(backend::CmdBackend::new());
-
-                let hat = hat::Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap();
-                hat::vfs::Fuse::new(hat).mount(&path).unwrap();
+                match kind {
+                    "file" => {
+                        let hat = open_hat_file(cache_dir, &matches);
+                        hat::vfs::Fuse::new(hat).mount(&path).unwrap();
+                    }
+                    _ => {
+                        let hat = open_hat_cmd(cache_dir);
+                        hat::vfs::Fuse::new(hat).mount(&path).unwrap();
+                    }
+                }
             }
             #[cfg(not(feature = "fuse"))]
             {
@@ -219,36 +322,9 @@ fn main() {
         }
         Some(("ls", cmd)) => {
             let path: PathBuf = cmd.get_one::<String>("PATH").unwrap().into();
-            let backend = Arc::new(backend::CmdBackend::new());
-
-            let hat = hat::Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap();
-            if let Some(f) = hat::vfs::Filesystem::new(hat).ls(&path).unwrap() {
-                match f {
-                    hat::vfs::fs::List::Root(snapshots) => {
-                        snapshots
-                            .into_iter()
-                            .map(|s| s.family_name)
-                            .collect::<BTreeSet<_>>()
-                            .into_iter()
-                            .for_each(|name| println!("{}", name));
-                    }
-                    hat::vfs::fs::List::Snapshots(snapshots) => {
-                        for si in snapshots {
-                            println!(
-                                "{}",
-                                PathBuf::from(si.family_name)
-                                    .join(format!("{}", si.info.snapshot_id))
-                                    .display()
-                            );
-                        }
-                    }
-                    hat::vfs::fs::List::Dir(files) => {
-                        for (entry, _) in files {
-                            let name_os_string: ffi::OsString = entry.info.name.into();
-                            println!("{}", path.join(name_os_string).display());
-                        }
-                    }
-                }
+            match kind {
+                "file" => do_ls(open_hat_file(cache_dir, &matches), path),
+                _ => do_ls(open_hat_cmd(cache_dir), path),
             }
         }
         _ => {
