@@ -435,6 +435,17 @@ impl InternalKeyIndex {
         Ok(())
     }
 
+    /// Clear reservation tags so a new `snapshot_dir` can mark a fresh live set.
+    /// Without this, prior Reserved entries survive `cleanup_unused` and leak into
+    /// the next commit when snapshots share the same relative key-tree root.
+    fn reset_entry_tags(&mut self) -> Result<(), DieselError> {
+        use super::schema::key_data::dsl::*;
+        diesel::update(key_data.filter(tag.ne(Tag::Done as i64)))
+            .set(tag.eq(Tag::Done as i64))
+            .execute(&mut self.conn)?;
+        Ok(())
+    }
+
     /// Commit individual nodes marked reserved.
     fn commit_reserved_nodes(&mut self) -> Result<(), DieselError> {
         // Promote all needed keys to 'ready' in one statement to preserve referential integrity.
@@ -523,6 +534,10 @@ impl KeyIndex {
 
     pub fn mark_reserved(&self, entry: &Entry) -> Result<(), DieselError> {
         self.lock().mark_reserved(entry)
+    }
+
+    pub fn reset_entry_tags(&self) -> Result<(), DieselError> {
+        self.lock().reset_entry_tags()
     }
 
     pub fn commit_reserved_nodes(&self) -> Result<(), DieselError> {

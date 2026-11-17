@@ -162,23 +162,16 @@ fn read_tree(root: &Path) -> BTreeMap<PathBuf, NodeKind> {
     out
 }
 
-/// Hat's `snapshot_dir` stores the canonical absolute path as tree prefixes.
-/// After checkout into `restore_root`, the fixture contents live under this path.
-pub fn restored_tree_path(fixture: &Path, restore_root: &Path) -> PathBuf {
-    let canon = fs::canonicalize(fixture).unwrap();
-    let mut out = restore_root.to_path_buf();
-    for c in canon.components() {
-        if let std::path::Component::Normal(p) = c {
-            out.push(p);
-        }
-    }
-    out
+/// After relative-root snapshot, checkout places fixture contents directly under
+/// `restore_root` (no absolute-path prefix).
+pub fn restored_tree_path(_fixture: &Path, restore_root: &Path) -> PathBuf {
+    restore_root.to_path_buf()
 }
 
 pub fn checkout_and_leaf(
     hat: &mut HatRc<FileBackend>,
     family: &str,
-    fixture: &Path,
+    _fixture: &Path,
     restore_root: &Path,
 ) -> PathBuf {
     if restore_root.exists() {
@@ -187,7 +180,7 @@ pub fn checkout_and_leaf(
     fs::create_dir_all(restore_root).unwrap();
     hat.checkout_in_dir(family.to_string(), restore_root.to_path_buf())
         .unwrap();
-    restored_tree_path(fixture, restore_root)
+    restore_root.to_path_buf()
 }
 
 /// Compare two directory trees: paths, file bytes, symlink targets, permission bits.

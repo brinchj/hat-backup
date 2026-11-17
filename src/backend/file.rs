@@ -32,7 +32,8 @@ impl FileBackend {
         FileBackend {
             root: root,
             read_cache: Mutex::new(BTreeMap::new()),
-            max_cache_size: 10,
+            // Checkout/`check` touch many blobs; a tiny cache thrashed on FS-shaped trees.
+            max_cache_size: 64,
         }
     }
 

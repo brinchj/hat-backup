@@ -19,6 +19,12 @@ use std::fs;
 use std::io;
 use std::iter;
 use std::path::PathBuf;
+use std::sync::OnceLock;
+
+fn walk_pool() -> &'static scoped_thread_pool::Pool {
+    static POOL: OnceLock<scoped_thread_pool::Pool> = OnceLock::new();
+    POOL.get_or_init(|| scoped_thread_pool::Pool::new(10))
+}
 
 pub trait HasPath {
     fn path(&self) -> PathBuf;
@@ -66,11 +72,11 @@ pub trait PathHandler<P: Send + 'static>: Sync {
     }
 
     fn recurse(&self, root: PathBuf, payload: P) {
-        let pool = scoped_thread_pool::Pool::new(10);
-        pool.scoped(move |scope| {
+        // Reuse a process-wide pool; creating/shutting down 10 threads per snapshot
+        // dominated many-small-file commit cost.
+        walk_pool().scoped(move |scope| {
             self.recurse_worker(scope, root, payload);
         });
-        pool.shutdown();
     }
 }
 

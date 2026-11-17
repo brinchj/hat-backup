@@ -99,7 +99,7 @@ impl<B: StoreBackend> StoreInner<B> {
             blob_desc: Default::default(),
             blob_refs: Vec::new(),
             blob: Blob::new(keys, max_blob_size),
-            read_cache: LruCache::new(NonZeroUsize::new(10).unwrap()),
+            read_cache: LruCache::new(NonZeroUsize::new(64).unwrap()),
         };
         bs.reserve_new_blob();
         bs

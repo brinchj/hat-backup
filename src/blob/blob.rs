@@ -98,6 +98,8 @@ impl Blob {
 
         assert!(self.chunks.len() + footer_overhead <= self.max_len);
 
+        // Always pad to max_len so ciphertext size does not leak how much real data
+        // was in this blob (partial fills / small deltas would otherwise be visible).
         let mut out = mem::replace(&mut self.chunks, CipherText::empty());
         out.random_pad_upto(self.max_len - footer_overhead);
         out.append(footer);

@@ -99,6 +99,10 @@ pub enum Msg<IT> {
     /// Returns `Ok`.
     CommitReservedNodes(Option<Option<u64>>),
 
+    /// Clear entry reservation tags before a new directory snapshot walk.
+    /// Returns `Ok`.
+    ResetEntryTags,
+
     /// Flush this key store and its dependencies.
     /// Returns `FlushOk`.
     Flush,
@@ -259,6 +263,11 @@ impl<IT: io::Read, B: StoreBackend> MsgHandler<Msg<IT>, Reply<B>> for Store<B> {
                 if let Some(parent) = clean_parent_opt {
                     self.index.cleanup_unused(parent)?;
                 }
+                return reply_ok!(Reply::Ok);
+            }
+
+            Msg::ResetEntryTags => {
+                self.index.reset_entry_tags()?;
                 return reply_ok!(Reply::Ok);
             }
 

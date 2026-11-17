@@ -219,48 +219,32 @@ impl<B: StoreBackend> Family<B> {
     pub fn snapshot_dir(&self, dir: PathBuf) -> Result<(), HatError> {
         let handler = InsertPathHandler::new(self.key_store_process.clone());
 
-        let mut parent_path = PathBuf::from("/");
-
         let dir = fs::canonicalize(dir)?;
         info!("Committing: {}", dir.display());
         assert!(dir.is_absolute());
 
-        let mut bailout = false;
-        let mut parent = None;
-        let mut inside_non_dir = false;
-        for name in dir.iter().map(PathBuf::from).filter(|p| !p.has_root()) {
-            if inside_non_dir {
-                // The remaining part of the path is inside a link or similar.
-                // This should not happen, as the path was canonical.
-                warn!(
-                    "Ignoring components after non-dir path: {}",
-                    parent_path.display()
-                );
-                bailout = true;
-                break;
-            }
-            parent_path.push(name);
-            if let Some(new_parent) = handler.handle_path(&parent, &parent_path) {
-                parent = new_parent;
-            } else {
-                // Trigger warning if this is not the final component.
-                // If this is the final component, we just commit'ed a file or link, which is OK.
-                inside_non_dir = true;
-            }
+        // Snapshot the directory *contents* at the family key-tree root.
+        // Do not insert absolute path prefixes (/private/var/folders/...), which
+        // inflated every commit/checkout with junk parent directories.
+        match self.key_store_process[0].send_reply(key::Msg::<FileIterator>::ResetEntryTags)? {
+            key::Reply::Ok => {}
+            _ => return Err(From::from("Unexpected reply from keystore")),
         }
 
-        if !bailout && dir.is_dir() {
-            handler.recurse(PathBuf::from(&dir), parent);
+        if dir.is_dir() {
+            handler.recurse(dir, None);
 
-            match self.key_store_process[0]
-                .send_reply(key::Msg::<FileIterator>::CommitReservedNodes(Some(parent)))?
-            {
+            match self.key_store_process[0].send_reply(
+                key::Msg::<FileIterator>::CommitReservedNodes(Some(None)),
+            )? {
                 key::Reply::Ok => Ok(()),
                 _ => Err(From::from("Unexpected reply from keystore")),
             }
         } else {
+            // Single file: insert under the key-tree root (returns None = non-dir).
+            let _ = handler.handle_path(&None, &dir);
             match self.key_store_process[0]
-                .send_reply(key::Msg::<FileIterator>::CommitReservedNodes(None))?
+                .send_reply(key::Msg::<FileIterator>::CommitReservedNodes(Some(None)))?
             {
                 key::Reply::Ok => Ok(()),
                 _ => Err(From::from("Unexpected reply from keystore")),
