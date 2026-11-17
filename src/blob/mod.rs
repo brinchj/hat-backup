@@ -118,7 +118,7 @@ impl<B: StoreBackend> StoreInner<B> {
         // Replace blob id
         let old_blob_desc = self.reserve_new_blob();
 
-        let callbacks = mem::replace(&mut self.blob_refs, vec![]);
+        let callbacks = mem::take(&mut self.blob_refs);
         let done_callback = Box::new(move || {
             callbacks.into_iter().for_each(|c| c());
         });

@@ -49,7 +49,7 @@ impl CmdPutContext {
             .map_err(|err| format!("failed to spawn sub-process {}: {}", HAT_CMD_PUT, err))?;
 
         {
-            let mut stdin = mem::replace(&mut child.stdin, None).expect("failed to get stdin");
+            let mut stdin = mem::take(&mut child.stdin).expect("failed to get stdin");
             for block in self.text.slices() {
                 if let Err(err) = stdin.write_all(block) {
                     return Err(err.to_string());
@@ -184,7 +184,7 @@ impl CmdBackend {
     }
 
     fn try_flush(&self, queue: &mut MutexGuard<Vec<CmdPut>>) {
-        let mut old = mem::replace(&mut **queue, vec![]);
+        let mut old = mem::take(&mut **queue);
 
         let mut restart = vec![];
 

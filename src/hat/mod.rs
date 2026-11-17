@@ -87,14 +87,12 @@ impl gc::GcBackend for GcBackend {
     }
 
     fn reverse_refs(&self, hash_id: gc::Id) -> Result<Vec<gc::Id>, Self::Err> {
-        let entry = match self.hash_index.get_hash(hash_id) {
-            Some(entry) => entry,
-            None => panic!("HashNotKnown in hash index."),
-        };
-        if entry.childs.is_none() {
-            return Ok(Vec::new());
-        }
-        Ok(entry.childs.unwrap())
+        // Err = Void: missing hash is a hard invariant failure.
+        let entry = self
+            .hash_index
+            .get_hash(hash_id)
+            .expect("HashNotKnown in hash index");
+        Ok(entry.childs.unwrap_or_default())
     }
 
     fn list_ids_by_tag(&self, tag: tags::Tag) -> Result<mpsc::Receiver<gc::Id>, Self::Err> {
@@ -513,13 +511,13 @@ impl<B: StoreBackend> HatRc<B> {
             hashes: &hash::HashIndex,
             blobs: &blob::BlobStore<B>,
             node: family::recover::Node,
-        ) {
+        ) -> Result<(), HatError> {
             let mut pref = node.href.persistent_ref.clone();
             pref.blob_id = Some(
                 blobs
                     .find(&pref.blob_name)
                     .map(|b| b.id)
-                    .expect(&format!("unknown blob: {:?}", pref.blob_name)),
+                    .ok_or_else(|| format!("unknown blob: {:?}", pref.blob_name))?,
             );
 
             fn entry(href: hash::tree::HashRef, childs: Option<Vec<u64>>) -> hash::Entry {
@@ -558,7 +556,7 @@ impl<B: StoreBackend> HatRc<B> {
                 hash::ReserveResult::HashKnown(id) => {
                     if hashes.reserved_id(&entry.hash).is_none() {
                         // This is a repeat hash that was already fully committed.
-                        return;
+                        return Ok(());
                     }
                     id
                 }
@@ -566,6 +564,7 @@ impl<B: StoreBackend> HatRc<B> {
             };
             // Commit hash.
             hashes.commit(id, Some(entry));
+            Ok(())
         }
 
         let mut dir_v = family::recover::DirVisitor::new();
@@ -575,11 +574,11 @@ impl<B: StoreBackend> HatRc<B> {
         let mut tops = vec![];
         while {
             for node in file_v.nodes() {
-                recover_entry(&self.hash_index, &self.blob_store, node);
+                recover_entry(&self.hash_index, &self.blob_store, node)?;
             }
             tops.append(&mut file_v.tops());
             for node in dir_v.nodes() {
-                recover_entry(&self.hash_index, &self.blob_store, node);
+                recover_entry(&self.hash_index, &self.blob_store, node)?;
             }
             walk.resume(&mut file_v, &mut dir_v)?
         } {}
@@ -742,8 +741,9 @@ impl<B: StoreBackend> HatRc<B> {
             family.commit(&|hash| {
                 let id = local_hash_index
                     .get_id(hash)
-                    .expect(&format!("Top hash: {:?}", hash.bytes));
+                    .ok_or_else(|| format!("Top hash not found in hash index: {:?}", hash.bytes))?;
                 local_hash_index.set_tag(id, tags::Tag::Reserved);
+                Ok(())
             })?
         };
 
@@ -823,15 +823,18 @@ impl<B: StoreBackend> HatRc<B> {
         // Extract latest snapshot info:
         let (_info, _dir_hash, dir_ref) = match self.snapshot_index.latest(&family_name) {
             Some((i, h, Some(r))) => (i, h, r),
-            _ => panic!(
-                "Tried to checkout family '{}' before first completed commit",
-                family_name
-            ),
+            _ => {
+                return Err(format!(
+                    "Tried to checkout family '{}' before first completed commit",
+                    family_name
+                )
+                .into())
+            }
         };
 
         let family = self
             .open_family(family_name.clone())
-            .expect(&format!("Could not open family '{}'", family_name));
+            .map_err(|e| format!("Could not open family '{}': {}", family_name, e))?;
 
         let mut output_dir = output_dir;
         self.checkout_dir_ref(&family, &mut output_dir, dir_ref)
@@ -843,7 +846,7 @@ impl<B: StoreBackend> HatRc<B> {
         output: &mut PathBuf,
         dir_hash: hash::tree::HashRef,
     ) -> Result<(), HatError> {
-        fs::create_dir_all(&output).unwrap();
+        fs::create_dir_all(&output)?;
         for (entry, hash_ref) in family::Family::<B>::fetch_dir_data(dir_hash, self.hash_backend())?
         {
             assert!(!entry.info.name.is_empty());
@@ -857,7 +860,7 @@ impl<B: StoreBackend> HatRc<B> {
                     let mut fd = fs::File::create(&output)?;
                     let tree_opt = hash::tree::LeafIterator::new(self.hash_backend(), hash_ref)?;
                     if let Some(tree) = tree_opt {
-                        family::Family::<B>::write_file_chunks(&mut fd, tree);
+                        family::Family::<B>::write_file_chunks(&mut fd, tree)?;
                     }
                 }
                 walker::Content::Dir(hash_ref) => {
@@ -916,7 +919,7 @@ impl<B: StoreBackend> HatRc<B> {
         let final_ref = self
             .hash_index
             .get_id(&top_hash)
-            .expect("Snapshot hash does not exist");
+            .ok_or("Snapshot hash does not exist")?;
 
         {
             let hash_backend = self.hash_backend();
@@ -926,30 +929,34 @@ impl<B: StoreBackend> HatRc<B> {
                 ..
             } = self;
 
-            let listing = || {
+            // Build the id listing up front so that errors can be propagated
+            // (the GC callback itself cannot return a Result).
+            let id_receiver = {
                 let (id_sender, id_receiver) = mpsc::channel();
                 match top_ref.leaf {
                     blob::LeafType::TreeList => {
                         // Recursive tree structure.
                         // We need all top hashes from all sub-trees.
                         for hash in list_snapshot(&hash_backend, top_ref) {
-                            let res = hash.expect("Invalid hash ref");
-                            let href = match res {
+                            let href = match hash? {
                                 walker::Content::Data(href) => href,
                                 walker::Content::Dir(href) => href,
                                 walker::Content::Link(_) => continue,
                             };
                             match hash_index.get_id(&href.hash) {
-                                Some(id) => id_sender.send(id).unwrap(),
-                                None => panic!("Unexpected reply from hash index."),
+                                Some(id) => id_sender.send(id).map_err(|_| "Id receiver dropped")?,
+                                None => {
+                                    return Err(From::from("Unexpected reply from hash index."))
+                                }
                             }
                         }
                     }
                     blob::LeafType::SnapshotList => {
                         // Only the top ref is needed for snapshot lists.
-                        id_sender
-                            .send(hash_index.get_id(&top_ref.hash).expect("Unknown top ref"))
-                            .unwrap();
+                        let top_id = hash_index
+                            .get_id(&top_ref.hash)
+                            .ok_or("Unknown top ref")?;
+                        id_sender.send(top_id).map_err(|_| "Id receiver dropped")?;
                     }
                     blob::LeafType::FileChunk => {
                         unreachable!("Called deregister directly on filechunk tree")
@@ -958,7 +965,7 @@ impl<B: StoreBackend> HatRc<B> {
                 id_receiver
             };
 
-            gc.deregister(&info, final_ref, listing)?;
+            gc.deregister(&info, final_ref, move || id_receiver)?;
         }
         family.flush()?;
 

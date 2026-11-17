@@ -111,7 +111,10 @@ fn main() {
             .get_one::<String>(name)
             .cloned()
             .or_else(|| env::var_os(name.to_uppercase()).map(|s| s.into_string().unwrap()))
-            .unwrap_or_else(|| panic!("{} required", name))
+            .unwrap_or_else(|| {
+                eprintln!("Error: {} required (pass --{} or set {})", name, name, name.to_uppercase());
+                std::process::exit(1);
+            })
     };
 
     // Special cased one-off commands
@@ -148,8 +151,11 @@ fn main() {
             // Update the family index.
             let mut family = hat
                 .open_family(name.clone())
-                .unwrap_or_else(|_| panic!("Could not open family '{}'", name));
-            family.snapshot_dir(PathBuf::from(path));
+                .unwrap_or_else(|e| {
+                    eprintln!("Error: could not open family '{}': {}", name, e);
+                    std::process::exit(1);
+                });
+            family.snapshot_dir(PathBuf::from(path)).unwrap();
 
             // Commit the updated index.
             hat.commit(&mut family, None).unwrap();

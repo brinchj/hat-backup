@@ -25,20 +25,7 @@ use std::ffi;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
-use std::str;
 use crate::util::{FileIterator, PathHandler};
-
-fn try_a_few_times_then_panic<F>(mut f: F, msg: &str)
-where
-    F: FnMut() -> bool,
-{
-    for _ in 1 as i32..5 {
-        if f() {
-            return;
-        }
-    }
-    panic!("{}", msg);
-}
 
 pub mod recover {
     use super::parse_dir_data;
@@ -68,10 +55,10 @@ pub mod recover {
             }
         }
         pub fn tops(&mut self) -> Vec<hash::Hash> {
-            mem::replace(&mut self.tops, vec![])
+            mem::take(&mut self.tops)
         }
         pub fn nodes(&mut self) -> VecDeque<Node> {
-            mem::replace(&mut self.nodes, VecDeque::new())
+            mem::take(&mut self.nodes)
         }
     }
 
@@ -130,13 +117,13 @@ pub mod recover {
             }
         }
         pub fn nodes(&mut self) -> VecDeque<Node> {
-            mem::replace(&mut self.nodes, VecDeque::new())
+            mem::take(&mut self.nodes)
         }
     }
 
     impl walker::HasFiles for DirVisitor {
         fn files(&mut self) -> Vec<walker::FileEntry> {
-            mem::replace(&mut self.files, vec![])
+            mem::take(&mut self.files)
         }
     }
 
@@ -229,12 +216,12 @@ impl<B: StoreBackend> Clone for Family<B> {
 }
 
 impl<B: StoreBackend> Family<B> {
-    pub fn snapshot_dir(&self, dir: PathBuf) {
+    pub fn snapshot_dir(&self, dir: PathBuf) -> Result<(), HatError> {
         let handler = InsertPathHandler::new(self.key_store_process.clone());
 
         let mut parent_path = PathBuf::from("/");
 
-        let dir = fs::canonicalize(dir).unwrap();
+        let dir = fs::canonicalize(dir)?;
         info!("Committing: {}", dir.display());
         assert!(dir.is_absolute());
 
@@ -265,15 +252,18 @@ impl<B: StoreBackend> Family<B> {
         if !bailout && dir.is_dir() {
             handler.recurse(PathBuf::from(&dir), parent);
 
-            match self.key_store_process[0].send_reply(key::Msg::<FileIterator>::CommitReservedNodes(Some(parent)))
+            match self.key_store_process[0]
+                .send_reply(key::Msg::<FileIterator>::CommitReservedNodes(Some(parent)))?
             {
-                Ok(key::Reply::Ok) => (),
-                _ => panic!("Unexpected reply from keystore"),
+                key::Reply::Ok => Ok(()),
+                _ => Err(From::from("Unexpected reply from keystore")),
             }
         } else {
-            match self.key_store_process[0].send_reply(key::Msg::<FileIterator>::CommitReservedNodes(None)) {
-                Ok(key::Reply::Ok) => (),
-                _ => panic!("Unexpected reply from keystore"),
+            match self.key_store_process[0]
+                .send_reply(key::Msg::<FileIterator>::CommitReservedNodes(None))?
+            {
+                key::Reply::Ok => Ok(()),
+                _ => Err(From::from("Unexpected reply from keystore")),
             }
         }
     }
@@ -325,14 +315,12 @@ impl<B: StoreBackend> Family<B> {
     pub fn write_file_chunks<HTB: hash::tree::HashTreeBackend<Err = key::MsgError>>(
         fd: &mut fs::File,
         tree: hash::tree::LeafIterator<HTB>,
-    ) {
+    ) -> Result<(), HatError> {
         for chunk in tree {
-            try_a_few_times_then_panic(
-                || fd.write_all(&chunk[..]).is_ok(),
-                "Could not write chunk.",
-            );
+            fd.write_all(&chunk[..])?;
         }
-        try_a_few_times_then_panic(|| fd.flush().is_ok(), "Could not flush file.");
+        fd.flush()?;
+        Ok(())
     }
 
     // Checks out the family key-index. Hat::checkout_in_dir checks out a committed snapshot;
@@ -357,8 +345,8 @@ impl<B: StoreBackend> Family<B> {
                 key::Data::FilePlaceholder => {
                     // This is a file, write it
                     let mut fd = fs::File::create(&path)?;
-                    if let Some(tree) = read_fn_opt.expect("File has data").init()? {
-                        Self::write_file_chunks(&mut fd, tree);
+                    if let Some(tree) = read_fn_opt.ok_or("File has data")?.init()? {
+                        Self::write_file_chunks(&mut fd, tree)?;
                     }
                 }
                 key::Data::Symlink(link_path) => {
@@ -420,7 +408,7 @@ impl<B: StoreBackend> Family<B> {
 
     pub fn commit<F>(&mut self, top_hash_fn: &F) -> Result<hash::tree::HashRef, HatError>
     where
-        F: Fn(&hash::Hash),
+        F: Fn(&hash::Hash) -> Result<(), HatError>,
     {
         let mut top_tree = self.key_store.hash_tree_writer(blob::LeafType::TreeList);
         self.commit_to_tree(&mut top_tree, None, top_hash_fn)?;
@@ -436,7 +424,7 @@ impl<B: StoreBackend> Family<B> {
         top_hash_fn: &F,
     ) -> Result<(), HatError>
     where
-        F: Fn(&hash::Hash),
+        F: Fn(&hash::Hash) -> Result<(), HatError>,
     {
         let files_at_a_time = 1024;
         let mut it = self.list_from_key_store(dir_id)?.into_iter();
@@ -452,10 +440,10 @@ impl<B: StoreBackend> Family<B> {
                 let content = match entry.data {
                     key::Data::FilePlaceholder => {
                         // This is a file, store its data hash.
-                        let href = data_ref.expect("Data::File");
+                        let href = data_ref.ok_or("File entry has no data reference")?;
                         top_hash_fn(&hash::Hash {
                             bytes: href.hash.bytes.clone(),
-                        });
+                        })?;
                         models::Content::Data(href.to_model())
                     }
                     key::Data::DirPlaceholder => {
@@ -466,7 +454,7 @@ impl<B: StoreBackend> Family<B> {
 
                         // Store a reference for the sub-tree in our tree:
                         let dir_hash_ref = inner_tree.hash(Some(&entry.info))?;
-                        top_hash_fn(&dir_hash_ref.hash);
+                        top_hash_fn(&dir_hash_ref.hash)?;
 
                         models::Content::Directory(dir_hash_ref.to_model())
                     }

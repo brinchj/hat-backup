@@ -42,7 +42,7 @@ impl<'mutex, V> ops::DerefMut for SyncPoolGuard<'mutex, V> {
 impl<'mutex, V> ops::Drop for SyncPoolGuard<'mutex, V> {
     fn drop(&mut self) {
         let mut vals = self.m.vals.lock().unwrap();
-        let v = mem::replace(&mut self.v, None);
+        let v = mem::take(&mut self.v);
         vals.push(v.unwrap());
         self.m.cond.notify_one();
     }

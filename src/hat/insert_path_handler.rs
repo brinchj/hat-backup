@@ -130,8 +130,15 @@ impl<B: StoreBackend> PathHandler<Option<u64>> for InsertPathHandler<B> {
                             return Some(Some(id));
                         }
                     }
-                    Err(e) => panic!("Error from key store: {:?}", e),
-                    _ => panic!("Unexpected reply from key store."),
+                    Err(e) => {
+                        warn!("Skipping '{}': error from key store: {:?}", path.display(), e);
+                    }
+                    _ => {
+                        warn!(
+                            "Skipping '{}': unexpected reply from key store",
+                            path.display()
+                        );
+                    }
                 }
             }
         }
