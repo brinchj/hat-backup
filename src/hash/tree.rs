@@ -79,7 +79,7 @@ impl HashRef {
 }
 
 pub trait HashTreeBackend: Clone {
-    type Err: fmt::Debug;
+    type Err: fmt::Debug + From<&'static str>;
 
     fn fetch_chunk(&self, _href: &HashRef) -> Result<Option<Vec<u8>>, Self::Err>;
     fn fetch_childs(&self, _hash: &Hash) -> Option<Vec<u64>>;
@@ -355,10 +355,11 @@ where
                 None => cycle_start = Some(node.hash.clone()),
                 Some(ref hash) => assert!(hash != &node.hash),
             }
-            let fetch_chunk = |backend: &B, child: &HashRef| {
-                backend
-                    .fetch_chunk(child)
-                    .map(|opt| opt.expect("Invalid hash ref"))
+            let fetch_chunk = |backend: &B, child: &HashRef| -> Result<Vec<u8>, B::Err> {
+                match backend.fetch_chunk(child)? {
+                    Some(data) => Ok(data),
+                    None => Err(From::from("Invalid hash ref")),
+                }
             };
 
             match node.node {

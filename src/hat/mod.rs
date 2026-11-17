@@ -124,9 +124,31 @@ pub struct Hat<B: StoreBackend, G: gc::Gc<GcBackend>> {
     blob_store: Arc<blob::BlobStore<B>>,
     blob_max_size: usize,
     gc: G,
+    #[cfg(test)]
+    commit_fault: Option<CommitFault>,
+    #[cfg(test)]
+    delete_fault: Option<DeleteFault>,
 }
 
 pub type HatRc<B> = Hat<B, GcRc<GcBackend>>;
+
+/// Test-only injection points for simulating crash mid-commit.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommitFault {
+    AfterReserve,
+    AfterHashUpdate,
+    AfterRegisterFinal,
+    AfterReadyCommit,
+}
+
+/// Test-only injection points for simulating crash mid-delete.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeleteFault {
+    AfterMark,
+    AfterGcDeregister,
+}
 
 fn concat_filename(mut a: PathBuf, b: &str) -> String {
     a.push(b);
@@ -238,6 +260,10 @@ impl<B: StoreBackend> HatRc<B> {
             blob_store: bs_p,
             blob_max_size: max_blob_size,
             gc: gc,
+            #[cfg(test)]
+            commit_fault: None,
+            #[cfg(test)]
+            delete_fault: None,
         };
 
         // Resume any unfinished commands.
@@ -279,12 +305,47 @@ impl<B: StoreBackend> HatRc<B> {
             blob_max_size: max_blob_size,
             backend: backend,
             gc: gc,
+            commit_fault: None,
+            delete_fault: None,
         };
 
         // Resume any unfinished commands.
         hat.resume()?;
 
         Ok(hat)
+    }
+
+    #[cfg(test)]
+    pub fn inject_commit_fault(&mut self, fault: CommitFault) {
+        self.commit_fault = Some(fault);
+    }
+
+    #[cfg(test)]
+    pub fn inject_delete_fault(&mut self, fault: DeleteFault) {
+        self.delete_fault = Some(fault);
+    }
+
+    #[cfg(test)]
+    pub fn list_not_done_snapshots(&mut self) -> Vec<db::SnapshotStatus> {
+        self.snapshot_index.list_not_done()
+    }
+
+    #[cfg(test)]
+    fn maybe_commit_fault(&mut self, stage: CommitFault) -> Result<(), HatError> {
+        if self.commit_fault == Some(stage) {
+            self.commit_fault = None;
+            return Err("injected commit fault".into());
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn maybe_delete_fault(&mut self, stage: DeleteFault) -> Result<(), HatError> {
+        if self.delete_fault == Some(stage) {
+            self.delete_fault = None;
+            return Err("injected delete fault".into());
+        }
+        Ok(())
     }
 
     pub fn hash_tree_writer(
@@ -442,7 +503,7 @@ impl<B: StoreBackend> HatRc<B> {
         self.blob_store.recover()?;
         let root_href = self
             .recover_root()?
-            .expect("Failed to find a commit-ed root.");
+            .ok_or("Failed to find a commit-ed root")?;
 
         info!(
             "Recovering using root: {}",
@@ -734,6 +795,8 @@ impl<B: StoreBackend> HatRc<B> {
             }
         };
         self.meta_flush();
+        #[cfg(test)]
+        self.maybe_commit_fault(CommitFault::AfterReserve)?;
 
         // Commit metadata while registering needed data-hashes (files and dirs).
         let top_ref = {
@@ -753,6 +816,8 @@ impl<B: StoreBackend> HatRc<B> {
         self.snapshot_index
             .update(&snap_info, &top_ref.hash, &top_ref);
         self.meta_flush();
+        #[cfg(test)]
+        self.maybe_commit_fault(CommitFault::AfterHashUpdate)?;
 
         // Register the final hash.
         // At this point, the GC should still be able to either resume or rollback safely.
@@ -764,6 +829,8 @@ impl<B: StoreBackend> HatRc<B> {
             .expect("Hash does not exist");
         self.gc.register_final(&snap_info, hash_id)?;
         self.meta_flush();
+        #[cfg(test)]
+        self.maybe_commit_fault(CommitFault::AfterRegisterFinal)?;
 
         self.commit_finalize(snap_info, &top_ref.hash)?;
 
@@ -778,6 +845,8 @@ impl<B: StoreBackend> HatRc<B> {
         // Commit locally. Let the GC perform any needed cleanup.
         self.snapshot_index.ready_commit(&snap_info);
         self.meta_flush();
+        #[cfg(test)]
+        self.maybe_commit_fault(CommitFault::AfterReadyCommit)?;
 
         let hash_id = self.hash_index.get_id(hash).expect("Hash does not exist");
         self.gc.register_cleanup(&snap_info, hash_id)?;
@@ -915,6 +984,8 @@ impl<B: StoreBackend> HatRc<B> {
         // Make the snapshot to enable resuming.
         self.snapshot_index.will_delete(&info);
         self.flush_snapshot_index();
+        #[cfg(test)]
+        self.maybe_delete_fault(DeleteFault::AfterMark)?;
 
         let final_ref = self
             .hash_index
@@ -968,6 +1039,8 @@ impl<B: StoreBackend> HatRc<B> {
             gc.deregister(&info, final_ref, move || id_receiver)?;
         }
         family.flush()?;
+        #[cfg(test)]
+        self.maybe_delete_fault(DeleteFault::AfterGcDeregister)?;
 
         self.deregister_finalize(family, info, final_ref)
     }

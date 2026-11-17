@@ -58,6 +58,21 @@ impl MemoryBackend {
             .map(|x| x.into_boxed_slice())
             .collect())
     }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.files.lock().unwrap().len()
+    }
+
+    #[cfg(test)]
+    pub fn keys(&self) -> Vec<Vec<u8>> {
+        self.files.lock().unwrap().keys().cloned().collect()
+    }
+
+    #[cfg(test)]
+    pub fn remove(&self, name: &[u8]) {
+        self.files.lock().unwrap().remove(name);
+    }
 }
 
 impl StoreBackend for MemoryBackend {
