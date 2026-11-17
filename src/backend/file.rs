@@ -12,15 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use backend::StoreBackend;
-use crypto::CipherText;
+use crate::backend::StoreBackend;
+use crate::crypto::CipherText;
 use hex::{self, FromHex};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use util::FnBox;
+use crate::util::FnBox;
 
 pub struct FileBackend {
     root: PathBuf,
@@ -80,7 +80,7 @@ impl FileBackend {
 }
 
 impl StoreBackend for FileBackend {
-    fn store(&self, name: &[u8], data: CipherText, done: Box<FnBox<(), ()>>) -> Result<(), String> {
+    fn store(&self, name: &[u8], data: CipherText, done: Box<dyn FnBox<(), ()>>) -> Result<(), String> {
         use self::io::Write;
 
         let mut path = self.root.clone();

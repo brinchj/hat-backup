@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use db::SnapshotInfo;
-use gc;
+use crate::db::SnapshotInfo;
+use crate::gc;
 use std::sync::mpsc;
 use void::Void;
 

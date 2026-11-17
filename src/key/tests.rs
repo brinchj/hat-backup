@@ -12,19 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use backend::{MemoryBackend, StoreBackend};
-use key::*;
+use crate::backend::{MemoryBackend, StoreBackend};
+use crate::key::*;
 
 use quickcheck;
 
+use rand::distributions::{Alphanumeric, DistString};
 use rand::thread_rng;
 use rand::Rng;
 use std::io;
 use std::sync::Arc;
-use util::Process;
+use crate::util::Process;
 
 fn random_string() -> String {
-    thread_rng().gen_ascii_chars().take(32).collect()
+    Alphanumeric.sample_string(&mut thread_rng(), 32)
 }
 
 fn random_ascii_bytes() -> Vec<u8> {

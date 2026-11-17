@@ -53,7 +53,7 @@ allow_tables_to_appear_in_same_query!(key_data, key_tree,);
 // Rust models.
 #[derive(Queryable, QueryableByName)]
 pub struct RowId {
-    #[sql_type = "BigInt"]
+    #[diesel(sql_type = BigInt)]
     pub row_id: i64,
 }
 
@@ -65,7 +65,7 @@ pub struct KeyNode {
 }
 
 #[derive(Insertable)]
-#[table_name = "key_tree"]
+#[diesel(table_name = key_tree)]
 pub struct NewKeyNode<'a> {
     pub node_id: Option<i64>,
     pub parent_id: Option<i64>,
@@ -94,7 +94,7 @@ pub struct KeyData {
 }
 
 #[derive(Insertable)]
-#[table_name = "key_data"]
+#[diesel(table_name = key_data)]
 pub struct NewKeyData<'a> {
     pub node_id: Option<i64>,
     pub committed: bool,

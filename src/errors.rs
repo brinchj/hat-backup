@@ -22,56 +22,52 @@ use std::{error, fmt};
 pub struct RetryError;
 
 impl fmt::Display for RetryError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        (self as &fmt::Debug).fmt(f)
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Retry request")
     }
 }
 
-impl error::Error for RetryError {
-    fn description(&self) -> &str {
-        "Retry request"
-    }
-}
+impl error::Error for RetryError {}
 
 mod hat_error {
-
-    use blob;
-    use key;
-    use serde_cbor;
+    use crate::blob;
+    use crate::key;
     use std::borrow::Cow;
     use std::sync::mpsc;
     use std::{io, str};
     use void;
 
-    error_type! {
-        #[derive(Debug)]
-        pub enum HatError {
-            Recv(mpsc::RecvError) {
-                cause;
-            },
-            Keys(key::MsgError) {
-                cause;
-            },
-            Serde(serde_cbor::error::Error) {
-                cause;
-            },
-            IO(io::Error) {
-                cause;
-            },
-            Message(Cow<'static, str>) {
-                desc (e) &**e;
-                from (s: &'static str) s.into();
-                from (s: String) s.into();
-            },
-            DieselError(super::DieselError) {
-                cause;
-            },
-            Crypto(super::CryptoError) {
-                cause;
-            },
-            Blob(blob::BlobError) {
-                cause;
-            },
+    #[derive(Debug, thiserror::Error)]
+    pub enum HatError {
+        #[error(transparent)]
+        Recv(#[from] mpsc::RecvError),
+        #[error(transparent)]
+        Keys(#[from] key::MsgError),
+        #[error(transparent)]
+        Serde(#[from] ciborium::de::Error<io::Error>),
+        #[error(transparent)]
+        SerdeSer(#[from] ciborium::ser::Error<io::Error>),
+        #[error(transparent)]
+        IO(#[from] io::Error),
+        #[error("{0}")]
+        Message(Cow<'static, str>),
+        #[error(transparent)]
+        DieselError(#[from] super::DieselError),
+        #[error(transparent)]
+        Crypto(#[from] super::CryptoError),
+        #[error(transparent)]
+        Blob(#[from] blob::BlobError),
+    }
+
+    impl From<&'static str> for HatError {
+        fn from(s: &'static str) -> Self {
+            HatError::Message(Cow::Borrowed(s))
+        }
+    }
+
+    impl From<String> for HatError {
+        fn from(s: String) -> Self {
+            HatError::Message(Cow::Owned(s))
         }
     }
 
@@ -80,27 +76,31 @@ mod hat_error {
             void::unreachable(val)
         }
     }
+
+    impl From<str::Utf8Error> for HatError {
+        fn from(e: str::Utf8Error) -> Self {
+            HatError::Message(Cow::Owned(e.to_string()))
+        }
+    }
 }
 
 mod diesel_error {
     use diesel;
     use diesel_migrations;
 
-    error_type! {
-        #[derive(Debug)]
-        pub enum DieselError {
-            SqlConnection(diesel::ConnectionError) {
-                cause;
-            },
-            SqlMigration(diesel_migrations::MigrationError) {
-                cause;
-            },
-            SqlRunMigration(diesel_migrations::RunMigrationsError) {
-                cause;
-            },
-            SqlExecute(diesel::result::Error) {
-                cause;
-            },
+    #[derive(Debug, thiserror::Error)]
+    pub enum DieselError {
+        #[error(transparent)]
+        SqlConnection(#[from] diesel::ConnectionError),
+        #[error(transparent)]
+        SqlMigration(#[from] Box<dyn std::error::Error + Send + Sync>),
+        #[error(transparent)]
+        SqlExecute(#[from] diesel::result::Error),
+    }
+
+    impl From<diesel_migrations::MigrationError> for DieselError {
+        fn from(e: diesel_migrations::MigrationError) -> Self {
+            DieselError::SqlMigration(Box::new(e))
         }
     }
 }
@@ -109,14 +109,27 @@ mod crypto_error {
     use std::borrow::Cow;
     use std::str;
 
-    error_type! {
-        #[derive(Debug)]
-        pub enum CryptoError {
-            Message(Cow<'static, str>) {
-                desc (e) &**e;
-                from (s: &'static str) s.into();
-                from (s: String) s.into();
-            },
+    #[derive(Debug, thiserror::Error)]
+    pub enum CryptoError {
+        #[error("{0}")]
+        Message(Cow<'static, str>),
+    }
+
+    impl From<&'static str> for CryptoError {
+        fn from(s: &'static str) -> Self {
+            CryptoError::Message(Cow::Borrowed(s))
+        }
+    }
+
+    impl From<String> for CryptoError {
+        fn from(s: String) -> Self {
+            CryptoError::Message(Cow::Owned(s))
+        }
+    }
+
+    impl From<str::Utf8Error> for CryptoError {
+        fn from(e: str::Utf8Error) -> Self {
+            CryptoError::Message(Cow::Owned(e.to_string()))
         }
     }
 }

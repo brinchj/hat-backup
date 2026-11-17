@@ -17,12 +17,12 @@
 //! This module implements two structures for handling hash trees: A streaming hash-tree writer, and
 //! a streaming hash-tree reader.
 
-use blob::{ChunkRef, LeafType, NodeType};
-use key;
-use models;
+use crate::blob::{ChunkRef, LeafType, NodeType};
+use crate::key;
+use crate::models;
 
-use hash::Hash;
-use serde_cbor;
+use crate::hash::Hash;
+use crate::cbor_util;
 
 #[cfg(test)]
 use quickcheck;
@@ -68,29 +68,29 @@ impl HashRef {
         }
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Result<HashRef, serde_cbor::error::Error> {
-        let v: models::HashRef = serde_cbor::from_slice(bytes)?;
+    pub fn from_bytes(bytes: &[u8]) -> Result<HashRef, cbor_util::DeError> {
+        let v: models::HashRef = cbor_util::from_slice(bytes)?;
         Ok(From::from(v))
     }
 
     pub fn as_bytes(&self) -> Vec<u8> {
-        serde_cbor::to_vec(&self.to_model()).unwrap()
+        cbor_util::to_vec(&self.to_model()).unwrap()
     }
 }
 
 pub trait HashTreeBackend: Clone {
     type Err: fmt::Debug;
 
-    fn fetch_chunk(&self, &HashRef) -> Result<Option<Vec<u8>>, Self::Err>;
-    fn fetch_childs(&self, &Hash) -> Option<Vec<u64>>;
-    fn fetch_persistent_ref(&self, &Hash) -> Option<ChunkRef>;
+    fn fetch_chunk(&self, _href: &HashRef) -> Result<Option<Vec<u8>>, Self::Err>;
+    fn fetch_childs(&self, _hash: &Hash) -> Option<Vec<u64>>;
+    fn fetch_persistent_ref(&self, _hash: &Hash) -> Option<ChunkRef>;
     fn insert_chunk(
         &self,
-        &[u8],
-        NodeType,
-        LeafType,
-        Option<Vec<u64>>,
-        Option<&key::Info>,
+        _chunk: &[u8],
+        _node: NodeType,
+        _leaf: LeafType,
+        _childs: Option<Vec<u64>>,
+        _info: Option<&key::Info>,
     ) -> Result<(u64, HashRef), Self::Err>;
 }
 
@@ -98,7 +98,7 @@ fn hash_refs_to_bytes(refs: &Vec<HashRef>) -> Vec<u8> {
     let value = models::HashRefs {
         refs: refs.iter().map(|hr| hr.to_model()).collect(),
     };
-    serde_cbor::to_vec(&value).unwrap()
+    cbor_util::to_vec(&value).unwrap()
 }
 
 fn hash_refs_from_bytes(bytes: &[u8]) -> Option<Vec<HashRef>> {
@@ -106,7 +106,7 @@ fn hash_refs_from_bytes(bytes: &[u8]) -> Option<Vec<HashRef>> {
         return Some(vec![]);
     }
 
-    let hr: models::HashRefs = serde_cbor::from_slice(bytes).unwrap();
+    let hr: models::HashRefs = cbor_util::from_slice(bytes).unwrap();
     Some(hr.refs.into_iter().map(|r| From::from(r)).collect())
 }
 
@@ -122,12 +122,12 @@ fn test_hash_refs_identity() {
             key: None,
         };
         let mut v = vec![];
-        for i in 1..count + 1 {
+        for i in 0..count {
             v.push(HashRef {
                 hash: Hash {
                     bytes: hash.clone(),
                 },
-                node: NodeType::Branch(i as u64),
+                node: NodeType::Branch(u64::from(i) + 1),
                 leaf: LeafType::FileChunk,
                 info: None,
                 persistent_ref: chunk_ref.clone(),

@@ -10,8 +10,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use backend::StoreBackend;
-use crypto::CipherText;
+use crate::backend::StoreBackend;
+use crate::crypto::CipherText;
 use hex::{self, FromHex};
 use std::collections::BTreeMap;
 use std::mem;
@@ -19,7 +19,7 @@ use std::process;
 use std::sync::{Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
-use util::FnBox;
+use crate::util::FnBox;
 
 const HAT_CMD_PUT: &str = "hat-backup-put";
 const HAT_CMD_GET: &str = "hat-backup-get";
@@ -36,7 +36,7 @@ pub struct CmdBackend {
 struct CmdPutContext {
     hex_key: String,
     text: CipherText,
-    done_callback: Box<FnBox<(), ()>>,
+    done_callback: Box<dyn FnBox<(), ()>>,
 }
 
 impl CmdPutContext {
@@ -213,7 +213,7 @@ impl CmdBackend {
 }
 
 impl StoreBackend for CmdBackend {
-    fn store(&self, name: &[u8], text: CipherText, done: Box<FnBox<(), ()>>) -> Result<(), String> {
+    fn store(&self, name: &[u8], text: CipherText, done: Box<dyn FnBox<(), ()>>) -> Result<(), String> {
         let hex_key = hex::encode(&name);
 
         let context = CmdPutContext {

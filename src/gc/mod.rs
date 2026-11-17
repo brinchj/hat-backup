@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use db::{GcData, SnapshotInfo, UpdateFn};
+use crate::db::{GcData, SnapshotInfo, UpdateFn};
 #[cfg(test)]
 use std::collections::HashMap;
 #[cfg(test)]
@@ -23,7 +23,7 @@ use std::mem;
 use std::sync::{Arc, Mutex};
 
 use std::sync::mpsc;
-use tags;
+use crate::tags;
 
 mod noop;
 mod rc;
@@ -87,7 +87,7 @@ where
 pub trait Gc<B> {
     type Err;
 
-    fn new(B) -> Self;
+    fn new(_backend: B) -> Self;
 
     fn is_exact() -> bool;
 

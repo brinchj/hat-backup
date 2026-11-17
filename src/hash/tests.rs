@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use blob::{ChunkRef, LeafType, NodeType};
-use crypto;
-use hash::tree::*;
-use hash::Hash;
-use key;
+use crate::blob::{ChunkRef, LeafType, NodeType};
+use crate::crypto;
+use crate::hash::tree::*;
+use crate::hash::Hash;
+use crate::key;
 use quickcheck;
 
 use std::collections::{BTreeMap, BTreeSet};

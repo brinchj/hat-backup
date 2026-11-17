@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use models;
-pub use models::LeafType;
+use crate::models;
+pub use crate::models::LeafType;
 
 use secstr;
-use serde_cbor;
+use crate::cbor_util;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Packing {
@@ -126,18 +126,18 @@ impl ChunkRef {
         }
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Result<ChunkRef, serde_cbor::error::Error> {
-        let model: models::ChunkRef = serde_cbor::from_slice(bytes)?;
+    pub fn from_bytes(bytes: &[u8]) -> Result<ChunkRef, cbor_util::DeError> {
+        let model: models::ChunkRef = cbor_util::from_slice(bytes)?;
         Ok(From::from(model))
     }
 
     pub fn as_bytes(&self) -> Vec<u8> {
-        serde_cbor::to_vec(&self.to_model()).unwrap()
+        cbor_util::to_vec(&self.to_model()).unwrap()
     }
 
     pub fn as_bytes_no_name(&self) -> Vec<u8> {
         let mut model = self.to_model();
         model.blob_name = "".into();
-        serde_cbor::to_vec(&model).unwrap()
+        cbor_util::to_vec(&model).unwrap()
     }
 }

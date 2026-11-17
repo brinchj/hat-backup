@@ -14,15 +14,15 @@
 
 //! Local state for known hashes and their external location (blob reference).
 
-use blob;
-use crypto;
-use db;
+use crate::blob;
+use crate::crypto;
+use crate::db;
 
-use errors::{DieselError, RetryError};
+use crate::errors::{DieselError, RetryError};
 
 use std::sync::{Arc, Mutex, MutexGuard};
-use tags;
-use util::UniquePriorityQueue;
+use crate::tags;
+use crate::util::UniquePriorityQueue;
 
 pub mod tree;
 

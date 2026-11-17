@@ -1,22 +1,22 @@
 use super::fs;
-use backend;
-use errors::{self, HatError};
-use hash;
-use hat::{self, walker};
-use libc::{self, c_int};
-
-use fuse;
-use std::borrow::Cow;
+use crate::backend;
+use crate::errors::HatError;
+use crate::hash;
+use crate::hat::{self, walker};
+use fuser::{
+    self, FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty,
+    ReplyEntry, ReplyOpen, Request,
+};
+use libc::c_int;
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::io;
-use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use time::Timespec;
+use std::time::{Duration, UNIX_EPOCH};
 
 #[derive(Clone)]
-enum FileType {
+enum NodeKind {
     Parent,
     ParentTop(hash::tree::HashRef),
     FileTop(hash::tree::HashRef),
@@ -28,8 +28,8 @@ type INode = u64;
 #[derive(Clone)]
 struct File {
     name: OsString,
-    file_type: FileType,
-    attr: fuse::FileAttr,
+    file_type: NodeKind,
+    attr: FileAttr,
     parent: Option<INode>,
 }
 
@@ -58,7 +58,7 @@ impl<B: backend::StoreBackend> Fuse<B> {
     where
         P: AsRef<Path>,
     {
-        fuse::mount(self, mountpoint, &[])
+        fuser::mount2(self, mountpoint, &[])
     }
 
     fn add_file(&mut self, mut file: File) -> u64 {
@@ -66,31 +66,32 @@ impl<B: backend::StoreBackend> Fuse<B> {
         let ino = file.attr.ino;
 
         if let Some(parent_ino) = file.parent.as_ref() {
-            if !self.parent.contains_key(&parent_ino) {
+            if !self.parent.contains_key(parent_ino) {
                 self.parent.insert(*parent_ino, vec![]);
             }
-            self.parent.get_mut(&parent_ino).unwrap().push(ino);
+            self.parent.get_mut(parent_ino).unwrap().push(ino);
         }
 
         self.inodes.insert(ino, file);
         ino
     }
 
-    fn default_attr(file_type: fuse::FileType) -> fuse::FileAttr {
-        fuse::FileAttr {
+    fn default_attr(file_type: FileType) -> FileAttr {
+        FileAttr {
             kind: file_type,
             perm: 0o755,
             ino: 0,
             size: 0,
             blocks: 0,
-            atime: Timespec::new(0, 0),
-            ctime: Timespec::new(0, 0),
-            mtime: Timespec::new(0, 0),
-            crtime: Timespec::new(0, 0),
+            atime: UNIX_EPOCH,
+            ctime: UNIX_EPOCH,
+            mtime: UNIX_EPOCH,
+            crtime: UNIX_EPOCH,
             nlink: 0,
             uid: 0,
             gid: 0,
             rdev: 0,
+            blksize: 512,
             flags: 0,
         }
     }
@@ -98,8 +99,8 @@ impl<B: backend::StoreBackend> Fuse<B> {
     fn populate_from_snapshot_list(&mut self) {
         let root_ino = self.add_file(File {
             name: "root".into(),
-            file_type: FileType::Parent,
-            attr: Self::default_attr(fuse::FileType::Directory),
+            file_type: NodeKind::Parent,
+            attr: Self::default_attr(FileType::Directory),
             parent: None,
         });
 
@@ -118,8 +119,8 @@ impl<B: backend::StoreBackend> Fuse<B> {
 
             let family_ino = self.add_file(File {
                 name: family_name.into(),
-                file_type: FileType::Parent,
-                attr: Self::default_attr(fuse::FileType::Directory),
+                file_type: NodeKind::Parent,
+                attr: Self::default_attr(FileType::Directory),
                 parent: Some(root_ino),
             });
             for s in snapshots {
@@ -128,14 +129,15 @@ impl<B: backend::StoreBackend> Fuse<B> {
                     .as_ref()
                     .map(|b| hash::tree::HashRef::from_bytes(&b[..]))
                 {
-                    let mut attr = Self::default_attr(fuse::FileType::Directory);
-                    attr.ctime.sec = s.created.timestamp();
-                    attr.mtime.sec = s.created.timestamp();
+                    let mut attr = Self::default_attr(FileType::Directory);
+                    let created = UNIX_EPOCH + Duration::from_secs(s.created.timestamp() as u64);
+                    attr.ctime = created;
+                    attr.mtime = created;
 
                     self.add_file(File {
                         name: format!("{}", s.info.snapshot_id).into(),
-                        file_type: FileType::ParentTop(hash_ref),
-                        attr: attr,
+                        file_type: NodeKind::ParentTop(hash_ref),
+                        attr,
                         parent: Some(family_ino),
                     });
                 }
@@ -154,24 +156,24 @@ impl<B: backend::StoreBackend> Fuse<B> {
         for (entry, hash_ref) in entries {
             let mut file = File {
                 name: entry.info.name.into(),
-                file_type: FileType::Parent,
-                attr: Self::default_attr(fuse::FileType::Directory),
+                file_type: NodeKind::Parent,
+                attr: Self::default_attr(FileType::Directory),
                 parent: Some(parent),
             };
 
             match hash_ref {
                 walker::Content::Data(hash_ref) => {
-                    file.file_type = FileType::FileTop(hash_ref);
-                    file.attr.kind = fuse::FileType::RegularFile;
+                    file.file_type = NodeKind::FileTop(hash_ref);
+                    file.attr.kind = FileType::RegularFile;
                     file.attr.size = entry.info.byte_length.unwrap_or(0);
                 }
                 walker::Content::Dir(hash_ref) => {
-                    file.file_type = FileType::ParentTop(hash_ref);
-                    file.attr.kind = fuse::FileType::Directory;
+                    file.file_type = NodeKind::ParentTop(hash_ref);
+                    file.attr.kind = FileType::Directory;
                 }
                 walker::Content::Link(link_path) => {
-                    file.file_type = FileType::SymbolicLink(link_path);
-                    file.attr.kind = fuse::FileType::Symlink;
+                    file.file_type = NodeKind::SymbolicLink(link_path);
+                    file.attr.kind = FileType::Symlink;
                 }
             }
 
@@ -181,8 +183,8 @@ impl<B: backend::StoreBackend> Fuse<B> {
             }
 
             if let (Some(m), Some(a)) = (entry.info.modified_ts_secs, entry.info.accessed_ts_secs) {
-                file.attr.atime.sec = a as i64;
-                file.attr.mtime.sec = m as i64;
+                file.attr.atime = UNIX_EPOCH + Duration::from_secs(a as u64);
+                file.attr.mtime = UNIX_EPOCH + Duration::from_secs(m as u64);
             }
 
             self.add_file(file);
@@ -193,145 +195,168 @@ impl<B: backend::StoreBackend> Fuse<B> {
 
     pub fn childs(&mut self, parent: INode) -> Vec<INode> {
         if let Some(file) = self.inodes.get(&parent).cloned() {
-            if let FileType::ParentTop(hash_ref) = file.file_type {
+            if let NodeKind::ParentTop(hash_ref) = file.file_type {
                 if !self.parent.contains_key(&parent) {
                     self.fetch_dir(parent, hash_ref).unwrap();
                 }
             }
         }
 
-        self.parent.get(&parent).cloned().unwrap_or_else(|| vec![])
+        self.parent.get(&parent).cloned().unwrap_or_default()
     }
 }
 
-impl<B: backend::StoreBackend> fuse::Filesystem for Fuse<B> {
-    fn init(&mut self, req: &fuse::Request) -> Result<(), c_int> {
+impl<B: backend::StoreBackend> Filesystem for Fuse<B> {
+    fn init(&mut self, _req: &Request<'_>, _config: &mut fuser::KernelConfig) -> Result<(), c_int> {
         Ok(())
     }
-    fn lookup(&mut self, req: &fuse::Request, parent: u64, name: &OsStr, reply: fuse::ReplyEntry) {
+
+    fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
         for child_ino in self.childs(parent) {
             let child = self.inodes.get(&child_ino).unwrap();
             if child.name.as_os_str() == name {
-                reply.entry(&Timespec { sec: 60, nsec: 0 }, &child.attr, 1);
+                reply.entry(&Duration::from_secs(60), &child.attr, 1);
                 return;
             }
         }
+        reply.error(libc::ENOENT);
     }
-    fn getattr(&mut self, req: &fuse::Request, ino: u64, reply: fuse::ReplyAttr) {
+
+    fn getattr(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyAttr) {
         match self.inodes.get(&ino) {
-            None => (),
+            None => reply.error(libc::ENOENT),
             Some(file) => {
-                reply.attr(&Timespec { sec: 60, nsec: 0 }, &file.attr);
+                reply.attr(&Duration::from_secs(60), &file.attr);
             }
         }
     }
-    fn readlink(&mut self, req: &fuse::Request, ino: u64, reply: fuse::ReplyData) {
+
+    fn readlink(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyData) {
         if let Some(file) = self.inodes.get(&ino) {
             use std::os::unix::ffi::OsStrExt;
-            if let FileType::SymbolicLink(ref path) = file.file_type {
+            if let NodeKind::SymbolicLink(ref path) = file.file_type {
                 reply.data(path.as_os_str().as_bytes());
+                return;
             }
         }
+        reply.error(libc::ENOENT);
     }
-    fn open(&mut self, req: &fuse::Request, ino: u64, flags: u32, reply: fuse::ReplyOpen) {
+
+    fn open(&mut self, _req: &Request<'_>, ino: u64, _flags: i32, reply: ReplyOpen) {
         let backend = self.hat.lock().unwrap().hash_backend();
 
         if let Some(file) = self.inodes.get(&ino).cloned() {
             match file.file_type {
-                FileType::FileTop(hash_ref) => {
+                NodeKind::FileTop(hash_ref) => {
                     let fh = self.open_files.len() + 1;
                     self.open_files
                         .insert(fh, fs::FileReader::new(backend, hash_ref).unwrap());
-                    reply.opened(fh as u64, flags);
+                    reply.opened(fh as u64, 0);
+                    return;
                 }
                 _ => (),
             }
         }
+        reply.error(libc::ENOENT);
     }
+
     fn read(
         &mut self,
-        req: &fuse::Request,
-        ino: u64,
+        _req: &Request<'_>,
+        _ino: u64,
         fh: u64,
         offset: i64,
         size: u32,
-        reply: fuse::ReplyData,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        reply: ReplyData,
     ) {
         if let Some(ref mut file) = self.open_files.get_mut(&(fh as usize)) {
             match file.read(offset as u64, size as usize) {
                 None => reply.data(&[]),
                 Some(data) => reply.data(&data),
             }
+        } else {
+            reply.error(libc::EBADF);
         }
     }
+
     fn release(
         &mut self,
-        req: &fuse::Request,
-        ino: u64,
+        _req: &Request<'_>,
+        _ino: u64,
         fh: u64,
-        flags: u32,
-        lock_owner: u64,
-        flush: bool,
-        reply: fuse::ReplyEmpty,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        _flush: bool,
+        reply: ReplyEmpty,
     ) {
         self.open_files.remove(&(fh as usize));
         reply.ok();
     }
-    fn opendir(&mut self, req: &fuse::Request, ino: u64, flags: u32, reply: fuse::ReplyOpen) {
-        reply.opened(0, flags);
+
+    fn opendir(&mut self, _req: &Request<'_>, _ino: u64, _flags: i32, reply: ReplyOpen) {
+        reply.opened(0, 0);
     }
+
     fn readdir(
         &mut self,
-        req: &fuse::Request,
+        _req: &Request<'_>,
         ino: u64,
-        fh: u64,
+        _fh: u64,
         offset: i64,
-        mut reply: fuse::ReplyDirectory,
+        mut reply: ReplyDirectory,
     ) {
-        let file = self.inodes.get(&ino).unwrap().clone();
-        let mut files: Vec<(INode, fuse::FileType, OsString)> = vec![];
+        let file = match self.inodes.get(&ino).cloned() {
+            Some(f) => f,
+            None => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+        };
+        let mut files: Vec<(INode, FileType, OsString)> = vec![];
 
-        files.push((ino, fuse::FileType::Directory, ".".into()));
+        files.push((ino, FileType::Directory, ".".into()));
         if let Some(parent) = file.parent {
-            files.push((parent, fuse::FileType::Directory, "..".into()));
+            files.push((parent, FileType::Directory, "..".into()));
         }
 
         match file.file_type {
-            FileType::Parent | FileType::ParentTop(..) => for f_ino in self.childs(ino) {
-                if let Some(f) = self.inodes.get(&f_ino) {
-                    match f.file_type {
-                        FileType::Parent | FileType::ParentTop(..) => {
-                            files.push((f_ino, fuse::FileType::Directory, f.name.clone()));
-                        }
-                        FileType::SymbolicLink(..) => {
-                            files.push((f_ino, fuse::FileType::Symlink, f.name.clone()));
-                        }
-                        FileType::FileTop(..) => {
-                            files.push((f_ino, fuse::FileType::RegularFile, f.name.clone()));
-                        }
-                    };
+            NodeKind::Parent | NodeKind::ParentTop(..) => {
+                for f_ino in self.childs(ino) {
+                    if let Some(f) = self.inodes.get(&f_ino) {
+                        match f.file_type {
+                            NodeKind::Parent | NodeKind::ParentTop(..) => {
+                                files.push((f_ino, FileType::Directory, f.name.clone()));
+                            }
+                            NodeKind::SymbolicLink(..) => {
+                                files.push((f_ino, FileType::Symlink, f.name.clone()));
+                            }
+                            NodeKind::FileTop(..) => {
+                                files.push((f_ino, FileType::RegularFile, f.name.clone()));
+                            }
+                        };
+                    }
                 }
-            },
-            FileType::FileTop(..) | FileType::SymbolicLink(..) => (),
+            }
+            NodeKind::FileTop(..) | NodeKind::SymbolicLink(..) => (),
         }
 
-        files
-            .into_iter()
-            .enumerate()
-            .skip(offset as usize)
-            .for_each(|(offset, (ino, ft, name))| {
-                reply.add(ino, (offset as i64) + 1, ft, name);
-            });
+        for (i, (ino, ft, name)) in files.into_iter().enumerate().skip(offset as usize) {
+            if reply.add(ino, (i as i64) + 1, ft, name) {
+                break;
+            }
+        }
         reply.ok();
     }
 
     fn releasedir(
         &mut self,
-        req: &fuse::Request,
-        ino: u64,
-        fh: u64,
-        flags: u32,
-        reply: fuse::ReplyEmpty,
+        _req: &Request<'_>,
+        _ino: u64,
+        _fh: u64,
+        _flags: i32,
+        reply: ReplyEmpty,
     ) {
         reply.ok();
     }

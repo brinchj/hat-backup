@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use backend::{MemoryBackend, StoreBackend};
-use errors::HatError;
-use hat::family::Family;
-use hat::HatRc;
-use key;
+use crate::backend::{MemoryBackend, StoreBackend};
+use crate::errors::HatError;
+use crate::hat::family::Family;
+use crate::hat::HatRc;
+use crate::key;
 use std::collections::HashMap;
 use std::sync::Arc;
-use util::FileIterator;
+use crate::util::FileIterator;
 
 pub fn setup_hat<B: StoreBackend>(backend: Arc<B>) -> HatRc<B> {
     let max_blob_size = 4 * 1024 * 1024;

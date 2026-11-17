@@ -24,18 +24,19 @@ use diesel;
 use diesel::connection::TransactionManager;
 use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
-use errors::DieselError;
+use diesel_migrations::MigrationHarness;
+use crate::errors::DieselError;
 use filetime::FileTime;
-use hash;
-use models;
+use crate::hash;
+use crate::models;
 
 use std::sync::{Mutex, MutexGuard};
 
 use super::schema;
 use std::path::PathBuf;
-use tags::Tag;
-use time::Duration;
-use util::PeriodicTimer;
+use crate::tags::Tag;
+use std::time::Duration;
+use crate::util::PeriodicTimer;
 
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub enum Data {
@@ -134,7 +135,7 @@ impl From<models::FileInfo> for Info {
 
 impl Info {
     pub fn new(name: models::FileName, meta: Option<&fs::Metadata>) -> Info {
-        use std::os::linux::fs::MetadataExt;
+        use std::os::unix::fs::MetadataExt;
 
         let created = meta
             .and_then(|m| FileTime::from_creation_time(m))
@@ -151,8 +152,8 @@ impl Info {
 
             permissions: meta.map(|m| m.permissions()),
 
-            user_id: meta.map(|m| m.st_uid() as u64),
-            group_id: meta.map(|m| m.st_gid() as u64),
+            user_id: meta.map(|m| m.uid() as u64),
+            group_id: meta.map(|m| m.gid() as u64),
 
             byte_length: meta.map(|m| m.len()),
             snapshot_ts_utc: chrono::Utc::now().timestamp(),
@@ -191,43 +192,42 @@ pub struct InternalKeyIndex {
     flush_timer: PeriodicTimer,
 }
 
-embed_migrations!();
+pub const MIGRATIONS: diesel_migrations::EmbeddedMigrations = embed_migrations!();
 
 impl InternalKeyIndex {
     fn new(path: &str) -> Result<InternalKeyIndex, DieselError> {
         let conn = SqliteConnection::establish(path)?;
 
-        let ki = InternalKeyIndex {
+        let mut ki = InternalKeyIndex {
             conn: conn,
-            flush_timer: PeriodicTimer::new(Duration::seconds(5)),
+            flush_timer: PeriodicTimer::new(Duration::from_secs(5)),
         };
 
         {
             // Enable foreign key support.
-            diesel::sql_query("PRAGMA foreign_keys = ON;").execute(&ki.conn)?;
+            diesel::sql_query("PRAGMA foreign_keys = ON;").execute(&mut ki.conn)?;
         }
 
-        embedded_migrations::run(&ki.conn)?;
+        ki.conn
+            .run_pending_migrations(MIGRATIONS)
+            .map_err(|e| DieselError::SqlMigration(e))?;
 
-        {
-            let tm = ki.conn.transaction_manager();
-            tm.begin_transaction(&ki.conn)?;
-        }
+        <SqliteConnection as Connection>::TransactionManager::begin_transaction(&mut ki.conn)?;
 
         {
             // Reset tags.
             use super::schema::key_data::dsl::*;
             diesel::update(key_data.filter(tag.ne(Tag::Done as i64)))
                 .set(tag.eq(Tag::Done as i64))
-                .execute(&ki.conn)?;
+                .execute(&mut ki.conn)?;
         }
 
         Ok(ki)
     }
 
-    fn last_insert_rowid(&self) -> Result<i64, DieselError> {
+    fn last_insert_rowid(&mut self) -> Result<i64, DieselError> {
         let rows: Vec<self::schema::RowId> =
-            diesel::sql_query("SELECT last_insert_rowid() AS row_id").load(&self.conn)?;
+            diesel::sql_query("SELECT last_insert_rowid() AS row_id").load(&mut self.conn)?;
 
         assert_eq!(1, rows.len());
 
@@ -245,9 +245,8 @@ impl InternalKeyIndex {
     fn flush(&mut self) -> Result<(), DieselError> {
         debug!("SQL: key index commit");
 
-        let tm = self.conn.transaction_manager();
-        tm.commit_transaction(&self.conn)?;
-        tm.begin_transaction(&self.conn)?;
+        <SqliteConnection as Connection>::TransactionManager::commit_transaction(&mut self.conn)?;
+        <SqliteConnection as Connection>::TransactionManager::begin_transaction(&mut self.conn)?;
 
         Ok(())
     }
@@ -270,7 +269,7 @@ impl InternalKeyIndex {
             use super::schema::key_tree::dsl::*;
             diesel::insert_into(key_tree)
                 .values(&new)
-                .execute(&self.conn)?;
+                .execute(&mut self.conn)?;
             entry.node_id = Some(self.last_insert_rowid()? as u64);
         }
 
@@ -303,7 +302,7 @@ impl InternalKeyIndex {
             use super::schema::key_data::dsl::*;
             diesel::insert_into(key_data)
                 .values(&new)
-                .execute(&self.conn)?;
+                .execute(&mut self.conn)?;
             self.maybe_flush()?;
         }
 
@@ -328,14 +327,14 @@ impl InternalKeyIndex {
                 .filter(parent_id.eq(p as i64))
                 .filter(name.eq(&name_bytes[..]))
                 .order(committed)
-                .first::<(schema::KeyNode, schema::KeyData)>(&self.conn)
+                .first::<(schema::KeyNode, schema::KeyData)>(&mut self.conn)
                 .optional()?,
             None => key_tree
                 .inner_join(key_data)
                 .filter(parent_id.is_null())
                 .filter(name.eq(&name_bytes[..]))
                 .order(committed)
-                .first::<(schema::KeyNode, schema::KeyData)>(&self.conn)
+                .first::<(schema::KeyNode, schema::KeyData)>(&mut self.conn)
                 .optional()?,
         };
 
@@ -382,12 +381,12 @@ impl InternalKeyIndex {
                 .inner_join(key_data)
                 .filter(parent_id.eq(p as i64))
                 .filter(committed.eq(true))
-                .load::<(schema::KeyNode, schema::KeyData)>(&self.conn)?,
+                .load::<(schema::KeyNode, schema::KeyData)>(&mut self.conn)?,
             None => key_tree
                 .inner_join(key_data)
                 .filter(parent_id.is_null())
                 .filter(committed.eq(true))
-                .load::<(schema::KeyNode, schema::KeyData)>(&self.conn)?,
+                .load::<(schema::KeyNode, schema::KeyData)>(&mut self.conn)?,
         };
 
         Ok(rows
@@ -423,7 +422,7 @@ impl InternalKeyIndex {
                     },
                     data.hash_ref
                         .as_mut()
-                        .map(|p| ::hash::tree::HashRef::from_bytes(&mut &p[..]).unwrap()),
+                        .map(|p| crate::hash::tree::HashRef::from_bytes(&mut &p[..]).unwrap()),
                 )
             })
             .collect())
@@ -434,7 +433,7 @@ impl InternalKeyIndex {
         diesel::update(
             key_data.filter(node_id.eq(entry.node_id.expect("Need ID to reserve entry") as i64)),
         ).set(tag.eq(Tag::Reserved as i64))
-            .execute(&self.conn)?;
+            .execute(&mut self.conn)?;
         Ok(())
     }
 
@@ -448,7 +447,7 @@ impl InternalKeyIndex {
                 .filter(tag.eq(Tag::Reserved as i64))
                 .filter(committed.eq(false)),
         ).set(committed.eq(true))
-            .execute(&self.conn)?;
+            .execute(&mut self.conn)?;
 
         Ok(())
     }
@@ -464,12 +463,12 @@ impl InternalKeyIndex {
                 .inner_join(key_data)
                 .filter(parent_id.eq(p as i64))
                 .select((node_id, tag))
-                .load::<(Option<i64>, i64)>(&self.conn)?,
+                .load::<(Option<i64>, i64)>(&mut self.conn)?,
             None => key_tree
                 .inner_join(key_data)
                 .filter(parent_id.is_null())
                 .select((node_id, tag))
-                .load::<(Option<i64>, i64)>(&self.conn)?,
+                .load::<(Option<i64>, i64)>(&mut self.conn)?,
         };
 
         for (node_id_, tag_) in children {
@@ -477,7 +476,7 @@ impl InternalKeyIndex {
             if tag_ == Tag::Reserved as i64 {
                 self.cleanup_unused(Some(id as u64))?;
             } else {
-                diesel::delete(key_tree.filter(node_id.eq(id))).execute(&self.conn)?;
+                diesel::delete(key_tree.filter(node_id.eq(id))).execute(&mut self.conn)?;
             }
         }
 

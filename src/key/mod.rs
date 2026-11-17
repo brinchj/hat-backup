@@ -14,17 +14,17 @@
 
 //! External API for creating and manipulating snapshots.
 
-use backend::StoreBackend;
-use blob;
-use crypto;
-use errors::{DieselError, RetryError};
-use hash;
-use hash::tree::{LeafIterator, SimpleHashTreeWriter};
+use crate::backend::StoreBackend;
+use crate::blob;
+use crate::crypto;
+use crate::errors::{DieselError, RetryError};
+use crate::hash;
+use crate::hash::tree::{LeafIterator, SimpleHashTreeWriter};
 use std::borrow::Cow;
 use std::io;
 use std::sync::Arc;
 
-use util::{FnBox, MsgHandler, Process};
+use crate::util::{FnBox, MsgHandler, Process};
 
 mod hash_store_backend;
 mod index;
@@ -38,24 +38,28 @@ mod tests;
 pub use self::hash_store_backend::HashStoreBackend;
 pub use self::index::{Data, Entry, Info, KeyIndex};
 
-error_type! {
-    #[derive(Debug)]
-    pub enum MsgError {
-        Message(Cow<'static, str>) {
-            desc (e) &**e;
-            from (s: &'static str) s.into();
-            from (s: String) s.into();
-        },
-        RetryError(RetryError) {
-            cause;
-        },
-        DieselError(DieselError) {
-            cause;
-        },
-        Blob(blob::BlobError) {
-            cause;
-        }
-     }
+#[derive(Debug, thiserror::Error)]
+pub enum MsgError {
+    #[error("{0}")]
+    Message(Cow<'static, str>),
+    #[error(transparent)]
+    RetryError(#[from] RetryError),
+    #[error(transparent)]
+    DieselError(#[from] DieselError),
+    #[error(transparent)]
+    Blob(#[from] blob::BlobError),
+}
+
+impl From<&'static str> for MsgError {
+    fn from(s: &'static str) -> Self {
+        MsgError::Message(Cow::Borrowed(s))
+    }
+}
+
+impl From<String> for MsgError {
+    fn from(s: String) -> Self {
+        MsgError::Message(Cow::Owned(s))
+    }
 }
 
 pub type StoreProcess<IT, B> = Process<Msg<IT>, Reply<B>, MsgError>;
@@ -85,7 +89,7 @@ pub enum Msg<IT> {
     /// Insert a key into the index. If this key has associated data a "chunk-iterator creator"
     /// can be passed along with it. If the data turns out to be unreadable, this iterator proc
     /// can return `None`. Returns `Id` with the new entry ID.
-    Insert(Entry, Option<Box<FnBox<(), Option<IT>>>>),
+    Insert(Entry, Option<Box<dyn FnBox<(), Option<IT>>>>),
 
     /// List a "directory" (aka. a `level`) in the index.
     /// Returns `ListResult` with all the entries under the given parent.
@@ -142,8 +146,8 @@ impl<B: StoreBackend> Store<B> {
 
     #[cfg(test)]
     pub fn new_for_testing(backend: Arc<B>, max_blob_size: usize) -> Result<Store<B>, DieselError> {
-        use crypto;
-        use db;
+        use crate::crypto;
+        use crate::db;
 
         let keys = Arc::new(crypto::keys::Keeper::new_for_testing());
         let db_p = Arc::new(db::Index::new_for_testing());

@@ -12,25 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use time::Duration;
-use time::SteadyTime;
+use std::time::{Duration, Instant};
 
 pub struct PeriodicTimer {
-    start: SteadyTime,
+    start: Instant,
     interval: Duration,
 }
 
 impl PeriodicTimer {
     pub fn new(interval: Duration) -> PeriodicTimer {
         PeriodicTimer {
-            start: SteadyTime::now(),
-            interval: interval,
+            start: Instant::now(),
+            interval,
         }
     }
 
     pub fn did_fire(&mut self) -> bool {
-        if SteadyTime::now() - self.start >= self.interval {
-            self.start = SteadyTime::now();
+        if Instant::now().duration_since(self.start) >= self.interval {
+            self.start = Instant::now();
             true
         } else {
             false

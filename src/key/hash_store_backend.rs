@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use backend::StoreBackend;
-use blob;
-use crypto;
-use errors::RetryError;
-use hash;
-use hash::tree::HashTreeBackend;
-use key;
-use key::MsgError;
+use crate::backend::StoreBackend;
+use crate::blob;
+use crate::crypto;
+use crate::errors::RetryError;
+use crate::hash;
+use crate::hash::tree::HashTreeBackend;
+use crate::key;
+use crate::key::MsgError;
 use std::sync::{Arc, Mutex};
 
 pub struct HashStoreBackend<B> {

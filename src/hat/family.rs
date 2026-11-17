@@ -12,22 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use backend::StoreBackend;
-use blob;
-use errors::HatError;
+use crate::backend::StoreBackend;
+use crate::blob;
+use crate::errors::HatError;
 use filetime;
-use hash;
-use hat::insert_path_handler::InsertPathHandler;
-use hat::walker;
-use key;
-use models;
-use serde_cbor;
+use crate::hash;
+use crate::hat::insert_path_handler::InsertPathHandler;
+use crate::hat::walker;
+use crate::key;
+use crate::models;
+use crate::cbor_util;
 use std::ffi;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::str;
-use util::{FileIterator, FnBox, PathHandler};
+use crate::util::{FileIterator, FnBox, PathHandler};
 
 fn try_a_few_times_then_panic<F>(mut f: F, msg: &str)
 where
@@ -38,15 +38,15 @@ where
             return;
         }
     }
-    panic!(msg.to_owned());
+    panic!("{}", msg);
 }
 
 pub mod recover {
     use super::parse_dir_data;
-    use blob;
-    use hash;
-    use hash::tree;
-    use hat::walker;
+    use crate::blob;
+    use crate::hash;
+    use crate::hash::tree;
+    use crate::hat::walker;
     use std::collections::VecDeque;
     use std::mem;
 
@@ -173,7 +173,7 @@ fn parse_dir_data(chunk: &[u8], out: &mut Vec<walker::FileEntry>) -> Result<(), 
         return Ok(());
     }
 
-    let file_list: models::Files = serde_cbor::from_slice(chunk)?;
+    let file_list: models::Files = cbor_util::from_slice(chunk)?;
 
     for f in file_list.files {
         if f.info.name.is_empty() {
@@ -267,13 +267,13 @@ impl<B: StoreBackend> Family<B> {
         if !bailout && dir.is_dir() {
             handler.recurse(PathBuf::from(&dir), parent);
 
-            match self.key_store_process[0].send_reply(key::Msg::CommitReservedNodes(Some(parent)))
+            match self.key_store_process[0].send_reply(key::Msg::<FileIterator>::CommitReservedNodes(Some(parent)))
             {
                 Ok(key::Reply::Ok) => (),
                 _ => panic!("Unexpected reply from keystore"),
             }
         } else {
-            match self.key_store_process[0].send_reply(key::Msg::CommitReservedNodes(None)) {
+            match self.key_store_process[0].send_reply(key::Msg::<FileIterator>::CommitReservedNodes(None)) {
                 Ok(key::Reply::Ok) => (),
                 _ => panic!("Unexpected reply from keystore"),
             }
@@ -288,7 +288,7 @@ impl<B: StoreBackend> Family<B> {
     ) -> Result<u64, HatError> {
         let id = self.snapshot_direct_no_commit(file, is_directory, contents)?;
         let ks = self.key_store_process.iter().last().unwrap();
-        match ks.send_reply(key::Msg::CommitReservedNodes(None)) {
+        match ks.send_reply(key::Msg::<FileIterator>::CommitReservedNodes(None)) {
             Ok(key::Reply::Ok) => (),
             _ => return Err(From::from("Unexpected reply from keystore")),
         }
@@ -304,7 +304,7 @@ impl<B: StoreBackend> Family<B> {
         let f = if is_directory {
             None
         } else {
-            Some(Box::new(move |()| contents) as Box<FnBox<(), _>>)
+            Some(Box::new(move |()| contents) as Box<dyn FnBox<(), _>>)
         };
         let ks = self.key_store_process.iter().last().unwrap();
         let id = match ks.send_reply(key::Msg::Insert(file, f))? {
@@ -316,7 +316,7 @@ impl<B: StoreBackend> Family<B> {
 
     pub fn flush(&self) -> Result<(), HatError> {
         for ks in &self.key_store_process {
-            if let key::Reply::FlushOk = ks.send_reply(key::Msg::Flush)? {
+            if let key::Reply::FlushOk = ks.send_reply(key::Msg::<FileIterator>::Flush)? {
                 continue;
             }
             return Err(From::from("Unexpected reply from key store"));
@@ -399,7 +399,7 @@ impl<B: StoreBackend> Family<B> {
             .iter()
             .last()
             .unwrap()
-            .send_reply(key::Msg::ListDir(dir_id))?
+            .send_reply(key::Msg::<FileIterator>::ListDir(dir_id))?
         {
             key::Reply::ListResult(ls) => Ok(ls),
             _ => Err(From::from("Unexpected result from key store")),
@@ -493,7 +493,7 @@ impl<B: StoreBackend> Family<B> {
             if files.is_empty() {
                 break;
             } else {
-                tree.append(&serde_cbor::to_vec(&models::Files { files: files }).unwrap()[..])?;
+                tree.append(&cbor_util::to_vec(&models::Files { files: files }).unwrap()[..])?;
             }
         }
 

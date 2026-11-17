@@ -12,21 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use backend::StoreBackend;
-use blob;
+use crate::backend::StoreBackend;
+use crate::blob;
 use chrono;
-use crypto;
-use db;
-use errors::HatError;
+use crate::crypto;
+use crate::db;
+use crate::errors::HatError;
 use filetime;
-use gc::{self, Gc, GcRc};
-use hash;
+use crate::gc::{self, Gc, GcRc};
+use crate::hash;
 use hex;
-use key;
-use models;
+use crate::key;
+use crate::models;
 use secstr::SecStr;
-use serde_cbor;
-use snapshot;
+use crate::cbor_util;
+use crate::snapshot;
 use std::cmp;
 use std::ffi;
 use std::fs;
@@ -34,8 +34,8 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::str;
 use std::sync::{mpsc, Arc};
-use tags;
-use util::Process;
+use crate::tags;
+use crate::util::Process;
 use void::Void;
 
 mod family;
@@ -386,7 +386,7 @@ impl<B: StoreBackend> HatRc<B> {
             snapshots.snapshots.push(model);
         }
 
-        let listing = serde_cbor::to_vec(&snapshots).unwrap();
+        let listing = cbor_util::to_vec(&snapshots).unwrap();
 
         // FIXME(jos): Split into N-entries per append().
         let mut tree = self.hash_tree_writer(blob::LeafType::SnapshotList);
@@ -462,7 +462,7 @@ impl<B: StoreBackend> HatRc<B> {
         let mut max_created = chrono::Utc.timestamp(0, 0);
 
         for msg in hash::tree::LeafIterator::new(self.hash_backend(), root_href.clone())?.unwrap() {
-            let snapshot_list: models::Snapshots = serde_cbor::from_slice(&msg[..])?;
+            let snapshot_list: models::Snapshots = cbor_util::from_slice(&msg[..])?;
 
             for s in snapshot_list.snapshots {
                 let created = chrono::Utc.timestamp(s.created_ts_utc, 0);

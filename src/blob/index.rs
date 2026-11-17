@@ -14,14 +14,14 @@
 
 //! Local state for external blobs and their states.
 
-use crypto;
-use db;
+use crate::crypto;
+use crate::db;
 
-use errors::DieselError;
+use crate::errors::DieselError;
 
 use std::sync::{Arc, Mutex};
 
-use tags;
+use crate::tags;
 
 #[derive(Clone, Debug, Default)]
 pub struct BlobDesc {

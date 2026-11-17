@@ -15,10 +15,10 @@
 //! Local state for known snapshots.
 
 use chrono;
-use db;
-use hash;
+use crate::db;
+use crate::hash;
 use std::sync::Arc;
-use tags;
+use crate::tags;
 
 pub struct SnapshotIndex {
     index: Arc<db::Index>,

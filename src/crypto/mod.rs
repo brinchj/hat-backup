@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use blob::Key;
+use crate::blob::Key;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-pub use errors::CryptoError;
-use hash::tree::HashRef;
+pub use crate::errors::CryptoError;
+use crate::hash::tree::HashRef;
 use std::io;
 use std::mem;
 
@@ -47,10 +47,10 @@ pub mod authed {
         use secstr;
 
         pub fn gen_key() -> secstr::SecStr {
-            ::crypto::keys::random_bytes(super::desc::KEYBYTES)
+            crate::crypto::keys::random_bytes(super::desc::KEYBYTES)
         }
         pub fn gen_nonce() -> secstr::SecStr {
-            ::crypto::keys::random_bytes(super::desc::NONCEBYTES)
+            crate::crypto::keys::random_bytes(super::desc::NONCEBYTES)
         }
 
         pub fn mix_keys(
@@ -59,7 +59,7 @@ pub mod authed {
         ) -> super::desc::Key {
             let mut mixed_key = [0u8; super::hash::DIGESTBYTES as usize];
             let salt: &[u8; 16] = b"mixkey~~mixkey~~";
-            ::crypto::keys::keyed_fingerprint(
+            crate::crypto::keys::keyed_fingerprint(
                 &access_key.unsecure()[..],
                 &other_key.unsecure()[..],
                 salt,
@@ -83,12 +83,12 @@ pub mod sealed {
         pub fn symmetric_seal_bytes() -> usize {
             // Mac and nonce from inner symmetric seal
             // Stored as plaintext outside the asymmetric seal.
-            ::crypto::authed::desc::MACBYTES + ::crypto::authed::desc::NONCEBYTES
+            crate::crypto::authed::desc::MACBYTES + crate::crypto::authed::desc::NONCEBYTES
         }
 
         pub fn footer_plain_bytes() -> usize {
             // Footer encodes message length in LittleEndian i64 + the symmetric inner key.
-            8 + ::crypto::authed::desc::KEYBYTES
+            8 + crate::crypto::authed::desc::KEYBYTES
         }
 
         pub fn footer_cipher_bytes() -> usize {
@@ -98,7 +98,7 @@ pub mod sealed {
 
         pub fn access_plain_bytes() -> usize {
             // Data reference footer + access key.
-            footer_cipher_bytes() + ::crypto::authed::desc::KEYBYTES
+            footer_cipher_bytes() + crate::crypto::authed::desc::KEYBYTES
         }
 
         pub fn access_cipher_bytes() -> usize {
@@ -326,14 +326,14 @@ pub struct RefKey {}
 impl RefKey {
     pub fn seal(
         href: &mut HashRef,
-        access_key: &::crypto::authed::desc::Key,
+        access_key: &crate::crypto::authed::desc::Key,
         pt: PlainTextRef,
     ) -> CipherText {
         let partial_key = authed::imp::gen_key();
         href.persistent_ref.key = Some(wrap_key(partial_key.clone()));
 
         let nonce = authed::desc::Nonce::from(&href.hash.bytes[..authed::desc::NONCEBYTES]);
-        let key = ::crypto::authed::imp::mix_keys(&access_key, &partial_key);
+        let key = crate::crypto::authed::imp::mix_keys(&access_key, &partial_key);
 
         let additional_data = keys::compute_salt(href.node, href.leaf);
         let ct = pt.to_ciphertext(&additional_data, &nonce, &key);
@@ -343,7 +343,7 @@ impl RefKey {
     }
 
     pub fn unseal(
-        access_key: &::crypto::authed::desc::Key,
+        access_key: &crate::crypto::authed::desc::Key,
         href: &HashRef,
         ct: CipherTextRef,
     ) -> Result<PlainText, CryptoError> {
@@ -359,7 +359,7 @@ impl RefKey {
                 let nonce = authed::desc::Nonce::from(&href.hash.bytes[..authed::desc::NONCEBYTES]);
 
                 let additional_data = keys::compute_salt(href.node, href.leaf);
-                let real_key = ::crypto::authed::imp::mix_keys(access_key, &key);
+                let real_key = crate::crypto::authed::imp::mix_keys(access_key, &key);
                 Ok(ct.to_plaintext(&additional_data, &nonce, &real_key)?)
             }
             _ => Err("crypto read failed: unseal".into()),
@@ -400,17 +400,17 @@ impl<'k> FixedKey<'k> {
         PlainText::new(self.keeper.access_unlock(ct.0))
     }
 
-    pub fn new_access_partial_key() -> ::crypto::authed::desc::Key {
+    pub fn new_access_partial_key() -> crate::crypto::authed::desc::Key {
         // Generate new random symmetric key needed for reading blob data through a reference.
         // This key will later be stored as part of the seal footer, accessible only with the
         // asymmetric access private key.
-        ::crypto::authed::imp::gen_key()
+        crate::crypto::authed::imp::gen_key()
     }
 
-    pub fn seal(&self, access_key: &::crypto::authed::desc::Key, pt: PlainTextRef) -> CipherText {
+    pub fn seal(&self, access_key: &crate::crypto::authed::desc::Key, pt: PlainTextRef) -> CipherText {
         // Generate inner symmetric key.
-        let inner_key = ::crypto::authed::imp::gen_key();
-        let nonce = ::crypto::authed::imp::gen_nonce();
+        let inner_key = crate::crypto::authed::imp::gen_key();
+        let nonce = crate::crypto::authed::imp::gen_nonce();
 
         // Encrypt plaintext with inner key.
         let additional_data: &[u8] = b"hat_blob_seal~";
@@ -442,16 +442,16 @@ impl<'k> FixedKey<'k> {
     pub fn unseal_access_ctx<'a>(
         &self,
         ct: CipherTextRef<'a>,
-    ) -> Result<(::crypto::authed::desc::Key, CipherText, CipherTextRef<'a>), CryptoError> {
+    ) -> Result<(crate::crypto::authed::desc::Key, CipherText, CipherTextRef<'a>), CryptoError> {
         // Read sealed ciphertext length and unseal it.
         let (rest, access_ct) = ct.split_from_right(sealed::desc::access_cipher_bytes())?;
         let mut access_pt = self.unseal_blob_access(access_ct).into_vec();
         assert_eq!(access_pt.len(), sealed::desc::access_plain_bytes());
 
         let access_key = access_pt
-            .split_off(sealed::desc::access_plain_bytes() - ::crypto::authed::desc::KEYBYTES);
+            .split_off(sealed::desc::access_plain_bytes() - crate::crypto::authed::desc::KEYBYTES);
         Ok((
-            ::crypto::authed::desc::Key::from(&access_key[..]),
+            crate::crypto::authed::desc::Key::from(&access_key[..]),
             CipherText::new(access_pt),
             rest,
         ))
@@ -469,7 +469,7 @@ impl<'k> FixedKey<'k> {
         // Read length as LittleEndian and inner key.
         let (foot_len, inner_key) = foot_pt
             .as_ref()
-            .split_from_right(::crypto::authed::desc::KEYBYTES)?;
+            .split_from_right(crate::crypto::authed::desc::KEYBYTES)?;
 
         // Parse length of inner symmetric cipher text.
         let ct_len = foot_len
@@ -480,13 +480,13 @@ impl<'k> FixedKey<'k> {
         // Read and unseal inner symmetric cipher text.
         let additional_data: &[u8] = b"hat_blob_seal~";
         let (rest, ct_and_nonce) = ct.split_from_right(ct_len as usize)?;
-        let (ct, nonce) = ct_and_nonce.split_from_right(::crypto::authed::desc::NONCEBYTES)?;
+        let (ct, nonce) = ct_and_nonce.split_from_right(crate::crypto::authed::desc::NONCEBYTES)?;
         Ok((
             rest,
             ct.to_plaintext(
                 additional_data,
-                &::crypto::authed::desc::Nonce::from(nonce.0),
-                &::crypto::authed::desc::Key::from(inner_key.0),
+                &crate::crypto::authed::desc::Nonce::from(nonce.0),
+                &crate::crypto::authed::desc::Key::from(inner_key.0),
             )?,
         ))
     }

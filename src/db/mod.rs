@@ -14,23 +14,24 @@
 
 //! Communication with SQLite.
 
-use blob;
+use crate::blob;
 
 use chrono;
-use models;
-use serde_cbor;
+use crate::models;
+use crate::cbor_util;
 
 use diesel;
 use diesel::connection::TransactionManager;
 use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
-use errors::DieselError;
+use diesel_migrations::MigrationHarness;
+use crate::errors::DieselError;
 
-use hash;
+use crate::hash;
 use std::sync::{Mutex, MutexGuard};
-use tags;
-use time::Duration;
-use util::{Counter, PeriodicTimer};
+use crate::tags;
+use std::time::Duration;
+use crate::util::{Counter, PeriodicTimer};
 
 mod schema;
 
@@ -54,11 +55,11 @@ fn encode_childs(childs: &[u64]) -> Vec<u8> {
     let model = models::HashIds {
         ids: childs.to_vec(),
     };
-    serde_cbor::to_vec(&model).unwrap()
+    cbor_util::to_vec(&model).unwrap()
 }
 
-fn decode_childs(bytes: &[u8]) -> Result<Vec<u64>, serde_cbor::error::Error> {
-    let model: models::HashIds = serde_cbor::from_slice(bytes)?;
+fn decode_childs(bytes: &[u8]) -> Result<Vec<u64>, cbor_util::DeError> {
+    let model: models::HashIds = cbor_util::from_slice(bytes)?;
     Ok(model.ids)
 }
 
@@ -173,7 +174,7 @@ pub struct InternalIndex {
     flush_periodically: bool,
 }
 
-embed_migrations!();
+pub const MIGRATIONS: diesel_migrations::EmbeddedMigrations = embed_migrations!();
 
 impl InternalIndex {
     fn new(path: &str) -> Result<InternalIndex, DieselError> {
@@ -182,16 +183,15 @@ impl InternalIndex {
         let mut idx = InternalIndex {
             conn: conn,
             hash_id_counter: Counter::new(0),
-            flush_timer: PeriodicTimer::new(Duration::seconds(10)),
+            flush_timer: PeriodicTimer::new(Duration::from_secs(10)),
             flush_periodically: true,
         };
 
-        embedded_migrations::run(&idx.conn)?;
+        idx.conn
+            .run_pending_migrations(MIGRATIONS)
+            .map_err(|e| DieselError::SqlMigration(e))?;
 
-        {
-            let tm = idx.conn.transaction_manager();
-            tm.begin_transaction(&idx.conn)?;
-        }
+        <SqliteConnection as Connection>::TransactionManager::begin_transaction(&mut idx.conn)?;
 
         idx.hash_refresh_id_counter();
         Ok(idx)
@@ -206,7 +206,7 @@ impl InternalIndex {
         let result_opt = hashes
             .left_outer_join(blobs)
             .filter(hash.eq(&hash_.bytes))
-            .first::<(self::schema::Hash, Option<self::schema::Blob>)>(&self.conn)
+            .first::<(self::schema::Hash, Option<self::schema::Blob>)>(&mut self.conn)
             .optional()
             .expect("Error querying hashes");
 
@@ -237,7 +237,7 @@ impl InternalIndex {
         let result_opt = hashes
             .left_outer_join(blobs)
             .filter(id.eq(id_ as i64))
-            .first::<(self::schema::Hash, Option<self::schema::Blob>)>(&self.conn)
+            .first::<(self::schema::Hash, Option<self::schema::Blob>)>(&mut self.conn)
             .optional()
             .expect("Error querying hashes");
 
@@ -263,7 +263,7 @@ impl InternalIndex {
 
         let id_opt = hashes
             .select(max(id))
-            .first::<Option<i64>>(&self.conn)
+            .first::<Option<i64>>(&mut self.conn)
             .expect("Error selecting max hash id");
 
         self.hash_id_counter = Counter::new(id_opt.unwrap_or(0));
@@ -296,7 +296,7 @@ impl InternalIndex {
 
         diesel::insert_into(hashes)
             .values(&new)
-            .execute(&self.conn)
+            .execute(&mut self.conn)
             .expect("Error inserting new hash");
     }
 
@@ -306,11 +306,11 @@ impl InternalIndex {
         match id_opt {
             None => diesel::update(hashes)
                 .set(tag.eq(tag_ as i64))
-                .execute(&self.conn)
+                .execute(&mut self.conn)
                 .expect("Error updating hash tags"),
             Some(id_) => diesel::update(hashes.find(id_ as i64))
                 .set(tag.eq(tag_ as i64))
-                .execute(&self.conn)
+                .execute(&mut self.conn)
                 .expect("Error updating specific hash tag"),
         };
     }
@@ -318,7 +318,7 @@ impl InternalIndex {
     pub fn hash_delete_not_ready(&mut self) {
         use self::schema::hashes::dsl::*;
         diesel::delete(hashes.filter(ready.eq(false)))
-            .execute(&self.conn)
+            .execute(&mut self.conn)
             .expect("Failed to delete non-ready hashes");
     }
 
@@ -349,7 +349,7 @@ impl InternalIndex {
                 leaf_type.eq(leaf_type_ as i64),
                 childs.eq(childs_.as_ref().map(|v| &v[..])),
             ))
-            .execute(&self.conn)
+            .execute(&mut self.conn)
             .expect("Failed to set hash ready");
     }
 
@@ -359,7 +359,7 @@ impl InternalIndex {
         let tag_opt = hashes
             .find(id_ as i64)
             .select(tag)
-            .first::<i64>(&self.conn)
+            .first::<i64>(&mut self.conn)
             .optional()
             .expect("Error querying hash tag");
 
@@ -376,7 +376,7 @@ impl InternalIndex {
             .filter(tag.eq(tag_ as i64))
             .order(height.desc())
             .select(id)
-            .load::<i64>(&self.conn)
+            .load::<i64>(&mut self.conn)
             .expect("Error listing hashes")
             .into_iter()
             .map(|i| i as u64)
@@ -389,7 +389,7 @@ impl InternalIndex {
         let result_opt = gc_metadata
             .filter(hash_id.eq(hash_id_ as i64))
             .filter(family_id.eq(family_id_ as i64))
-            .first::<schema::GcMetadata>(&self.conn)
+            .first::<schema::GcMetadata>(&mut self.conn)
             .optional()
             .expect("Error querying GC metadata");
         match result_opt {
@@ -412,7 +412,7 @@ impl InternalIndex {
                 .filter(hash_id.eq(hash_id_ as i64))
                 .filter(family_id.eq(family_id_ as i64)),
         ).set((gc_int.eq(data.num), gc_vec.eq(&data.bytes)))
-            .execute(&self.conn)
+            .execute(&mut self.conn)
             .expect("Error updating GC metadata");
         assert!(count <= 1);
 
@@ -426,7 +426,7 @@ impl InternalIndex {
 
             diesel::insert_into(gc_metadata)
                 .values(&new)
-                .execute(&self.conn)
+                .execute(&mut self.conn)
                 .expect("Error inserting GC metadata");
         }
     }
@@ -460,7 +460,7 @@ impl InternalIndex {
         let hash_ids_ = gc_metadata
             .filter(family_id.eq(family_id_ as i64))
             .select(hash_id)
-            .load::<i64>(&self.conn)
+            .load::<i64>(&mut self.conn)
             .expect("Error loading GC metadata");
 
         for hash_id_ in hash_ids_ {
@@ -476,7 +476,7 @@ impl InternalIndex {
             gc_metadata
                 .filter(hash_id.eq(hash_id_ as i64))
                 .filter(family_id.eq(family_id_ as i64)),
-        ).execute(&self.conn)
+        ).execute(&mut self.conn)
             .expect("Error deleting GC metadata");
     }
 
@@ -486,7 +486,7 @@ impl InternalIndex {
 
         hashes
             .left_outer_join(blobs)
-            .load::<(self::schema::Hash, Option<self::schema::Blob>)>(&self.conn)
+            .load::<(self::schema::Hash, Option<self::schema::Blob>)>(&mut self.conn)
             .expect("Error listing hashes")
             .into_iter()
             .map(|(hash_, blob_)| Entry {
@@ -504,7 +504,7 @@ impl InternalIndex {
         {
             use self::schema::hashes::dsl::*;
             let hash_count = diesel::delete(hashes.find(id_ as i64))
-                .execute(&self.conn)
+                .execute(&mut self.conn)
                 .expect("Error deleting hash");
             assert!(hash_count <= 1);
         }
@@ -512,7 +512,7 @@ impl InternalIndex {
         {
             use self::schema::gc_metadata::dsl::*;
             diesel::delete(gc_metadata.filter(hash_id.eq(id_ as i64)))
-                .execute(&self.conn)
+                .execute(&mut self.conn)
                 .expect("Error deleting GC metadata");
         }
     }
@@ -532,9 +532,10 @@ impl InternalIndex {
     pub fn flush(&mut self) {
         debug!("SQL: hash db commit");
 
-        let tm = self.conn.transaction_manager();
-        tm.commit_transaction(&self.conn).unwrap();
-        tm.begin_transaction(&self.conn).unwrap();
+        <SqliteConnection as Connection>::TransactionManager::commit_transaction(&mut self.conn)
+            .unwrap();
+        <SqliteConnection as Connection>::TransactionManager::begin_transaction(&mut self.conn)
+            .unwrap();
     }
 
     pub fn blob_next_id(&mut self) -> i64 {
@@ -544,7 +545,7 @@ impl InternalIndex {
 
         blobs
             .select(max(id))
-            .first::<Option<i64>>(&self.conn)
+            .first::<Option<i64>>(&mut self.conn)
             .optional()
             .expect("Error querying blobs")
             .and_then(|x| x)
@@ -561,7 +562,7 @@ impl InternalIndex {
         };
         diesel::insert_into(blobs)
             .values(&new)
-            .execute(&self.conn)
+            .execute(&mut self.conn)
             .expect("Error inserting blob");
 
         self.flush();
@@ -572,35 +573,35 @@ impl InternalIndex {
 
         diesel::update(blobs.find(blob.id))
             .set(tag.eq(tags::Tag::Done as i32))
-            .execute(&self.conn)
+            .execute(&mut self.conn)
             .expect("Error updating blob");
         self.flush();
     }
 
-    pub fn blob_id_from_name(&self, name_: &[u8]) -> Option<i64> {
+    pub fn blob_id_from_name(&mut self, name_: &[u8]) -> Option<i64> {
         use self::schema::blobs::dsl::*;
         blobs
             .filter(name.eq(name_))
             .select(id)
-            .first::<i64>(&self.conn)
+            .first::<i64>(&mut self.conn)
             .optional()
             .expect("Error reading blob")
     }
 
-    pub fn blob_set_tag(&self, tag_: tags::Tag, target: Option<&blob::BlobDesc>) {
+    pub fn blob_set_tag(&mut self, tag_: tags::Tag, target: Option<&blob::BlobDesc>) {
         use self::schema::blobs::dsl::*;
         match target {
             None => diesel::update(blobs)
                 .set(tag.eq(tag_ as i32))
-                .execute(&self.conn)
+                .execute(&mut self.conn)
                 .expect("Error updating blob tags"),
             Some(t) if t.id > 0 => diesel::update(blobs.find(t.id))
                 .set(tag.eq(tag_ as i32))
-                .execute(&self.conn)
+                .execute(&mut self.conn)
                 .expect("Error updating blob tags"),
             Some(t) if !t.name.is_empty() => diesel::update(blobs.filter(name.eq(&t.name)))
                 .set(tag.eq(tag_ as i32))
-                .execute(&self.conn)
+                .execute(&mut self.conn)
                 .expect("Error updating blob tags"),
             Some(t) => unreachable!(
                 "blob with neither id nor name: id={}, name={}",
@@ -610,19 +611,19 @@ impl InternalIndex {
         };
     }
 
-    pub fn blob_delete_by_tag(&self, tag_: tags::Tag) {
+    pub fn blob_delete_by_tag(&mut self, tag_: tags::Tag) {
         use self::schema::blobs::dsl::*;
         diesel::delete(blobs.filter(tag.eq(tag_ as i32)))
-            .execute(&self.conn)
+            .execute(&mut self.conn)
             .expect("Error deleting blobs");
     }
 
-    pub fn blob_list_by_tag(&self, tag_: tags::Tag) -> Vec<blob::BlobDesc> {
+    pub fn blob_list_by_tag(&mut self, tag_: tags::Tag) -> Vec<blob::BlobDesc> {
         use self::schema::blobs::dsl::*;
         blobs
             .filter(tag.eq(tag_ as i32))
             .order(id.desc())
-            .load::<schema::Blob>(&self.conn)
+            .load::<schema::Blob>(&mut self.conn)
             .expect("Error listing blobs")
             .into_iter()
             .map(|blob_| blob::BlobDesc {
@@ -632,10 +633,10 @@ impl InternalIndex {
             .collect()
     }
 
-    pub fn last_insert_rowid(&self) -> i64 {
+    pub fn last_insert_rowid(&mut self) -> i64 {
         let rows: Vec<self::schema::RowId> = diesel::sql_query(
             "SELECT last_insert_rowid() AS row_id",
-        ).load(&self.conn)
+        ).load(&mut self.conn)
             .unwrap();
 
         assert_eq!(1, rows.len());
@@ -649,13 +650,13 @@ impl InternalIndex {
         family
             .filter(name.eq(name_))
             .select(id)
-            .first::<i64>(&self.conn)
+            .first::<i64>(&mut self.conn)
             .optional()
             .expect("Error reading family")
     }
 
     /// Delete snapshot.
-    pub fn snapshot_delete(&self, info: SnapshotInfo) {
+    pub fn snapshot_delete(&mut self, info: SnapshotInfo) {
         use self::schema::snapshots::dsl::*;
 
         let count = diesel::delete(
@@ -663,7 +664,7 @@ impl InternalIndex {
                 .find(info.unique_id as i64)
                 .filter(family_id.eq(info.family_id as i64))
                 .filter(snapshot_id.eq(info.snapshot_id as i64)),
-        ).execute(&self.conn)
+        ).execute(&mut self.conn)
             .expect("Error deleting snapshots");
         assert!(count <= 1);
     }
@@ -679,7 +680,7 @@ impl InternalIndex {
 
                 diesel::insert_into(family)
                     .values(&new)
-                    .execute(&self.conn)
+                    .execute(&mut self.conn)
                     .expect("Error inserting family");
                 self.last_insert_rowid()
             }
@@ -692,7 +693,7 @@ impl InternalIndex {
         snapshots
             .filter(family_id.eq(family_id_))
             .select(max(snapshot_id))
-            .first::<Option<i64>>(&self.conn)
+            .first::<Option<i64>>(&mut self.conn)
             .optional()
             .expect("Error reading latest snapshot id")
             .and_then(|x| x)
@@ -721,7 +722,7 @@ impl InternalIndex {
                 hash,
                 hash_ref,
             ))
-            .first::<self::schema::Snapshot>(&self.conn)
+            .first::<self::schema::Snapshot>(&mut self.conn)
             .optional()
             .expect("Error reading snapshot info");
 
@@ -732,11 +733,11 @@ impl InternalIndex {
                     family_id: snap.family_id as u64,
                     snapshot_id: snap.snapshot_id as u64,
                 },
-                ::hash::Hash {
+                crate::hash::Hash {
                     bytes: snap.hash.unwrap().to_vec(),
                 },
                 snap.hash_ref
-                    .and_then(|r| ::hash::tree::HashRef::from_bytes(&mut &r[..]).ok()),
+                    .and_then(|r| crate::hash::tree::HashRef::from_bytes(&mut &r[..]).ok()),
             )
         })
     }
@@ -759,7 +760,7 @@ impl InternalIndex {
 
         diesel::insert_into(snapshots)
             .values(&new)
-            .execute(&self.conn)
+            .execute(&mut self.conn)
             .expect("Error inserting snapshot");
 
         let unique_id_ = self.last_insert_rowid();
@@ -786,7 +787,7 @@ impl InternalIndex {
                 hash.eq(Some(&hash_.bytes)),
                 hash_ref.eq(Some(hash_ref_.as_bytes())),
             ))
-            .execute(&self.conn)
+            .execute(&mut self.conn)
             .expect("Error updating snapshot");
     }
 
@@ -795,7 +796,7 @@ impl InternalIndex {
 
         diesel::update(snapshots.find(snapshot_.unique_id as i64))
             .set(tag.eq(tag_ as i32))
-            .execute(&self.conn)
+            .execute(&mut self.conn)
             .expect("Error updating snapshot");
     }
 
@@ -811,7 +812,7 @@ impl InternalIndex {
             let row_opt = snapshots
                 .filter(family_id.eq(family_id_))
                 .order(snapshot_id.desc())
-                .first::<self::schema::Snapshot>(&self.conn)
+                .first::<self::schema::Snapshot>(&mut self.conn)
                 .optional()
                 .expect("Error reading latest snapshot");
 
@@ -822,11 +823,11 @@ impl InternalIndex {
                         family_id: snap.family_id as u64,
                         snapshot_id: snap.snapshot_id as u64,
                     },
-                    ::hash::Hash {
+                    crate::hash::Hash {
                         bytes: snap.hash.expect("Snapshot without top hash"),
                     },
                     snap.hash_ref
-                        .and_then(|r| ::hash::tree::HashRef::from_bytes(&mut &r[..]).ok()),
+                        .and_then(|r| crate::hash::tree::HashRef::from_bytes(&mut &r[..]).ok()),
                 )
             })
         })
@@ -839,11 +840,11 @@ impl InternalIndex {
         let rows = match skip_tag {
             None => snapshots
                 .inner_join(family)
-                .load::<(self::schema::Snapshot, self::schema::Family)>(&self.conn),
+                .load::<(self::schema::Snapshot, self::schema::Family)>(&mut self.conn),
             Some(skip) => snapshots
                 .inner_join(family)
                 .filter(tag.ne(skip as i32))
-                .load::<(self::schema::Snapshot, self::schema::Family)>(&self.conn),
+                .load::<(self::schema::Snapshot, self::schema::Family)>(&mut self.conn),
         }.unwrap();
 
         rows.into_iter()
@@ -854,7 +855,7 @@ impl InternalIndex {
                     if bytes.is_empty() {
                         None
                     } else {
-                        Some(::hash::Hash { bytes: bytes })
+                        Some(crate::hash::Hash { bytes: bytes })
                     }
                 });
 
@@ -911,7 +912,7 @@ impl InternalIndex {
 
             diesel::insert_into(snapshots)
                 .values(&new)
-                .execute(&self.conn)
+                .execute(&mut self.conn)
                 .expect("Error inserting new snapshot");
         }
     }

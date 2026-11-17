@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use blob;
+use crate::blob;
 use libsodium_sys;
 use secstr;
 use std::path::Path;

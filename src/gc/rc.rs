@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use db::{GcData, SnapshotInfo};
-use gc;
+use crate::db::{GcData, SnapshotInfo};
+use crate::gc;
 use std::sync::mpsc;
-use tags;
+use crate::tags;
 
 // This GC does not store per-family data.
 // Instead this constant family ID is always used.

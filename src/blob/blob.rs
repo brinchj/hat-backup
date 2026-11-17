@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crypto;
-use crypto::{CipherText, CipherTextRef, PlainTextRef};
-use hash::tree::HashRef;
+use crate::crypto;
+use crate::crypto::{CipherText, CipherTextRef, PlainTextRef};
+use crate::hash::tree::HashRef;
 
 use std::mem;
 use std::sync::Arc;

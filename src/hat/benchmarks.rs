@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use backend::DevNullBackend;
-use hat::family::Family;
-use hat::tests::{entry, setup_hat};
-use hat::HatRc;
+use crate::backend::DevNullBackend;
+use crate::hat::family::Family;
+use crate::hat::tests::{entry, setup_hat};
+use crate::hat::HatRc;
 use std::io;
 use std::sync::{Arc, Mutex};
 use test::Bencher;
-use util::FileIterator;
+use crate::util::FileIterator;
 
 fn setup_family() -> (HatRc<DevNullBackend>, Family<DevNullBackend>) {
     let backend = Arc::new(DevNullBackend);

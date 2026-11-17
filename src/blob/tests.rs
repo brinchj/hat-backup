@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License
 
-use backend::{MemoryBackend, StoreBackend};
-use blob::{Blob, BlobError, BlobIndex, BlobReader, BlobStore, ChunkRef, LeafType, NodeType};
-use crypto;
-use db;
-use hash;
+use crate::backend::{MemoryBackend, StoreBackend};
+use crate::blob::{Blob, BlobError, BlobIndex, BlobReader, BlobStore, ChunkRef, LeafType, NodeType};
+use crate::crypto;
+use crate::db;
+use crate::hash;
 use quickcheck;
 
 use std::collections::HashSet;
@@ -56,7 +56,7 @@ fn identity() {
             if chunk.len() > 0 {
                 match backend.retrieve(&id.persistent_ref.blob_name[..]) {
                     Ok(_) => (),
-                    Err(e) => panic!(e),
+                    Err(e) => panic!("{:?}", e),
                 }
             }
         }
@@ -106,7 +106,7 @@ fn identity_with_excessive_flushing() {
             if chunk.len() > 0 {
                 match backend.retrieve(&id.persistent_ref.blob_name[..]) {
                     Ok(_) => (),
-                    Err(e) => panic!(e),
+                    Err(e) => panic!("{:?}", e),
                 }
             }
         }

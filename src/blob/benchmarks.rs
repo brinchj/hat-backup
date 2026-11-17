@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use blob::{Blob, ChunkRef, LeafType, NodeType};
-use crypto;
-use hash::tree::HashRef;
-use hash::Hash;
+use crate::blob::{Blob, ChunkRef, LeafType, NodeType};
+use crate::crypto;
+use crate::hash::tree::HashRef;
+use crate::hash::Hash;
 
 use std::sync::Arc;
 

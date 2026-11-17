@@ -14,20 +14,21 @@
 
 //! Combines data chunks into larger blobs to be stored externally.
 
-use backend::StoreBackend;
-use crypto;
-use errors;
-use hash::tree::HashRef;
-use hash::Hash;
-use key;
-use lru_cache;
-use serde_cbor;
+use crate::backend::StoreBackend;
+use crate::crypto;
+use crate::errors;
+use crate::hash::tree::HashRef;
+use crate::hash::Hash;
+use crate::key;
+use lru::LruCache;
+use crate::cbor_util;
 use std::borrow::Cow;
 use std::mem;
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
-use tags;
-use util::FnBox;
+use crate::tags;
+use crate::util::FnBox;
 
 mod blob;
 mod chunk;
@@ -42,20 +43,27 @@ pub use self::blob::{Blob, BlobReader};
 pub use self::chunk::{ChunkRef, Key, LeafType, NodeType, Packing};
 pub use self::index::{BlobDesc, BlobIndex};
 
-error_type! {
-    #[derive(Debug)]
-    pub enum BlobError {
-        Message(Cow<'static, str>) {
-            desc (e) &**e;
-            from (s: &'static str) s.into();
-            from (s: String) s.into();
-        },
-        CryptoError(errors::CryptoError) {
-            cause;
-        },
-        Serde(serde_cbor::error::Error) {
-            cause;
-        }
+#[derive(Debug, thiserror::Error)]
+pub enum BlobError {
+    #[error("{0}")]
+    Message(Cow<'static, str>),
+    #[error(transparent)]
+    CryptoError(#[from] errors::CryptoError),
+    #[error(transparent)]
+    Serde(#[from] cbor_util::DeError),
+    #[error(transparent)]
+    SerdeSer(#[from] cbor_util::SerError),
+}
+
+impl From<&'static str> for BlobError {
+    fn from(s: &'static str) -> Self {
+        BlobError::Message(Cow::Borrowed(s))
+    }
+}
+
+impl From<String> for BlobError {
+    fn from(s: String) -> Self {
+        BlobError::Message(Cow::Owned(s))
     }
 }
 
@@ -66,9 +74,9 @@ pub struct StoreInner<B> {
     backend: Arc<B>,
     blob_index: Arc<BlobIndex>,
     blob_desc: BlobDesc,
-    blob_refs: Vec<(Box<FnBox<(), ()>>)>,
+    blob_refs: Vec<(Box<dyn FnBox<(), ()>>)>,
     blob: Blob,
-    read_cache: lru_cache::LruCache<Vec<u8>, BlobReader>,
+    read_cache: LruCache<Vec<u8>, BlobReader>,
 }
 
 impl<B> Drop for StoreInner<B> {
@@ -92,7 +100,7 @@ impl<B: StoreBackend> StoreInner<B> {
             blob_desc: Default::default(),
             blob_refs: Vec::new(),
             blob: Blob::new(keys, max_blob_size),
-            read_cache: lru_cache::LruCache::new(10),
+            read_cache: LruCache::new(NonZeroUsize::new(10).unwrap()),
         };
         bs.reserve_new_blob();
         bs
@@ -131,7 +139,7 @@ impl<B: StoreBackend> StoreInner<B> {
         node: NodeType,
         leaf: LeafType,
         info: Option<&key::Info>,
-        callback: Box<FnBox<(), ()>>,
+        callback: Box<dyn FnBox<(), ()>>,
     ) -> HashRef {
         let mut href = HashRef {
             hash: hash,
@@ -188,7 +196,7 @@ impl<B: StoreBackend> StoreInner<B> {
                     let text = crypto::CipherTextRef::new(&blob[..]);
                     let mut reader = BlobReader::new(self.keys.clone(), text)?;
                     let chunk = reader.read_chunk(href)?;
-                    self.read_cache.insert(name.to_vec(), reader);
+                    self.read_cache.put(name.to_vec(), reader);
                     Ok(Some(chunk))
                 }
                 Ok(None) => Ok(None),
@@ -273,7 +281,7 @@ impl<B: StoreBackend> BlobStore<B> {
         node: NodeType,
         leaf: LeafType,
         info: Option<&key::Info>,
-        callback: Box<FnBox<(), ()>>,
+        callback: Box<dyn FnBox<(), ()>>,
     ) -> HashRef {
         let mut guard = self.lock();
         guard.store(chunk, hash, node, leaf, info, callback)

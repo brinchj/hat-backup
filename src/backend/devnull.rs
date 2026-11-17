@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use backend::StoreBackend;
-use crypto::CipherText;
-use util::FnBox;
+use crate::backend::StoreBackend;
+use crate::crypto::CipherText;
+use crate::util::FnBox;
 
 pub struct DevNullBackend;
 
@@ -23,7 +23,7 @@ impl StoreBackend for DevNullBackend {
         &self,
         _name: &[u8],
         _data: CipherText,
-        done: Box<FnBox<(), ()>>,
+        done: Box<dyn FnBox<(), ()>>,
     ) -> Result<(), String> {
         done.call(());
         Ok(())

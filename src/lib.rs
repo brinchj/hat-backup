@@ -17,49 +17,19 @@
 // Unstable APIs:
 #![cfg_attr(feature = "benchmarks", feature(test))]
 
-// Standard Rust imports.
-#[macro_use]
-extern crate log;
-extern crate rand;
 #[cfg(feature = "benchmarks")]
 extern crate test;
-extern crate time;
 
-// Rust crates.
-extern crate byteorder;
-extern crate chrono;
-extern crate filetime;
-extern crate fuse;
-extern crate hex;
-extern crate libc;
-extern crate libsodium_sys;
-extern crate lru_cache;
-extern crate scoped_pool;
-extern crate secstr;
-extern crate void;
-
-// Error definition macros.
-#[macro_use]
-extern crate error_type;
-
-// Diesel supplies our SQLite wrapper.
 #[macro_use]
 extern crate diesel;
 #[macro_use]
 extern crate diesel_migrations;
-
-// Testing utilities.
-#[cfg(test)]
-extern crate quickcheck;
-
-// Serde
-extern crate serde;
-extern crate serde_cbor;
 #[macro_use]
-extern crate serde_derive;
+extern crate log;
 
 // Submodules
 pub mod backend;
+mod cbor_util;
 mod blob;
 pub mod crypto;
 mod db;
@@ -76,4 +46,4 @@ pub mod vfs;
 
 // Re-export the main type
 
-pub use hat::Hat;
+pub use crate::hat::Hat;

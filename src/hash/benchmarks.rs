@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use hash::tests::MemoryBackend;
+use crate::hash::tests::MemoryBackend;
 
-use blob::LeafType;
-use hash::tree::*;
+use crate::blob::LeafType;
+use crate::hash::tree::*;
 use test::Bencher;
 
 #[bench]

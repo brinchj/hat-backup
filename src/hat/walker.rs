@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use hash;
-use key;
+use crate::hash;
+use crate::key;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 

@@ -1,18 +1,18 @@
-use backend::StoreBackend;
-use db;
-use errors::HatError;
-use hash::tree::{self, HashRef, HashTreeBackend};
-use hat;
-use hat::walker::Content;
-use key::Entry;
-use models::FileName;
+use crate::backend::StoreBackend;
+use crate::db;
+use crate::errors::HatError;
+use crate::hash::tree::{self, HashRef, HashTreeBackend};
+use crate::hat;
+use crate::hat::walker::Content;
+use crate::key::Entry;
+use crate::models::FileName;
 
 use std::borrow::Cow;
 use std::mem;
 use std::path::{self, Path, PathBuf};
 
 pub struct FileReader {
-    rest: Option<Box<Iterator<Item = Vec<u8>>>>,
+    rest: Option<Box<dyn Iterator<Item = Vec<u8>>>>,
     offset: u64,
     buf: Vec<u8>,
     eof: bool,
@@ -24,12 +24,12 @@ impl FileReader {
         B: HashTreeBackend + 'static,
     {
         let tree = tree::LeafIterator::new(backend, file)?
-            .map(|t| Box::new(t) as Box<Iterator<Item = Vec<u8>>>);
+            .map(|t| Box::new(t) as Box<dyn Iterator<Item = Vec<u8>>>);
 
         Ok(FileReader::new_from_iter(tree))
     }
 
-    pub fn new_from_iter(rest: Option<Box<Iterator<Item = Vec<u8>>>>) -> FileReader {
+    pub fn new_from_iter(rest: Option<Box<dyn Iterator<Item = Vec<u8>>>>) -> FileReader {
         FileReader {
             eof: rest.is_none(),
             rest,

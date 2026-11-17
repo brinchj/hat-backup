@@ -14,7 +14,7 @@
 
 //! Helpers for reading directory structures from the local filesystem.
 
-use scoped_pool;
+use scoped_thread_pool;
 use std::fs;
 use std::io;
 use std::iter;
@@ -34,10 +34,10 @@ pub trait PathHandler<P: Send + 'static>: Sync {
     type DirItem: HasPath;
     type DirIter: iter::Iterator<Item = io::Result<Self::DirItem>>;
 
-    fn read_dir(&self, &PathBuf) -> io::Result<Self::DirIter>;
-    fn handle_path(&self, &P, &PathBuf) -> Option<P>;
+    fn read_dir(&self, _path: &PathBuf) -> io::Result<Self::DirIter>;
+    fn handle_path(&self, _payload: &P, _path: &PathBuf) -> Option<P>;
 
-    fn recurse_worker<'a>(&'a self, scope: &scoped_pool::Scope<'a>, root: PathBuf, payload: P) {
+    fn recurse_worker<'a>(&'a self, scope: &scoped_thread_pool::Scope<'a>, root: PathBuf, payload: P) {
         scope.recurse(move |scope| {
             match self.read_dir(&root) {
                 Ok(dir) => {
@@ -66,7 +66,7 @@ pub trait PathHandler<P: Send + 'static>: Sync {
     }
 
     fn recurse(&self, root: PathBuf, payload: P) {
-        let pool = scoped_pool::Pool::new(10);
+        let pool = scoped_thread_pool::Pool::new(10);
         pool.scoped(move |scope| {
             self.recurse_worker(scope, root, payload);
         });

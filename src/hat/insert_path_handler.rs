@@ -12,15 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use backend::StoreBackend;
-use key;
+use crate::backend::StoreBackend;
+use crate::key;
 use std::error::Error;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::sync::{atomic, Mutex};
-use time;
-use util::{FileIterator, PathHandler, SyncPool};
+use std::time::{Duration, Instant};
+use crate::util::{FileIterator, PathHandler, SyncPool};
 
 struct FileEntry {
     key_entry: key::Entry,
@@ -29,7 +29,7 @@ struct FileEntry {
 }
 
 impl FileEntry {
-    fn new(full_path: PathBuf, parent: Option<u64>) -> Result<FileEntry, Box<Error>> {
+    fn new(full_path: PathBuf, parent: Option<u64>) -> Result<FileEntry, Box<dyn Error>> {
         debug!("FileEntry::new({:?})", full_path);
 
         if let Some(filename) = full_path.file_name().map(|n| n.to_owned()) {
@@ -65,7 +65,7 @@ impl FileEntry {
 
 pub struct InsertPathHandler<B: StoreBackend> {
     count: atomic::AtomicIsize,
-    last_print: Mutex<time::Timespec>,
+    last_print: Mutex<Instant>,
     key_store: SyncPool<key::StoreProcess<FileIterator, B>>,
 }
 
@@ -73,7 +73,7 @@ impl<B: StoreBackend> InsertPathHandler<B> {
     pub fn new(key_stores: Vec<key::StoreProcess<FileIterator, B>>) -> InsertPathHandler<B> {
         InsertPathHandler {
             count: atomic::AtomicIsize::new(0),
-            last_print: Mutex::new(time::now().to_timespec()),
+            last_print: Mutex::new(Instant::now()),
             key_store: SyncPool::new(key_stores),
         }
     }
@@ -93,8 +93,8 @@ impl<B: StoreBackend> PathHandler<Option<u64>> for InsertPathHandler<B> {
         if count % 16 == 0 {
             // don't hammer the mutex
             let mut guarded_last_print = self.last_print.lock().unwrap();
-            let now = time::now().to_timespec();
-            if guarded_last_print.sec <= now.sec - 1 {
+            let now = Instant::now();
+            if now.duration_since(*guarded_last_print) >= Duration::from_secs(1) {
                 println!("#{}: {}", count, path.display());
                 *guarded_last_print = now;
             }

@@ -78,7 +78,7 @@ allow_tables_to_appear_in_same_query!(blobs, family, gc_metadata, hashes, snapsh
 
 #[derive(Queryable, QueryableByName)]
 pub struct RowId {
-    #[sql_type = "BigInt"]
+    #[diesel(sql_type = BigInt)]
     pub row_id: i64,
 }
 
@@ -96,7 +96,7 @@ pub struct Hash {
 }
 
 #[derive(Insertable)]
-#[table_name = "hashes"]
+#[diesel(table_name = hashes)]
 pub struct NewHash<'a> {
     pub id: i64,
     pub hash: &'a [u8],
@@ -119,7 +119,7 @@ pub struct GcMetadata {
 }
 
 #[derive(Insertable)]
-#[table_name = "gc_metadata"]
+#[diesel(table_name = gc_metadata)]
 pub struct NewGcMetadata<'a> {
     pub hash_id: i64,
     pub family_id: i64,
@@ -135,7 +135,7 @@ pub struct Blob {
 }
 
 #[derive(Insertable)]
-#[table_name = "blobs"]
+#[diesel(table_name = blobs)]
 pub struct NewBlob<'a> {
     pub id: i64,
     pub name: &'a [u8],
@@ -149,7 +149,7 @@ pub struct Family {
 }
 
 #[derive(Insertable)]
-#[table_name = "family"]
+#[diesel(table_name = family)]
 pub struct NewFamily<'a> {
     pub name: &'a str,
 }
@@ -167,7 +167,7 @@ pub struct Snapshot {
 }
 
 #[derive(Insertable)]
-#[table_name = "snapshots"]
+#[diesel(table_name = snapshots)]
 pub struct NewSnapshot<'a> {
     pub tag: i32,
     pub family_id: i64,

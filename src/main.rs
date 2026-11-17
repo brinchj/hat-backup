@@ -12,24 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Import the hat library
-extern crate hat;
-
-// Rust crates.
-extern crate env_logger;
-extern crate libsodium_sys;
-
-// We use Clap for argument parsing.
-#[macro_use]
-extern crate clap;
-
-use clap::{App, SubCommand};
-use std::env;
-
+use clap::{Arg, Command};
 use hat::backend;
-use std::borrow::ToOwned;
 use std::collections::BTreeSet;
-use std::convert::From;
+use std::env;
 use std::ffi;
 use std::fs;
 use std::path::PathBuf;
@@ -45,108 +31,116 @@ fn license() {
 
 fn main() {
     // Initialize libraries
-    unsafe { libsodium_sys::sodium_init() };
+    unsafe {
+        libsodium_sys::sodium_init();
+    }
     env_logger::init();
 
-    // Because "snapshot" and "checkout" use the exact same type of arguments, we can make a
-    // template. This template defines two positional arguments, both are required
-    let arg_template = "<NAME> 'Name of the snapshot'
-                        <PATH> 'The path of the snapshot'";
-
-    // Create valid arguments
-    let matches = App::new("hat")
-        .version(&format!("v{}", crate_version!())[..])
+    let matches = Command::new("hat")
+        .version(concat!("v", env!("CARGO_PKG_VERSION")))
         .about("Create backup snapshots")
-        .args_from_usage(
-            "-l, --license 'Display the license'
-            --hat_state_dir=[DIR] 'Location of Hat\'s local state'",
+        .arg(
+            Arg::new("license")
+                .short('l')
+                .long("license")
+                .action(clap::ArgAction::SetTrue)
+                .help("Display the license"),
+        )
+        .arg(
+            Arg::new("hat_state_dir")
+                .long("hat_state_dir")
+                .value_name("DIR")
+                .help("Location of Hat's local state")
+                .env("HAT_STATE_DIR"),
         )
         .subcommand(
-            SubCommand::with_name("init")
+            Command::new("init")
                 .about("Init state directory with a new key and cache dir")
-                .args_from_usage("<DIR> 'New state directory to initialize'"),
+                .arg(Arg::new("DIR").required(true).help("New state directory to initialize")),
         )
         .subcommand(
-            SubCommand::with_name("commit")
+            Command::new("commit")
                 .about("Commit a new snapshot")
-                .args_from_usage(arg_template),
+                .arg(Arg::new("NAME").required(true).help("Name of the snapshot"))
+                .arg(Arg::new("PATH").required(true).help("The path of the snapshot")),
         )
         .subcommand(
-            SubCommand::with_name("checkout")
+            Command::new("checkout")
                 .about("Checkout a snapshot")
-                .args_from_usage(arg_template),
+                .arg(Arg::new("NAME").required(true).help("Name of the snapshot"))
+                .arg(Arg::new("PATH").required(true).help("The path of the snapshot")),
         )
-        .subcommand(SubCommand::with_name("recover").about("Recover list of commit'ed snapshots"))
+        .subcommand(Command::new("recover").about("Recover list of commit'ed snapshots"))
         .subcommand(
-            SubCommand::with_name("delete")
+            Command::new("delete")
                 .about("Delete a snapshot")
-                .args_from_usage(
-                    "<NAME> 'Name of the snapshot family'
-                     <ID> 'The snapshot id to delete'",
+                .arg(Arg::new("NAME").required(true).help("Name of the snapshot family"))
+                .arg(Arg::new("ID").required(true).help("The snapshot id to delete")),
+        )
+        .subcommand(
+            Command::new("gc")
+                .about("Garbage collect: identify and remove unused data blocks.")
+                .arg(
+                    Arg::new("pretend")
+                        .short('p')
+                        .long("pretend")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Do not modify any data"),
                 ),
         )
+        .subcommand(Command::new("resume").about("Resume previous failed command."))
         .subcommand(
-            SubCommand::with_name("gc")
-                .about("Garbage collect: identify and remove unused data blocks.")
-                .args_from_usage("-p --pretend 'Do not modify any data'"),
-        )
-        .subcommand(SubCommand::with_name("resume").about("Resume previous failed command."))
-        .subcommand(
-            SubCommand::with_name("mount")
+            Command::new("mount")
                 .about("Mount Hat snapshots on a mountpoint path using FUSE")
-                .args_from_usage("<PATH> 'Path of the mount point'"),
+                .arg(Arg::new("PATH").required(true).help("Path of the mount point")),
         )
         .subcommand(
-            SubCommand::with_name("ls")
+            Command::new("ls")
                 .about("List Hat snapshots paths")
-                .args_from_usage("<PATH> 'Path to list inside hat'"),
+                .arg(Arg::new("PATH").required(true).help("Path to list inside hat")),
         )
         .get_matches();
 
-    // Check for license flag
-    if matches.is_present("license") {
+    if matches.get_flag("license") {
         license();
         std::process::exit(0);
     }
 
     let flag_or_env = |name: &str| {
         matches
-            .value_of(name)
-            .map(|x| x.to_string())
+            .get_one::<String>(name)
+            .cloned()
             .or_else(|| env::var_os(name.to_uppercase()).map(|s| s.into_string().unwrap()))
-            .expect(&format!("{} required", name))
+            .unwrap_or_else(|| panic!("{} required", name))
     };
 
     // Special cased one-off commands
-    match matches.subcommand() {
-        ("init", Some(dir)) => {
-            let dir = PathBuf::from(dir.value_of("DIR").expect("missing DIR to initialize"));
-            if dir.exists() {
-                eprintln!("Error: directory already exists ({})", dir.display());
-                std::process::exit(1);
-            }
-
-            fs::create_dir_all(&dir).unwrap();
-            fs::create_dir_all(dir.join("cache")).unwrap();
-            hat::crypto::keys::Keeper::write_new_universal_key(&dir).unwrap();
-
-            std::process::exit(0);
+    if let Some(("init", dir)) = matches.subcommand() {
+        let dir = PathBuf::from(dir.get_one::<String>("DIR").expect("missing DIR to initialize"));
+        if dir.exists() {
+            eprintln!("Error: directory already exists ({})", dir.display());
+            std::process::exit(1);
         }
-        _ => (),
+
+        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(dir.join("cache")).unwrap();
+        hat::crypto::keys::Keeper::write_new_universal_key(&dir).unwrap();
+
+        std::process::exit(0);
     }
 
     // Setup config variables that can take their value from either flag or environment.
     let cache_dir = PathBuf::from(flag_or_env("hat_state_dir"));
 
     match matches.subcommand() {
-        ("resume", Some(_cmd)) => {
+        Some(("resume", _)) => {
             // Setting up the repository triggers automatic resume.
             let backend = Arc::new(backend::CmdBackend::new());
             hat::Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap();
         }
-        ("commit", Some(cmd)) => {
-            let name = cmd.value_of("NAME").unwrap().to_owned();
-            let path = cmd.value_of("PATH").unwrap();
+        Some(("commit", cmd)) => {
+            let name = cmd.get_one::<String>("NAME").unwrap().to_owned();
+            let path = cmd.get_one::<String>("PATH").unwrap();
 
             let backend = Arc::new(backend::CmdBackend::new());
             let mut hat = hat::Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap();
@@ -154,7 +148,7 @@ fn main() {
             // Update the family index.
             let mut family = hat
                 .open_family(name.clone())
-                .expect(&format!("Could not open family '{}'", name));
+                .unwrap_or_else(|_| panic!("Could not open family '{}'", name));
             family.snapshot_dir(PathBuf::from(path));
 
             // Commit the updated index.
@@ -166,24 +160,24 @@ fn main() {
             // Flush any remaining blobs.
             hat.data_flush().unwrap();
         }
-        ("checkout", Some(cmd)) => {
-            let name = cmd.value_of("NAME").unwrap().to_owned();
-            let path = cmd.value_of("PATH").unwrap();
+        Some(("checkout", cmd)) => {
+            let name = cmd.get_one::<String>("NAME").unwrap().to_owned();
+            let path = cmd.get_one::<String>("PATH").unwrap();
 
             let backend = Arc::new(backend::CmdBackend::new());
             let mut hat = hat::Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap();
 
             hat.checkout_in_dir(name, PathBuf::from(path)).unwrap();
         }
-        ("recover", Some(_cmd)) => {
+        Some(("recover", _)) => {
             let backend = Arc::new(backend::CmdBackend::new());
             let mut hat = hat::Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap();
 
             hat.recover().unwrap();
         }
-        ("delete", Some(cmd)) => {
-            let name = cmd.value_of("NAME").unwrap().to_owned();
-            let id = cmd.value_of("ID").unwrap().to_owned();
+        Some(("delete", cmd)) => {
+            let name = cmd.get_one::<String>("NAME").unwrap().to_owned();
+            let id = cmd.get_one::<String>("ID").unwrap().to_owned();
 
             let backend = Arc::new(backend::CmdBackend::new());
             let mut hat = hat::Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap();
@@ -191,22 +185,34 @@ fn main() {
             hat.deregister_by_name(name, id.parse::<u64>().unwrap())
                 .unwrap();
         }
-        ("gc", Some(_cmd)) => {
+        Some(("gc", _)) => {
             let backend = Arc::new(backend::CmdBackend::new());
             let mut hat = hat::Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap();
             let (deleted_hashes, live_blobs) = hat.gc().unwrap();
             println!("Deleted hashes: {:?}", deleted_hashes);
             println!("Live data blobs after deletion: {:?}", live_blobs);
         }
-        ("mount", Some(cmd)) => {
-            let path = cmd.value_of("PATH").unwrap();
-            let backend = Arc::new(backend::CmdBackend::new());
+        Some(("mount", cmd)) => {
+            #[cfg(feature = "fuse")]
+            {
+                let path = cmd.get_one::<String>("PATH").unwrap();
+                let backend = Arc::new(backend::CmdBackend::new());
 
-            let hat = hat::Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap();
-            hat::vfs::Fuse::new(hat).mount(&path).unwrap();
+                let hat = hat::Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap();
+                hat::vfs::Fuse::new(hat).mount(&path).unwrap();
+            }
+            #[cfg(not(feature = "fuse"))]
+            {
+                let _ = cmd;
+                let _ = cache_dir;
+                eprintln!(
+                    "Error: FUSE support was not enabled at build time. Rebuild with `--features fuse`."
+                );
+                std::process::exit(1);
+            }
         }
-        ("ls", Some(cmd)) => {
-            let path: PathBuf = cmd.value_of("PATH").unwrap().into();
+        Some(("ls", cmd)) => {
+            let path: PathBuf = cmd.get_one::<String>("PATH").unwrap().into();
             let backend = Arc::new(backend::CmdBackend::new());
 
             let hat = hat::Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap();
@@ -220,26 +226,27 @@ fn main() {
                             .into_iter()
                             .for_each(|name| println!("{}", name));
                     }
-                    hat::vfs::fs::List::Snapshots(snapshots) => for si in snapshots {
-                        println!(
-                            "{}",
-                            PathBuf::from(si.family_name)
-                                .join(format!("{}", si.info.snapshot_id))
-                                .display()
-                        );
-                    },
-                    hat::vfs::fs::List::Dir(files) => for (entry, _) in files {
-                        let name_os_string: ffi::OsString = entry.info.name.into();
-                        println!("{}", path.join(name_os_string).display());
-                    },
+                    hat::vfs::fs::List::Snapshots(snapshots) => {
+                        for si in snapshots {
+                            println!(
+                                "{}",
+                                PathBuf::from(si.family_name)
+                                    .join(format!("{}", si.info.snapshot_id))
+                                    .display()
+                            );
+                        }
+                    }
+                    hat::vfs::fs::List::Dir(files) => {
+                        for (entry, _) in files {
+                            let name_os_string: ffi::OsString = entry.info.name.into();
+                            println!("{}", path.join(name_os_string).display());
+                        }
+                    }
                 }
             }
         }
         _ => {
-            println!(
-                "No subcommand specified\n{}\nFor more information re-run with --help",
-                matches.usage()
-            );
+            println!("No subcommand specified\nFor more information re-run with --help");
             std::process::exit(1);
         }
     }
