@@ -192,7 +192,8 @@ pub const MIGRATIONS: diesel_migrations::EmbeddedMigrations = embed_migrations!(
 
 impl InternalKeyIndex {
     fn new(path: &str) -> Result<InternalKeyIndex, DieselError> {
-        let conn = SqliteConnection::establish(path)?;
+        let mut conn = SqliteConnection::establish(path)?;
+        crate::db::configure_connection(&mut conn)?;
 
         let mut ki = InternalKeyIndex {
             conn,
