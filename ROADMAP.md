@@ -44,9 +44,9 @@ Highest priority before any “safe for disposable data” claim.
 
 | Item | Notes |
 |------|--------|
-| `FileBackend` fsync / atomic put | Today `flush` is a no-op; define and test durable write contract |
+| `FileBackend` fsync / atomic put | **Puts done:** temp write, sync, rename, dir sync, then `done()`. `list` skips temp and non-hex names. Linux crash cut: `scripts/linux-powerfail.sh`. **Open:** deletes not dir-synced; stale `.tmp-*` files not swept; recovery orphan cleanup; macOS `F_BARRIERFSYNC` not power-fail tested |
 | Broader kill/reopen matrix | Already started; expand stages + cold remount |
-| Power-fail / block-fault lane | Firecracker, `dm-flakey`, or equivalent — optional nightly |
+| Power-fail / block-fault lane | Linux: `scripts/linux-powerfail.sh` (privileged Docker, dm-linear, `suspend --noflush`). Proves a returned `store()` is on the block device and an unsynced sibling is not. macOS barrier and a real host power cut are still open |
 | Recover hardening | Read-only recover option; fewer panics; clear errors on missing roots |
 | Replace panic-heavy paths | Systematically remove `unwrap`/`expect` on recoverable errors |
 | Metadata restore completeness | Modes partially done; owners/times/non-utf8 paths still open |

@@ -18,7 +18,7 @@ use hex::{self, FromHex};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 type ReadCache = BTreeMap<Vec<u8>, Result<Option<Vec<u8>>, String>>;
@@ -81,23 +81,72 @@ impl FileBackend {
     }
 }
 
-impl StoreBackend for FileBackend {
-    fn store(&self, name: &[u8], data: CipherText, done: Box<dyn FnOnce() + Send>) -> Result<(), String> {
+/// Prefix for in-progress writes. Never valid hex, so `list` skips it.
+const TMP_PREFIX: &str = ".tmp-";
+
+/// Force written bytes to stable storage, ordered before any later write.
+///
+/// On macOS, `fsync` does not flush the drive cache. `F_BARRIERFSYNC` orders
+/// this write before later writes without the full cache flush that
+/// `F_FULLFSYNC` pays for. Elsewhere, `sync_all` is the barrier.
+fn sync_to_stable(file: &fs::File) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::io::AsRawFd;
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_BARRIERFSYNC) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        file.sync_all()
+    }
+}
+
+impl FileBackend {
+    fn blob_path(&self, name: &[u8]) -> PathBuf {
+        self.root.join(hex::encode(name))
+    }
+
+    fn tmp_path(&self, name: &[u8]) -> PathBuf {
+        self.root.join(format!("{}{}", TMP_PREFIX, hex::encode(name)))
+    }
+
+    /// Write the blob under its temp name and sync the bytes.
+    fn write_tmp(&self, tmp: &Path, data: &CipherText) -> io::Result<()> {
         use self::io::Write;
 
-        let mut path = self.root.clone();
-        path.push(hex::encode(name));
-
-        let mut file = match fs::File::create(&path) {
-            Err(e) => return Err(e.to_string()),
-            Ok(f) => f,
-        };
-
+        let mut file = fs::File::create(tmp)?;
         for r in data.slices() {
-            if let Err(e) = file.write_all(r) {
-                return Err(e.to_string());
-            }
+            file.write_all(r)?;
         }
+        sync_to_stable(&file)
+    }
+}
+
+impl StoreBackend for FileBackend {
+    /// Publish a blob atomically and durably, then call `done`.
+    ///
+    /// Order: write temp, sync bytes, rename to the final name, sync the
+    /// directory, then `done`. `done` commits the hash ref, so a ref can only
+    /// point at a blob already on disk. A failure before the rename leaves no
+    /// final name behind.
+    fn store(&self, name: &[u8], data: CipherText, done: Box<dyn FnOnce() + Send>) -> Result<(), String> {
+        let tmp = self.tmp_path(name);
+        let dst = self.blob_path(name);
+
+        if let Err(e) = self.write_tmp(&tmp, &data) {
+            let _ = fs::remove_file(&tmp);
+            return Err(e.to_string());
+        }
+        if let Err(e) = fs::rename(&tmp, &dst) {
+            let _ = fs::remove_file(&tmp);
+            return Err(e.to_string());
+        }
+        // The rename is only durable once the directory entry is synced.
+        let dir = fs::File::open(&self.root).map_err(|e| e.to_string())?;
+        sync_to_stable(&dir).map_err(|e| e.to_string())?;
 
         done();
         Ok(())
@@ -140,8 +189,15 @@ impl StoreBackend for FileBackend {
         let mut out = vec![];
         for p in fs::read_dir(&self.root).map_err(es)? {
             if let Some(name) = p.map_err(es)?.path().file_name() {
-                if let Some(b) = name.to_str()
-                    .map(|s| Vec::from_hex(s).unwrap()) { out.push(b.into_boxed_slice()) }
+                // Skip in-progress temp writes and any name that is not a blob id.
+                // Parsing with `unwrap` here would panic recovery on a stray file.
+                if let Some(b) = name
+                    .to_str()
+                    .filter(|s| !s.starts_with(TMP_PREFIX))
+                    .and_then(|s| Vec::from_hex(s).ok())
+                {
+                    out.push(b.into_boxed_slice())
+                }
             }
         }
         Ok(out)
@@ -149,5 +205,79 @@ impl StoreBackend for FileBackend {
 
     fn flush(&self) -> Result<(), String> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn done_runs_only_after_final_name_holds_full_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let backend = FileBackend::new(root.clone());
+
+        let final_path = backend.blob_path(b"blob-1");
+        let tmp_path = backend.tmp_path(b"blob-1");
+        let seen = Arc::new(AtomicBool::new(false));
+        let seen_cb = seen.clone();
+        let check_path = final_path.clone();
+        let check_tmp = tmp_path.clone();
+
+        backend
+            .store(
+                b"blob-1",
+                CipherText::new(b"hello".to_vec()),
+                Box::new(move || {
+                    // Inside done(): the blob must already be published in full.
+                    assert_eq!(fs::read(&check_path).unwrap(), b"hello");
+                    assert!(!check_tmp.exists(), "temp file must be renamed away");
+                    seen_cb.store(true, Ordering::SeqCst);
+                }),
+            )
+            .unwrap();
+
+        assert!(seen.load(Ordering::SeqCst), "done() was not called");
+        assert_eq!(fs::read(&final_path).unwrap(), b"hello");
+        assert!(!tmp_path.exists());
+    }
+
+    #[test]
+    fn failed_write_does_not_publish_or_call_done() {
+        let dir = tempfile::tempdir().unwrap();
+        // Root does not exist, so the temp create fails before anything is published.
+        let backend = FileBackend::new(dir.path().join("missing"));
+
+        let called = Arc::new(AtomicBool::new(false));
+        let called_cb = called.clone();
+        let res = backend.store(
+            b"blob-2",
+            CipherText::new(b"data".to_vec()),
+            Box::new(move || called_cb.store(true, Ordering::SeqCst)),
+        );
+
+        assert!(res.is_err());
+        assert!(!called.load(Ordering::SeqCst), "done() must not run on failure");
+    }
+
+    #[test]
+    fn list_skips_temp_and_non_hex_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let backend = FileBackend::new(root.clone());
+
+        backend
+            .store(b"real", CipherText::new(b"x".to_vec()), Box::new(|| {}))
+            .unwrap();
+        // Stray files that used to panic `list` (non-hex) or look like blobs (temp).
+        fs::write(backend.tmp_path(b"inflight"), b"partial").unwrap();
+        fs::write(root.join("not-hex-at-all"), b"junk").unwrap();
+
+        let names = backend.list().unwrap();
+        assert_eq!(names.len(), 1);
+        assert_eq!(&names[0][..], b"real");
     }
 }
