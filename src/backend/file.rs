@@ -86,22 +86,10 @@ const TMP_PREFIX: &str = ".tmp-";
 
 /// Force written bytes to stable storage, ordered before any later write.
 ///
-/// On macOS, `fsync` does not flush the drive cache. `F_BARRIERFSYNC` orders
-/// this write before later writes without the full cache flush that
-/// `F_FULLFSYNC` pays for. Elsewhere, `sync_all` is the barrier.
+/// Uses `File::sync_all()`, which calls `F_FULLFSYNC` on macOS (flushing the
+/// drive write cache) and `fsync` on other Unix platforms.
 fn sync_to_stable(file: &fs::File) -> io::Result<()> {
-    #[cfg(target_os = "macos")]
-    {
-        use std::os::unix::io::AsRawFd;
-        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_BARRIERFSYNC) } == -1 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        file.sync_all()
-    }
+    file.sync_all()
 }
 
 impl FileBackend {

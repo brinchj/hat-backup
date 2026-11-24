@@ -65,7 +65,11 @@ impl UniqueBlockFiller {
     }
 
     fn fill_chars(&mut self, buf: &mut String) {
-        self.fill_ascii(unsafe { buf.as_mut_vec() });
+        use std::fmt::Write;
+        let mut n = self.0.lock().unwrap();
+        buf.clear();
+        let _ = write!(buf, "{:08x}", *n);
+        *n += 1;
     }
 }
 

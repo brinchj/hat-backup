@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![forbid(unsafe_code)]
+
 use clap::{Arg, ArgMatches, Command};
 use hat::backend::{self, StoreBackend};
 use hat::hat::HatRc;

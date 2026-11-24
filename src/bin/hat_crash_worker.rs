@@ -1,6 +1,8 @@
 //! Test helper: commit or delete against an on-disk repo, optionally hanging at a fault barrier.
 //! Used by `tests/process_crash.rs` (SIGKILL + reopen).
 
+#![forbid(unsafe_code)]
+
 use hat::backend::FileBackend;
 use hat::Hat;
 use std::env;

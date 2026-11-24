@@ -14,6 +14,8 @@
 
 //! High level Hat API
 
+#![forbid(unsafe_code)]
+
 // Unstable APIs:
 #![cfg_attr(feature = "benchmarks", feature(test))]
 
