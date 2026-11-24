@@ -127,9 +127,7 @@ fn do_ls<B: StoreBackend>(hat: HatRc<B>, path: PathBuf) {
 }
 
 fn main() {
-    unsafe {
-        libsodium_sys::sodium_init();
-    }
+    hat::crypto::keys::init_sodium();
     env_logger::init();
 
     let matches = Command::new("hat")

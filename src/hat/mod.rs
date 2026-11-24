@@ -530,10 +530,10 @@ impl<B: StoreBackend> HatRc<B> {
         info!("{} blobs to investigate", blobs.len());
         for b in blobs.into_iter() {
             info!("Inspecting blob: {}", hex::encode(&b.name));
-            for r in self.blob_store.retrieve_refs(b)?.unwrap_or(vec![]) {
+            // Iterate in reverse so the latest SnapshotList within the highest-ID blob wins.
+            for r in self.blob_store.retrieve_refs(b)?.unwrap_or_default().into_iter().rev() {
                 match r.leaf {
                     blob::LeafType::SnapshotList => {
-                        // First SnapshotList wins; retrying a bad root is a future improvement.
                         return Ok(Some(r));
                     }
                     // Recovering TreeList entries after commit is a future improvement.
@@ -550,10 +550,30 @@ impl<B: StoreBackend> HatRc<B> {
     }
 
     pub fn recover(&mut self) -> Result<(), HatError> {
+        self.recover_with_expected_root(None)
+    }
+
+    /// Recover local state from backend storage. When `expected_root_hash` is provided
+    /// (out-of-band pinned root digest), fail closed if the discovered root does not match,
+    /// preventing silent rollback/replay by an untrusted backend.
+    pub fn recover_with_expected_root(
+        &mut self,
+        expected_root_hash: Option<&[u8]>,
+    ) -> Result<(), HatError> {
         self.blob_store.recover()?;
         let root_href = self
             .recover_root()?
             .ok_or("Failed to find a commit-ed root")?;
+        if let Some(expected) = expected_root_hash {
+            if !crypto::keys::ct_eq(&root_href.hash.bytes, expected) {
+                return Err(format!(
+                    "recovered root hash mismatch (possible backend rollback): expected {}, got {}",
+                    hex::encode(expected),
+                    hex::encode(&root_href.hash.bytes)
+                )
+                .into());
+            }
+        }
 
         info!(
             "Recovering using root: {}",
@@ -1179,7 +1199,7 @@ impl<B: StoreBackend> HatRc<B> {
             match self.blob_store.retrieve(&href) {
                 Ok(Some(data)) => {
                     let actual = hash::Hash::new(&self.keys, href.node, href.leaf, &data);
-                    if actual != href.hash {
+                    if !crypto::keys::ct_eq(&actual.bytes, &href.hash.bytes) {
                         problems.push(format!(
                             "hash mismatch for {}",
                             hex::encode(&href.hash.bytes)

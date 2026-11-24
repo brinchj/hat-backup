@@ -17,9 +17,7 @@ fn usage() -> ! {
 }
 
 fn main() {
-    unsafe {
-        libsodium_sys::sodium_init();
-    }
+    hat::crypto::keys::init_sodium();
 
     let mut args = env::args().skip(1);
     let cmd = args.next().unwrap_or_else(|| usage());

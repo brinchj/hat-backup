@@ -42,20 +42,23 @@ there is an explicit, reviewed replacement for this size-hiding property
 ### Chunk encryption inside blobs
 
 **What:** File/chunks are sealed with per-chunk keys tied into `HashRef`
-metadata (`RefKey::seal` / AEAD ChaCha20-Poly1305 family via libsodium).
-Blob footers that list chunk refs are sealed with an access key
-(`FixedKey::seal`). See `src/crypto/` and `src/blob/blob.rs`.
+metadata (`RefKey::seal` / AEAD XChaCha20-Poly1305-IETF with 192-bit random
+nonces via libsodium; AAD binds node/leaf type, chunk offset, full 64-byte
+content hash, and blob name). Blob footers that list chunk refs are sealed
+with an access key (`FixedKey::seal`, AAD bound to blob name). See
+`src/crypto/` and `src/blob/blob.rs`.
 
 **Why:** Backend operators should not read plaintext chunk bytes from stored
-objects.
+objects, and chunks/footers cannot be transplanted across blobs or offsets.
 
 ### Blob authentication
 
-**What:** Each blob ciphertext ends with a keyed authentication tag
-(`append_authentication` / `strip_authentication`) derived from the key
-keeper.
+**What:** Each blob ciphertext ends with a keyed BLAKE2b-512 authentication
+tag (`append_authentication` / `strip_authentication`, verified in constant
+time via `sodium_memcmp`) covering the blob name and full ciphertext bytes.
 
-**Why:** Detect accidental or malicious modification of stored blob bytes.
+**Why:** Detect accidental or malicious modification, truncation, or renaming
+of stored blob objects.
 
 ### Content-addressed hashing with keyed fingerprints
 
@@ -98,6 +101,9 @@ Be honest in reviews and releases:
   channels remain.
 - **Dedup:** Identical content still collapses to shared hashes; a capable
   adversary with chosen-plaintext access may learn about content sharing.
+- **Recovery rollback:** Without an out-of-band pinned root hash
+  (`Hat::recover_with_expected_root`), a backend attacker who deletes recent
+  blobs can cause `recover` to select an older surviving `SnapshotList`.
 - **No formal threat model / audit** yet.
 
 ## Checklist before changing crypto or blob layout

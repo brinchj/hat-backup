@@ -51,7 +51,7 @@ fn insert_128_kb_chunks(bench: &mut Bencher) {
     let chunk = [0u8; CHUNKSIZE];
     bench.iter(|| {
         if let Err(()) = b.try_append(&chunk[..], &mut href) {
-            b.finish();
+            b.finish(b"");
             b.try_append(&chunk[..], &mut href).unwrap();
         }
     });
@@ -66,7 +66,7 @@ fn insert_256_kb_chunks(bench: &mut Bencher) {
     let mut href = dummy_hashref(&keys);
     bench.iter(|| {
         if let Err(()) = b.try_append(&chunk[..], &mut href) {
-            b.finish();
+            b.finish(b"");
             b.try_append(&chunk[..], &mut href).unwrap();
         }
     });

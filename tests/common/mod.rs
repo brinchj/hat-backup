@@ -13,15 +13,11 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Once};
+use std::sync::Arc;
 use tempfile::TempDir;
 
-static SODIUM: Once = Once::new();
-
 pub fn init_sodium() {
-    SODIUM.call_once(|| unsafe {
-        libsodium_sys::sodium_init();
-    });
+    hat::crypto::keys::init_sodium();
 }
 
 pub const MAX_BLOB_SIZE: usize = 1024 * 1024;

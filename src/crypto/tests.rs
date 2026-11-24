@@ -1,5 +1,5 @@
 use crate::blob::{BlobReader, ChunkRef, Key, LeafType, NodeType};
-use crate::crypto::keys::{Keeper, UNIVERSAL_KEY_BYTES};
+use crate::crypto::keys::{ct_eq, init_sodium, random_bytes, Keeper, UNIVERSAL_KEY_BYTES};
 use crate::crypto::{authed, sealed, CipherText, CipherTextRef, FixedKey, PlainText, PlainTextRef, RefKey};
 use crate::hash::tree::HashRef;
 use crate::hash::Hash;
@@ -139,8 +139,17 @@ fn refkey_unseal_handles_bounds_overflow_bad_key_and_exact_end() {
 
     // Wrong partial_key length must return Err.
     let mut bad_key_href = href.clone();
-    bad_key_href.persistent_ref.key = Some(Key::AeadChacha20Poly1305(secstr::SecStr::new(vec![1; 8])));
+    bad_key_href.persistent_ref.key =
+        Some(Key::AeadXChaCha20Poly1305(secstr::SecStr::new(vec![1; 8])));
     assert!(RefKey::unseal(&access_key, &bad_key_href, CipherTextRef::new(&ct)).is_err());
+
+    // Legacy 64-bit ChaCha20Poly1305 key tag is rejected cleanly.
+    let mut legacy_key_href = href.clone();
+    legacy_key_href.persistent_ref.key = Some(Key::AeadChacha20Poly1305(secstr::SecStr::new(vec![
+        1;
+        authed::desc::KEYBYTES
+    ])));
+    assert!(RefKey::unseal(&access_key, &legacy_key_href, CipherTextRef::new(&ct)).is_err());
 
     // Short access_key must return Err.
     let short_access = secstr::SecStr::new(vec![0u8; 4]);
@@ -157,8 +166,11 @@ fn fixedkey_unseal_rejects_corrupt_access_footer_and_invalid_lengths() {
     let keeper = test_keeper(4);
     let fk = FixedKey::new(&keeper);
     let access_key = FixedKey::new_access_partial_key();
+    let blob_name = b"blob-name-test";
 
-    let sealed_ct = fk.seal(&access_key, PlainTextRef::new(b"footer-data")).to_vec();
+    let sealed_ct = fk
+        .seal(blob_name, &access_key, PlainTextRef::new(b"footer-data"))
+        .to_vec();
 
     // Corrupted access box returns Err.
     let mut bad_access = sealed_ct.clone();
@@ -170,17 +182,22 @@ fn fixedkey_unseal_rejects_corrupt_access_footer_and_invalid_lengths() {
     let (_ak, footer_ct, rest) = fk.unseal_access_ctx(CipherTextRef::new(&sealed_ct)).unwrap();
     let mut bad_footer = footer_ct.to_vec();
     bad_footer[0] ^= 0x01;
-    assert!(fk.unseal(CipherTextRef::new(&bad_footer), rest.as_ref()).is_err());
+    assert!(fk.unseal(blob_name, CipherTextRef::new(&bad_footer), rest.as_ref()).is_err());
+
+    // Wrong blob_name in footer AAD returns Err.
+    assert!(fk
+        .unseal(b"other-blob-name", CipherTextRef::new(&footer_ct.to_vec()), rest.as_ref())
+        .is_err());
 
     // Wrong-length footer box returns Err.
-    assert!(fk.unseal(CipherTextRef::new(&bad_footer[..4]), rest.as_ref()).is_err());
+    assert!(fk.unseal(blob_name, CipherTextRef::new(&bad_footer[..4]), rest.as_ref()).is_err());
 
     // Validly sealed footer claiming negative/zero ct_len returns Err instead of panicking.
     for invalid_len in [0i64, -1i64, -100i64] {
         let mut foot_pt = PlainText::from_i64(invalid_len).into_vec();
         foot_pt.extend_from_slice(&[0x55u8; authed::desc::KEYBYTES]);
         let forged_footer = fk.seal_blob_data(PlainTextRef::new(&foot_pt)).to_vec();
-        assert!(fk.unseal(CipherTextRef::new(&forged_footer), rest.as_ref()).is_err());
+        assert!(fk.unseal(blob_name, CipherTextRef::new(&forged_footer), rest.as_ref()).is_err());
     }
 }
 
@@ -188,17 +205,18 @@ fn fixedkey_unseal_rejects_corrupt_access_footer_and_invalid_lengths() {
 fn blob_reader_refs_rejects_truncated_and_off_by_one_footers() {
     let keeper = Arc::new(test_keeper(5));
     let fk = FixedKey::new(&keeper);
+    let blob_name = b"blob-footer-check";
 
     // 1) 1-byte footer (missing second length byte)
     // 2) 6-byte footer claiming entry length 5: len = 5, footer_pos.len() = 6 == len + 1
     //    (previously bypassed `assert!(footer_pos.len() > len)` and panicked on `&footer_pos[2..7]`)
     for bad_footer_plaintext in [vec![0x05u8], vec![0x05, 0x00, 1, 2, 3, 4]] {
         let access_key = FixedKey::new_access_partial_key();
-        let mut blob_ct = fk.seal(&access_key, PlainTextRef::new(&bad_footer_plaintext));
-        blob_ct.append_authentication(&keeper);
+        let mut blob_ct = fk.seal(blob_name, &access_key, PlainTextRef::new(&bad_footer_plaintext));
+        blob_ct.append_authentication(blob_name, &keeper);
         let raw = blob_ct.to_vec();
 
-        let mut reader = BlobReader::new(keeper.clone(), CipherTextRef::new(&raw)).unwrap();
+        let mut reader = BlobReader::new(keeper.clone(), blob_name, CipherTextRef::new(&raw)).unwrap();
         assert!(
             reader.refs().is_err(),
             "refs() must return Err for malformed footer {:?}",
@@ -279,4 +297,120 @@ fn keeper_new_rejects_empty_key() {
 fn collapse_empty_ciphertext_does_not_panic() {
     let mut empty = CipherText::empty();
     assert!(empty.collapse().is_empty());
+}
+
+#[test]
+fn ct_eq_checks_lengths_and_all_byte_positions() {
+    assert!(ct_eq(b"", b""));
+    assert!(ct_eq(b"abcdef", b"abcdef"));
+    assert!(!ct_eq(b"abc", b"abcd"));
+
+    let base = vec![0x5Au8; 64];
+    for pos in [0usize, 1, 31, 63] {
+        let mut flipped = base.clone();
+        flipped[pos] ^= 0x01;
+        assert!(!ct_eq(&base, &flipped), "ct_eq must detect diff at byte {pos}");
+    }
+}
+
+#[test]
+fn init_sodium_is_thread_safe_and_idempotent() {
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            std::thread::spawn(|| {
+                init_sodium();
+                let r = random_bytes(32);
+                assert_eq!(r.unsecure().len(), 32);
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+}
+
+#[test]
+fn strip_authentication_binds_blob_name_and_rejects_tag_flips() {
+    let keeper = test_keeper(6);
+    let mut ct = CipherText::new(b"opaque-blob-body".to_vec());
+    ct.append_authentication(b"blob-a", &keeper);
+    let raw = ct.to_vec();
+
+    assert!(CipherTextRef::new(&raw)
+        .strip_authentication(b"blob-a", &keeper)
+        .is_ok());
+    assert!(CipherTextRef::new(&raw)
+        .strip_authentication(b"blob-b", &keeper)
+        .is_err());
+
+    // Flip first and last byte of 64-byte MAC tag.
+    let tag_start = raw.len() - authed::hash::DIGESTBYTES as usize;
+    for pos in [tag_start, raw.len() - 1] {
+        let mut bad = raw.clone();
+        bad[pos] ^= 0x01;
+        assert!(CipherTextRef::new(&bad)
+            .strip_authentication(b"blob-a", &keeper)
+            .is_err());
+    }
+}
+
+#[test]
+fn xchacha20poly1305_uses_24_byte_nonce_and_binds_full_chunk_metadata() {
+    assert_eq!(authed::desc::NONCEBYTES, 24);
+
+    let keeper = test_keeper(7);
+    let access_key = FixedKey::new_access_partial_key();
+    let payload = b"authenticated-chunk-data";
+
+    let mut href = HashRef {
+        hash: Hash::new(&keeper, NodeType::Leaf, LeafType::FileChunk, payload),
+        node: NodeType::Leaf,
+        leaf: LeafType::FileChunk,
+        info: None,
+        persistent_ref: ChunkRef {
+            blob_id: Some(1),
+            blob_name: b"blob-origin".to_vec(),
+            offset: 16,
+            length: 0,
+            packing: None,
+            key: None,
+        },
+    };
+
+    let chunk_ct = RefKey::seal(&mut href, &access_key, PlainTextRef::new(payload)).to_vec();
+    assert!(matches!(
+        href.persistent_ref.key,
+        Some(Key::AeadXChaCha20Poly1305(_))
+    ));
+    assert_eq!(
+        chunk_ct.len(),
+        payload.len() + authed::desc::MACBYTES + authed::desc::NONCEBYTES
+    );
+
+    let mut buf = vec![0u8; 16];
+    buf.extend_from_slice(&chunk_ct);
+    assert_eq!(
+        RefKey::unseal(&access_key, &href, CipherTextRef::new(&buf))
+            .unwrap()
+            .into_vec(),
+        payload
+    );
+
+    // Flipping the last byte of the 64-byte hash (byte 63) must fail AEAD verification.
+    let mut bad_hash = href.clone();
+    let last = bad_hash.hash.bytes.len() - 1;
+    bad_hash.hash.bytes[last] ^= 0x01;
+    assert!(RefKey::unseal(&access_key, &bad_hash, CipherTextRef::new(&buf)).is_err());
+
+    // Changing blob_name in metadata must fail AEAD verification.
+    let mut bad_blob = href.clone();
+    bad_blob.persistent_ref.blob_name = b"blob-other".to_vec();
+    assert!(RefKey::unseal(&access_key, &bad_blob, CipherTextRef::new(&buf)).is_err());
+
+    // Relocating ciphertext to a different offset must fail AEAD verification.
+    let mut shifted_buf = vec![0u8; 32];
+    shifted_buf.extend_from_slice(&chunk_ct);
+    let mut shifted_href = href.clone();
+    shifted_href.persistent_ref.offset = 32;
+    assert!(RefKey::unseal(&access_key, &shifted_href, CipherTextRef::new(&shifted_buf)).is_err());
 }

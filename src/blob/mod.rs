@@ -111,7 +111,7 @@ impl<B: StoreBackend> StoreInner<B> {
     }
 
     fn flush(&mut self) {
-        let ct = match self.blob.finish() {
+        let ct = match self.blob.finish(&self.blob_desc.name[..]) {
             None => return,
             Some(ct) => ct,
         };
@@ -194,7 +194,7 @@ impl<B: StoreBackend> StoreInner<B> {
             match self.backend.retrieve(name) {
                 Ok(Some(blob)) => {
                     let text = crypto::CipherTextRef::new(&blob[..]);
-                    let mut reader = BlobReader::new(self.keys.clone(), text)?;
+                    let mut reader = BlobReader::new(self.keys.clone(), name, text)?;
                     let chunk = reader.read_chunk(href)?;
                     self.read_cache.put(name.to_vec(), reader);
                     Ok(Some(chunk))
@@ -209,8 +209,12 @@ impl<B: StoreBackend> StoreInner<B> {
         match self.backend.retrieve(&blob.name[..])? {
             None => Ok(None),
             Some(ct) => {
-                let hrefs = BlobReader::new(self.keys.clone(), crypto::CipherTextRef::new(&ct[..]))?
-                    .refs()?;
+                let hrefs = BlobReader::new(
+                    self.keys.clone(),
+                    &blob.name[..],
+                    crypto::CipherTextRef::new(&ct[..]),
+                )?
+                .refs()?;
                 if hrefs.is_empty() {
                     Ok(None)
                 } else if blob.name[..] != hrefs[0].persistent_ref.blob_name[..] {

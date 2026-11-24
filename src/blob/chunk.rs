@@ -26,6 +26,7 @@ pub enum Packing {
 #[derive(Debug, Clone)]
 pub enum Key {
     AeadChacha20Poly1305(secstr::SecStr),
+    AeadXChaCha20Poly1305(secstr::SecStr),
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -100,6 +101,9 @@ impl From<models::ChunkRef> for ChunkRef {
                 models::Key::AeadChacha20Poly1305(key) => {
                     Some(Key::AeadChacha20Poly1305(secstr::SecVec::new(key)))
                 }
+                models::Key::AeadXChaCha20Poly1305(key) => {
+                    Some(Key::AeadXChaCha20Poly1305(secstr::SecVec::new(key)))
+                }
             },
         }
     }
@@ -120,6 +124,9 @@ impl ChunkRef {
                 None => models::Key::None,
                 Some(Key::AeadChacha20Poly1305(ref key)) => {
                     models::Key::AeadChacha20Poly1305(key.unsecure().to_owned())
+                }
+                Some(Key::AeadXChaCha20Poly1305(ref key)) => {
+                    models::Key::AeadXChaCha20Poly1305(key.unsecure().to_owned())
                 }
             },
         }

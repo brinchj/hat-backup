@@ -35,10 +35,12 @@ pub mod authed {
         use libsodium_sys;
         use secstr;
 
-        pub const KEYBYTES: usize = libsodium_sys::crypto_aead_chacha20poly1305_KEYBYTES as usize;
+        pub const KEYBYTES: usize =
+            libsodium_sys::crypto_aead_xchacha20poly1305_ietf_KEYBYTES as usize;
         pub const NONCEBYTES: usize =
-            libsodium_sys::crypto_aead_chacha20poly1305_NPUBBYTES as usize;
-        pub const MACBYTES: usize = libsodium_sys::crypto_aead_chacha20poly1305_ABYTES as usize;
+            libsodium_sys::crypto_aead_xchacha20poly1305_ietf_NPUBBYTES as usize;
+        pub const MACBYTES: usize =
+            libsodium_sys::crypto_aead_xchacha20poly1305_ietf_ABYTES as usize;
         pub type Key = secstr::SecStr;
         pub type Nonce = secstr::SecStr;
     }
@@ -114,7 +116,30 @@ pub mod sealed {
 }
 
 fn wrap_key(key: authed::desc::Key) -> Key {
-    Key::AeadChacha20Poly1305(key)
+    Key::AeadXChaCha20Poly1305(key)
+}
+
+fn chunk_ad(href: &HashRef) -> Vec<u8> {
+    let salt = keys::compute_salt(href.node, href.leaf);
+    let mut ad = Vec::with_capacity(
+        salt.len() + 8 + 8 + href.hash.bytes.len() + 8 + href.persistent_ref.blob_name.len(),
+    );
+    ad.extend_from_slice(&salt);
+    ad.extend_from_slice(&(href.persistent_ref.offset as u64).to_le_bytes());
+    ad.extend_from_slice(&(href.hash.bytes.len() as u64).to_le_bytes());
+    ad.extend_from_slice(&href.hash.bytes);
+    ad.extend_from_slice(&(href.persistent_ref.blob_name.len() as u64).to_le_bytes());
+    ad.extend_from_slice(&href.persistent_ref.blob_name);
+    ad
+}
+
+fn footer_ad(blob_name: &[u8]) -> Vec<u8> {
+    let prefix = b"hat_blob_seal~";
+    let mut ad = Vec::with_capacity(prefix.len() + 8 + blob_name.len());
+    ad.extend_from_slice(prefix);
+    ad.extend_from_slice(&(blob_name.len() as u64).to_le_bytes());
+    ad.extend_from_slice(blob_name);
+    ad
 }
 
 impl<'a> PlainTextRef<'a> {
@@ -260,8 +285,11 @@ impl CipherText {
         out
     }
 
-    pub fn append_authentication(&mut self, keys: &keys::Keeper) {
+    pub fn append_authentication(&mut self, blob_name: &[u8], keys: &keys::Keeper) {
         self.collapse();
+        if self.chunks.is_empty() {
+            self.chunks.push(Vec::new());
+        }
         assert_eq!(self.chunks.len(), 1);
 
         let blob = &mut self.chunks[0];
@@ -269,7 +297,7 @@ impl CipherText {
         blob.resize(blob_len + authed::hash::DIGESTBYTES as usize, 0u8);
         {
             let (data, hash) = blob.split_at_mut(blob_len);
-            keys.blob_authentication(&data[..], &mut hash[..]);
+            keys.blob_authentication(blob_name, &data[..], &mut hash[..]);
         }
         self.len = blob.len();
     }
@@ -325,13 +353,17 @@ impl<'a> CipherTextRef<'a> {
         )?))
     }
 
-    pub fn strip_authentication(&self, keys: &keys::Keeper) -> Result<CipherTextRef<'_>, CryptoError> {
+    pub fn strip_authentication(
+        &self,
+        blob_name: &[u8],
+        keys: &keys::Keeper,
+    ) -> Result<CipherTextRef<'_>, CryptoError> {
         let (rest, want) = self.split_from_right(authed::hash::DIGESTBYTES as usize)?;
 
         let mut got = vec![0u8; authed::hash::DIGESTBYTES as usize];
-        keys.blob_authentication(rest.0, &mut got[..]);
+        keys.blob_authentication(blob_name, rest.0, &mut got[..]);
 
-        if want.0 == &got[..] {
+        if keys::ct_eq(want.0, &got[..]) {
             Ok(rest)
         } else {
             Err(From::from("crypto read failed: strip_authentication"))
@@ -350,11 +382,12 @@ impl RefKey {
         let partial_key = authed::imp::gen_key();
         href.persistent_ref.key = Some(wrap_key(partial_key.clone()));
 
-        let nonce = authed::desc::Nonce::from(&href.hash.bytes[..authed::desc::NONCEBYTES]);
+        let nonce = authed::imp::gen_nonce();
         let key = crate::crypto::authed::imp::mix_keys(access_key, &partial_key);
 
-        let additional_data = keys::compute_salt(href.node, href.leaf);
-        let ct = pt.to_ciphertext(&additional_data, &nonce, &key);
+        let additional_data = chunk_ad(href);
+        let mut ct = pt.to_ciphertext(&additional_data, &nonce, &key);
+        ct.append(CipherText::new(nonce.unsecure().to_vec()));
         href.persistent_ref.length = ct.len();
 
         ct
@@ -376,17 +409,19 @@ impl RefKey {
         if end > ct.len() {
             return Err("crypto read failed: chunk range out of bounds".into());
         }
-        let ct = ct.slice(href.persistent_ref.offset, end);
+        let ct_and_nonce = ct.slice(href.persistent_ref.offset, end);
+        let (ct, nonce) = ct_and_nonce.split_from_right(authed::desc::NONCEBYTES)?;
         match href.persistent_ref.key {
-            Some(Key::AeadChacha20Poly1305(ref key))
-                if key.unsecure().len() == authed::desc::KEYBYTES
-                    && href.hash.bytes.len() >= authed::desc::NONCEBYTES =>
+            Some(Key::AeadXChaCha20Poly1305(ref key))
+                if key.unsecure().len() == authed::desc::KEYBYTES =>
             {
-                let nonce = authed::desc::Nonce::from(&href.hash.bytes[..authed::desc::NONCEBYTES]);
-
-                let additional_data = keys::compute_salt(href.node, href.leaf);
+                let additional_data = chunk_ad(href);
                 let real_key = crate::crypto::authed::imp::mix_keys(access_key, key);
-                ct.to_plaintext(&additional_data, &nonce, &real_key)
+                ct.to_plaintext(
+                    &additional_data,
+                    &authed::desc::Nonce::from(nonce.0),
+                    &real_key,
+                )
             }
             _ => Err("crypto read failed: unseal".into()),
         }
@@ -433,14 +468,19 @@ impl<'k> FixedKey<'k> {
         crate::crypto::authed::imp::gen_key()
     }
 
-    pub fn seal(&self, access_key: &crate::crypto::authed::desc::Key, pt: PlainTextRef) -> CipherText {
+    pub fn seal(
+        &self,
+        blob_name: &[u8],
+        access_key: &crate::crypto::authed::desc::Key,
+        pt: PlainTextRef,
+    ) -> CipherText {
         // Generate inner symmetric key.
         let inner_key = crate::crypto::authed::imp::gen_key();
         let nonce = crate::crypto::authed::imp::gen_nonce();
 
         // Encrypt plaintext with inner key.
-        let additional_data: &[u8] = b"hat_blob_seal~";
-        let mut ct = pt.to_ciphertext(additional_data, &nonce, &inner_key);
+        let additional_data = footer_ad(blob_name);
+        let mut ct = pt.to_ciphertext(&additional_data, &nonce, &inner_key);
         ct.append(CipherText::new(nonce.unsecure().to_vec()));
 
         // Construct footer of length as LittleEndian and inner key.
@@ -487,6 +527,7 @@ impl<'k> FixedKey<'k> {
 
     pub fn unseal<'a>(
         &self,
+        blob_name: &[u8],
         footer_ct: CipherTextRef,
         ct: CipherTextRef<'a>,
     ) -> Result<(CipherTextRef<'a>, PlainText), CryptoError> {
@@ -514,13 +555,13 @@ impl<'k> FixedKey<'k> {
             .map_err(|_| CryptoError::from("crypto read failed: inner ciphertext length overflow"))?;
 
         // Read and unseal inner symmetric cipher text.
-        let additional_data: &[u8] = b"hat_blob_seal~";
+        let additional_data = footer_ad(blob_name);
         let (rest, ct_and_nonce) = ct.split_from_right(ct_len)?;
         let (ct, nonce) = ct_and_nonce.split_from_right(crate::crypto::authed::desc::NONCEBYTES)?;
         Ok((
             rest,
             ct.to_plaintext(
-                additional_data,
+                &additional_data,
                 &crate::crypto::authed::desc::Nonce::from(nonce.0),
                 &crate::crypto::authed::desc::Key::from(inner_key.0),
             )?,

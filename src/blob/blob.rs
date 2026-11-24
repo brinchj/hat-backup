@@ -52,9 +52,9 @@ impl Blob {
 
     #[cfg_attr(feature = "flame_it", flame)]
     pub fn try_append(&mut self, chunk: &[u8], href: &mut HashRef) -> Result<(), ()> {
+        href.persistent_ref.offset = self.chunks.len();
         let ct = crypto::RefKey::seal(href, &self.access_key, PlainTextRef::new(chunk));
 
-        href.persistent_ref.offset = self.chunks.len();
         let mut href_bytes = href.as_bytes();
         assert!(href_bytes.len() < 65535);
 
@@ -80,7 +80,7 @@ impl Blob {
     }
 
     #[cfg_attr(feature = "flame_it", flame)]
-    pub fn finish(&mut self) -> Option<CipherText> {
+    pub fn finish(&mut self, blob_name: &[u8]) -> Option<CipherText> {
         if self.chunks.is_empty() {
             return None;
         }
@@ -92,8 +92,11 @@ impl Blob {
         );
 
         let footer_overhead = self.footer.len() + self.overhead;
-        let footer = crypto::FixedKey::new(&self.keys)
-            .seal(&access_key, PlainTextRef::new(&self.footer[..]));
+        let footer = crypto::FixedKey::new(&self.keys).seal(
+            blob_name,
+            &access_key,
+            PlainTextRef::new(&self.footer[..]),
+        );
         self.footer.clear();
 
         assert!(self.chunks.len() + footer_overhead <= self.max_len);
@@ -103,7 +106,7 @@ impl Blob {
         let mut out = mem::replace(&mut self.chunks, CipherText::empty());
         out.random_pad_upto(self.max_len - footer_overhead);
         out.append(footer);
-        out.append_authentication(&self.keys);
+        out.append_authentication(blob_name, &self.keys);
 
         assert_eq!(out.len(), self.max_len);
 
@@ -117,6 +120,7 @@ impl Blob {
 
 pub struct BlobReader {
     keys: Arc<crypto::keys::Keeper>,
+    blob_name: Vec<u8>,
     access_key: crypto::authed::desc::Key,
     footer_ct: Vec<u8>,
     blob: CipherText,
@@ -125,13 +129,15 @@ pub struct BlobReader {
 impl BlobReader {
     pub fn new<'b>(
         keys: Arc<crypto::keys::Keeper>,
+        blob_name: &[u8],
         blob: CipherTextRef<'b>,
     ) -> Result<BlobReader, crypto::CryptoError> {
-        let rest = blob.strip_authentication(&keys)?;
+        let rest = blob.strip_authentication(blob_name, &keys)?;
         let (access_key, footer_ct, rest) = crypto::FixedKey::new(&keys).unseal_access_ctx(rest)?;
 
         Ok(BlobReader {
             keys,
+            blob_name: blob_name.to_vec(),
             access_key,
             footer_ct: footer_ct.to_vec(),
             blob: rest.to_owned(),
@@ -140,6 +146,7 @@ impl BlobReader {
 
     pub fn refs(&mut self) -> Result<Vec<HashRef>, BlobError> {
         let (_rest, footer_vec) = crypto::FixedKey::new(&self.keys).unseal(
+            &self.blob_name,
             CipherTextRef::new(&self.footer_ct[..]),
             self.blob.collapse(),
         )?;

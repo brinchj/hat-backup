@@ -49,6 +49,8 @@ pub enum Key {
     None,
     #[serde(rename = "c")]
     AeadChacha20Poly1305(Vec<u8>),
+    #[serde(rename = "x")]
+    AeadXChaCha20Poly1305(Vec<u8>),
 }
 
 #[derive(Serialize, Deserialize)]

@@ -18,11 +18,46 @@ use libsodium_sys;
 use secstr;
 use std::fs;
 use std::io::{self, Read, Write};
+use std::mem::MaybeUninit;
+use std::os::raw::c_void;
 use std::path::Path;
 use std::ptr;
+use std::sync::Once;
 
 const UNIVERSAL_KEY_FILENAME: &str = "secret-universal-key";
 pub const UNIVERSAL_KEY_BYTES: usize = 32;
+
+static SODIUM_INIT: Once = Once::new();
+
+/// Initialize libsodium once and abort if initialization fails (`sodium_init() < 0`).
+pub fn init_sodium() {
+    SODIUM_INIT.call_once(|| {
+        let rc = unsafe { libsodium_sys::sodium_init() };
+        assert!(
+            rc >= 0,
+            "libsodium initialization failed (sodium_init returned {})",
+            rc
+        );
+    });
+}
+
+/// Constant-time equality comparison using `libsodium_sys::sodium_memcmp`.
+pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    if a.is_empty() {
+        return true;
+    }
+    init_sodium();
+    unsafe {
+        libsodium_sys::sodium_memcmp(
+            a.as_ptr() as *const c_void,
+            b.as_ptr() as *const c_void,
+            a.len(),
+        ) == 0
+    }
+}
 
 // Crypto personalizations. Do not change these.
 const UNIVERSAL_KEY_MSG: &[u8] = b"hat-backup:universal-key:rust";
@@ -54,7 +89,7 @@ pub fn compute_salt(node_type: blob::NodeType, leaf_type: blob::LeafType) -> Box
 
 #[cfg_attr(feature = "flame_it", flame)]
 pub fn random_bytes(size: usize) -> secstr::SecStr {
-    use std::os::raw::c_void;
+    init_sodium();
     let mut r = vec![0u8; size];
     unsafe { libsodium_sys::randombytes_buf(r.as_mut_ptr() as *mut c_void, r.len()) };
     secstr::SecStr::new(r)
@@ -66,6 +101,7 @@ pub fn keyed_fingerprint_simple(sk: &[u8], msg: &[u8], out: &mut [u8]) {
 
 #[cfg_attr(feature = "flame_it", flame)]
 pub fn keyed_fingerprint(sk: &[u8], msg: &[u8], salt: &[u8], out: &mut [u8]) {
+    init_sodium();
     use libsodium_sys::{
         crypto_generichash_blake2b_BYTES_MAX, crypto_generichash_blake2b_BYTES_MIN,
         crypto_generichash_blake2b_KEYBYTES_MAX, crypto_generichash_blake2b_SALTBYTES,
@@ -182,6 +218,7 @@ impl Keeper {
     }
 
     pub fn new(key: secstr::SecStr) -> Keeper {
+        init_sodium();
         assert_eq!(
             key.unsecure().len(),
             UNIVERSAL_KEY_BYTES,
@@ -273,6 +310,7 @@ impl Keeper {
     }
 
     fn asymmetric_lock(pk: &PublicKey, msg: &[u8]) -> Vec<u8> {
+        init_sodium();
         let mut out = vec![0; msg.len() + libsodium_sys::crypto_box_SEALBYTES as usize];
         let ret = unsafe {
             libsodium_sys::crypto_box_seal(
@@ -292,6 +330,7 @@ impl Keeper {
         sk: &SecretKey,
         ciphertext: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
+        init_sodium();
         let plain_len = ciphertext
             .len()
             .checked_sub(libsodium_sys::crypto_box_SEALBYTES as usize)
@@ -377,12 +416,62 @@ impl Keeper {
         keyed_fingerprint(key.unsecure(), msg, salt, out);
     }
 
-    pub fn blob_authentication(&self, blob: &[u8], out: &mut [u8]) {
-        let key = self.blob_authentication_key
+    pub fn blob_authentication(&self, blob_name: &[u8], blob: &[u8], out: &mut [u8]) {
+        init_sodium();
+        use libsodium_sys::{
+            crypto_generichash_blake2b_BYTES_MAX, crypto_generichash_blake2b_BYTES_MIN,
+            crypto_generichash_blake2b_final, crypto_generichash_blake2b_init_salt_personal,
+            crypto_generichash_blake2b_state, crypto_generichash_blake2b_update,
+        };
+        assert!(
+            out.len() >= crypto_generichash_blake2b_BYTES_MIN as usize
+                && out.len() <= crypto_generichash_blake2b_BYTES_MAX as usize,
+            "invalid BLAKE2b output length: {}",
+            out.len()
+        );
+        let key = self
+            .blob_authentication_key
             .as_ref()
             .expect("need blob authentication key");
         let salt: &[u8; 16] = b"blob~~~~blob~~~~";
-        keyed_fingerprint(key.unsecure(), blob, salt, &mut out[..])
+        let name_len = (blob_name.len() as u64).to_le_bytes();
+
+        let mut state = MaybeUninit::<crypto_generichash_blake2b_state>::uninit();
+        unsafe {
+            let ret = crypto_generichash_blake2b_init_salt_personal(
+                state.as_mut_ptr(),
+                key.unsecure().as_ptr(),
+                key.unsecure().len(),
+                out.len(),
+                salt.as_ptr(),
+                HAT_PERSONALIZATION.as_ptr(),
+            );
+            assert_eq!(ret, 0);
+            let ret = crypto_generichash_blake2b_update(
+                state.as_mut_ptr(),
+                name_len.as_ptr(),
+                name_len.len() as u64,
+            );
+            assert_eq!(ret, 0);
+            let ret = crypto_generichash_blake2b_update(
+                state.as_mut_ptr(),
+                blob_name.as_ptr(),
+                blob_name.len() as u64,
+            );
+            assert_eq!(ret, 0);
+            let ret = crypto_generichash_blake2b_update(
+                state.as_mut_ptr(),
+                blob.as_ptr(),
+                blob.len() as u64,
+            );
+            assert_eq!(ret, 0);
+            let ret = crypto_generichash_blake2b_final(
+                state.as_mut_ptr(),
+                out.as_mut_ptr(),
+                out.len(),
+            );
+            assert_eq!(ret, 0);
+        }
     }
 
     pub fn symmetric_lock(
@@ -391,8 +480,9 @@ impl Keeper {
         nonce: &[u8],
         key: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
-        let key_bytes = libsodium_sys::crypto_aead_chacha20poly1305_KEYBYTES as usize;
-        let nonce_bytes = libsodium_sys::crypto_aead_chacha20poly1305_NPUBBYTES as usize;
+        init_sodium();
+        let key_bytes = libsodium_sys::crypto_aead_xchacha20poly1305_ietf_KEYBYTES as usize;
+        let nonce_bytes = libsodium_sys::crypto_aead_xchacha20poly1305_ietf_NPUBBYTES as usize;
         if key.len() != key_bytes {
             return Err(format!(
                 "crypto write failed: invalid key length {} (expected {})",
@@ -412,13 +502,13 @@ impl Keeper {
 
         let out_capacity = msg
             .len()
-            .checked_add(libsodium_sys::crypto_aead_chacha20poly1305_ABYTES as usize)
+            .checked_add(libsodium_sys::crypto_aead_xchacha20poly1305_ietf_ABYTES as usize)
             .ok_or_else(|| CryptoError::from("crypto write failed: ciphertext length overflow"))?;
         let mut out = vec![0u8; out_capacity];
         let mut out_len = 0;
 
         let ret = unsafe {
-            libsodium_sys::crypto_aead_chacha20poly1305_encrypt(
+            libsodium_sys::crypto_aead_xchacha20poly1305_ietf_encrypt(
                 out.as_mut_ptr(),
                 &mut out_len,
                 msg.as_ptr(),
@@ -443,8 +533,9 @@ impl Keeper {
         ad: &[u8],
         nonce: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
-        let key_bytes = libsodium_sys::crypto_aead_chacha20poly1305_KEYBYTES as usize;
-        let nonce_bytes = libsodium_sys::crypto_aead_chacha20poly1305_NPUBBYTES as usize;
+        init_sodium();
+        let key_bytes = libsodium_sys::crypto_aead_xchacha20poly1305_ietf_KEYBYTES as usize;
+        let nonce_bytes = libsodium_sys::crypto_aead_xchacha20poly1305_ietf_NPUBBYTES as usize;
         if key.len() != key_bytes {
             return Err(format!(
                 "crypto read failed: invalid key length {} (expected {})",
@@ -464,13 +555,13 @@ impl Keeper {
 
         let plain_len = ciphertext
             .len()
-            .checked_sub(libsodium_sys::crypto_aead_chacha20poly1305_ABYTES as usize)
+            .checked_sub(libsodium_sys::crypto_aead_xchacha20poly1305_ietf_ABYTES as usize)
             .ok_or_else(|| CryptoError::from("crypto read failed: ciphertext too short"))?;
         let mut out = vec![0u8; plain_len];
         let mut out_len = 0;
 
         let ret = unsafe {
-            libsodium_sys::crypto_aead_chacha20poly1305_decrypt(
+            libsodium_sys::crypto_aead_xchacha20poly1305_ietf_decrypt(
                 out.as_mut_ptr(),
                 &mut out_len,
                 ptr::null_mut(),

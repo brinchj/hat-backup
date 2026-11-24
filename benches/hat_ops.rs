@@ -23,16 +23,12 @@ use std::cell::RefCell;
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Once};
+use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
 
-static SODIUM: Once = Once::new();
-
 fn init_sodium() {
-    SODIUM.call_once(|| unsafe {
-        libsodium_sys::sodium_init();
-    });
+    hat::crypto::keys::init_sodium();
 }
 
 const MAX_BLOB_SIZE: usize = 1024 * 1024;
