@@ -344,7 +344,7 @@ fn strip_authentication_binds_blob_name_and_rejects_tag_flips() {
         .is_err());
 
     // Flip first and last byte of 64-byte MAC tag.
-    let tag_start = raw.len() - authed::hash::DIGESTBYTES as usize;
+    let tag_start = raw.len() - authed::hash::DIGESTBYTES;
     for pos in [tag_start, raw.len() - 1] {
         let mut bad = raw.clone();
         bad[pos] ^= 0x01;

@@ -32,15 +32,12 @@ pub struct CipherTextRef<'a>(&'a [u8]);
 
 pub mod authed {
     pub mod desc {
-        use libsodium_sys;
+        use libsodium_rs::crypto_aead::xchacha20poly1305;
         use secstr;
 
-        pub const KEYBYTES: usize =
-            libsodium_sys::crypto_aead_xchacha20poly1305_ietf_KEYBYTES as usize;
-        pub const NONCEBYTES: usize =
-            libsodium_sys::crypto_aead_xchacha20poly1305_ietf_NPUBBYTES as usize;
-        pub const MACBYTES: usize =
-            libsodium_sys::crypto_aead_xchacha20poly1305_ietf_ABYTES as usize;
+        pub const KEYBYTES: usize = xchacha20poly1305::KEYBYTES;
+        pub const NONCEBYTES: usize = xchacha20poly1305::NPUBBYTES;
+        pub const MACBYTES: usize = xchacha20poly1305::ABYTES;
         pub type Key = secstr::SecStr;
         pub type Nonce = secstr::SecStr;
     }
@@ -59,7 +56,7 @@ pub mod authed {
             access_key: &super::desc::Key,
             other_key: &super::desc::Key,
         ) -> super::desc::Key {
-            let mut mixed_key = [0u8; super::hash::DIGESTBYTES as usize];
+            let mut mixed_key = [0u8; super::hash::DIGESTBYTES];
             let salt: &[u8; 16] = b"mixkey~~mixkey~~";
             crate::crypto::keys::keyed_fingerprint(
                 access_key.unsecure(),
@@ -72,15 +69,13 @@ pub mod authed {
     }
 
     pub mod hash {
-        pub use libsodium_sys::crypto_generichash_blake2b_BYTES_MAX as DIGESTBYTES;
+        pub const DIGESTBYTES: usize = libsodium_rs::crypto_generichash::blake2b::BYTES_MAX;
     }
 }
 
 pub mod sealed {
     pub mod desc {
-        use libsodium_sys;
-
-        pub const SEALBYTES: usize = libsodium_sys::crypto_box_SEALBYTES as usize;
+        pub const SEALBYTES: usize = libsodium_rs::crypto_box::SEALBYTES;
 
         pub fn symmetric_seal_bytes() -> usize {
             // Mac and nonce from inner symmetric seal
@@ -257,22 +252,12 @@ impl CipherText {
         }
     }
     pub fn random_pad(size: usize) -> CipherText {
-        use libsodium_sys::{crypto_stream_chacha20, crypto_stream_chacha20_KEYBYTES,
-                            crypto_stream_chacha20_NONCEBYTES};
+        use libsodium_rs::crypto_stream::{self, chacha20};
 
-        let key = keys::random_bytes(crypto_stream_chacha20_KEYBYTES as usize);
-        let nonce = keys::random_bytes(crypto_stream_chacha20_NONCEBYTES as usize);
-        let mut stream = vec![0u8; size];
-
-        let ret = unsafe {
-            crypto_stream_chacha20(
-                stream.as_mut_ptr(),
-                stream.len() as u64,
-                nonce.unsecure().as_ptr(),
-                key.unsecure().as_ptr(),
-            )
-        };
-        assert_eq!(0, ret);
+        keys::init_sodium();
+        let key = crypto_stream::Key::generate().expect("stream key generation failed");
+        let nonce = chacha20::Nonce::generate();
+        let stream = chacha20::stream(size, &nonce, &key).expect("chacha20 stream failed");
 
         CipherText::new(stream)
     }
@@ -294,7 +279,7 @@ impl CipherText {
 
         let blob = &mut self.chunks[0];
         let blob_len = blob.len();
-        blob.resize(blob_len + authed::hash::DIGESTBYTES as usize, 0u8);
+        blob.resize(blob_len + authed::hash::DIGESTBYTES, 0u8);
         {
             let (data, hash) = blob.split_at_mut(blob_len);
             keys.blob_authentication(blob_name, &data[..], &mut hash[..]);
@@ -358,9 +343,9 @@ impl<'a> CipherTextRef<'a> {
         blob_name: &[u8],
         keys: &keys::Keeper,
     ) -> Result<CipherTextRef<'_>, CryptoError> {
-        let (rest, want) = self.split_from_right(authed::hash::DIGESTBYTES as usize)?;
+        let (rest, want) = self.split_from_right(authed::hash::DIGESTBYTES)?;
 
-        let mut got = vec![0u8; authed::hash::DIGESTBYTES as usize];
+        let mut got = [0u8; authed::hash::DIGESTBYTES];
         keys.blob_authentication(blob_name, rest.0, &mut got[..]);
 
         if keys::ct_eq(want.0, &got[..]) {

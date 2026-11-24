@@ -14,14 +14,14 @@
 
 use crate::blob;
 use crate::errors::CryptoError;
-use libsodium_sys;
+use libsodium_rs::{
+    crypto_aead::xchacha20poly1305, crypto_box, crypto_generichash::blake2b, ensure_init, random,
+    utils,
+};
 use secstr;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::mem::MaybeUninit;
-use std::os::raw::c_void;
 use std::path::Path;
-use std::ptr;
 use std::sync::Once;
 
 const UNIVERSAL_KEY_FILENAME: &str = "secret-universal-key";
@@ -29,19 +29,14 @@ pub const UNIVERSAL_KEY_BYTES: usize = 32;
 
 static SODIUM_INIT: Once = Once::new();
 
-/// Initialize libsodium once and abort if initialization fails (`sodium_init() < 0`).
+/// Initialize libsodium once and abort if initialization fails.
 pub fn init_sodium() {
     SODIUM_INIT.call_once(|| {
-        let rc = unsafe { libsodium_sys::sodium_init() };
-        assert!(
-            rc >= 0,
-            "libsodium initialization failed (sodium_init returned {})",
-            rc
-        );
+        ensure_init().expect("libsodium initialization failed");
     });
 }
 
-/// Constant-time equality comparison using `libsodium_sys::sodium_memcmp`.
+/// Constant-time equality comparison using `libsodium_rs::utils::memcmp`.
 pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -50,25 +45,13 @@ pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
         return true;
     }
     init_sodium();
-    unsafe {
-        libsodium_sys::sodium_memcmp(
-            a.as_ptr() as *const c_void,
-            b.as_ptr() as *const c_void,
-            a.len(),
-        ) == 0
-    }
+    utils::memcmp(a, b)
 }
 
 // Crypto personalizations. Do not change these.
 const UNIVERSAL_KEY_MSG: &[u8] = b"hat-backup:universal-key:rust";
 
-const HAT_PERSONALIZATION:
-    &[u8; libsodium_sys::crypto_generichash_blake2b_PERSONALBYTES as usize] =
-    b"hat-backup~~rust";
-
-
-struct PublicKey(secstr::SecStr);
-struct SecretKey(secstr::SecStr);
+const HAT_PERSONALIZATION: &[u8; blake2b::PERSONALBYTES] = b"hat-backup~~rust";
 
 #[cfg_attr(feature = "flame_it", flame)]
 pub fn compute_salt(node_type: blob::NodeType, leaf_type: blob::LeafType) -> Box<[u8]> {
@@ -90,9 +73,7 @@ pub fn compute_salt(node_type: blob::NodeType, leaf_type: blob::LeafType) -> Box
 #[cfg_attr(feature = "flame_it", flame)]
 pub fn random_bytes(size: usize) -> secstr::SecStr {
     init_sodium();
-    let mut r = vec![0u8; size];
-    unsafe { libsodium_sys::randombytes_buf(r.as_mut_ptr() as *mut c_void, r.len()) };
-    secstr::SecStr::new(r)
+    secstr::SecStr::new(random::bytes(size))
 }
 
 pub fn keyed_fingerprint_simple(sk: &[u8], msg: &[u8], out: &mut [u8]) {
@@ -102,38 +83,28 @@ pub fn keyed_fingerprint_simple(sk: &[u8], msg: &[u8], out: &mut [u8]) {
 #[cfg_attr(feature = "flame_it", flame)]
 pub fn keyed_fingerprint(sk: &[u8], msg: &[u8], salt: &[u8], out: &mut [u8]) {
     init_sodium();
-    use libsodium_sys::{
-        crypto_generichash_blake2b_BYTES_MAX, crypto_generichash_blake2b_BYTES_MIN,
-        crypto_generichash_blake2b_KEYBYTES_MAX, crypto_generichash_blake2b_SALTBYTES,
-    };
-    assert_eq!(crypto_generichash_blake2b_SALTBYTES, salt.len() as u32);
+    assert_eq!(blake2b::SALTBYTES, salt.len());
     assert!(
-        !sk.is_empty() && sk.len() <= crypto_generichash_blake2b_KEYBYTES_MAX as usize,
+        !sk.is_empty() && sk.len() <= blake2b::KEYBYTES_MAX,
         "invalid BLAKE2b key length: {}",
         sk.len()
     );
     assert!(
-        out.len() >= crypto_generichash_blake2b_BYTES_MIN as usize
-            && out.len() <= crypto_generichash_blake2b_BYTES_MAX as usize,
+        out.len() >= blake2b::BYTES_MIN && out.len() <= blake2b::BYTES_MAX,
         "invalid BLAKE2b output length: {}",
         out.len()
     );
 
-    let outlen = out.len();
-
-    let ret = unsafe {
-        libsodium_sys::crypto_generichash_blake2b_salt_personal(
-            out.as_mut_ptr(),
-            outlen,
-            msg.as_ptr(),
-            msg.len() as u64,
-            sk.as_ptr(),
-            sk.len(),
-            salt.as_ptr(),
-            HAT_PERSONALIZATION.as_ptr(),
-        )
-    };
-    assert_eq!(ret, 0);
+    let mut digest = blake2b::hash_with_salt_and_personal(
+        msg,
+        Some(sk),
+        out.len(),
+        Some(salt),
+        Some(&HAT_PERSONALIZATION[..]),
+    )
+    .expect("BLAKE2b keyed_fingerprint failed");
+    out.copy_from_slice(&digest);
+    utils::memzero(&mut digest);
 }
 
 pub struct Keeper {
@@ -141,14 +112,14 @@ pub struct Keeper {
     fingerprint_key: Option<secstr::SecStr>,
     blob_authentication_key: Option<secstr::SecStr>,
 
-    data_key_pk: Option<PublicKey>,
-    data_key_sk: Option<SecretKey>,
+    data_key_pk: Option<crypto_box::PublicKey>,
+    data_key_sk: Option<crypto_box::SecretKey>,
 
-    naming_key_pk: Option<PublicKey>,
-    naming_key_sk: Option<SecretKey>,
+    naming_key_pk: Option<crypto_box::PublicKey>,
+    naming_key_sk: Option<crypto_box::SecretKey>,
 
-    access_key_pk: Option<PublicKey>,
-    access_key_sk: Option<SecretKey>,
+    access_key_pk: Option<crypto_box::PublicKey>,
+    access_key_sk: Option<crypto_box::SecretKey>,
 }
 
 impl Keeper {
@@ -291,65 +262,29 @@ impl Keeper {
         Self::from_key_and_nonce(&self.universal_key, nonce, outlen)
     }
 
-    fn x25519_key_pair_from_nonce(&self, nonce: &[u8]) -> (PublicKey, SecretKey) {
-        let mut pk = secstr::SecStr::new(vec![0; 32]);
-        let mut sk = secstr::SecStr::new(vec![0; 32]);
-
-        let seed = self.from_nonce(nonce, 32);
-
-        let ret = unsafe {
-            libsodium_sys::crypto_box_seed_keypair(
-                pk.unsecure_mut().as_mut_ptr(),
-                sk.unsecure_mut().as_mut_ptr(),
-                seed.unsecure().as_ptr(),
-            )
-        };
-        assert_eq!(ret, 0);
-
-        (PublicKey(pk), SecretKey(sk))
+    fn x25519_key_pair_from_nonce(
+        &self,
+        nonce: &[u8],
+    ) -> (crypto_box::PublicKey, crypto_box::SecretKey) {
+        let seed = self.from_nonce(nonce, crypto_box::SECRETKEYBYTES);
+        crypto_box::KeyPair::from_seed(seed.unsecure())
+            .expect("x25519 keypair from 32-byte seed")
+            .into_tuple()
     }
 
-    fn asymmetric_lock(pk: &PublicKey, msg: &[u8]) -> Vec<u8> {
+    fn asymmetric_lock(pk: &crypto_box::PublicKey, msg: &[u8]) -> Vec<u8> {
         init_sodium();
-        let mut out = vec![0; msg.len() + libsodium_sys::crypto_box_SEALBYTES as usize];
-        let ret = unsafe {
-            libsodium_sys::crypto_box_seal(
-                out.as_mut_ptr(),
-                msg.as_ptr(),
-                msg.len() as u64,
-                pk.0.unsecure().as_ptr(),
-            )
-        };
-        assert_eq!(0, ret);
-
-        out
+        crypto_box::seal_box(msg, pk).expect("sealed box encryption failed")
     }
 
     fn asymmetric_unlock(
-        pk: &PublicKey,
-        sk: &SecretKey,
+        pk: &crypto_box::PublicKey,
+        sk: &crypto_box::SecretKey,
         ciphertext: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
         init_sodium();
-        let plain_len = ciphertext
-            .len()
-            .checked_sub(libsodium_sys::crypto_box_SEALBYTES as usize)
-            .ok_or_else(|| CryptoError::from("crypto read failed: sealed box too short"))?;
-        let mut out = vec![0; plain_len];
-        let ret = unsafe {
-            libsodium_sys::crypto_box_seal_open(
-                out.as_mut_ptr(),
-                ciphertext.as_ptr(),
-                ciphertext.len() as u64,
-                pk.0.unsecure().as_ptr(),
-                sk.0.unsecure().as_ptr(),
-            )
-        };
-        if ret != 0 {
-            return Err("crypto read failed: sealed box open failed".into());
-        }
-
-        Ok(out)
+        crypto_box::open_sealed_box(ciphertext, pk, sk)
+            .map_err(|_| CryptoError::from("crypto read failed: sealed box open failed"))
     }
 
     pub fn data_lock(&self, msg: &[u8]) -> Vec<u8> {
@@ -418,14 +353,8 @@ impl Keeper {
 
     pub fn blob_authentication(&self, blob_name: &[u8], blob: &[u8], out: &mut [u8]) {
         init_sodium();
-        use libsodium_sys::{
-            crypto_generichash_blake2b_BYTES_MAX, crypto_generichash_blake2b_BYTES_MIN,
-            crypto_generichash_blake2b_final, crypto_generichash_blake2b_init_salt_personal,
-            crypto_generichash_blake2b_state, crypto_generichash_blake2b_update,
-        };
         assert!(
-            out.len() >= crypto_generichash_blake2b_BYTES_MIN as usize
-                && out.len() <= crypto_generichash_blake2b_BYTES_MAX as usize,
+            out.len() >= blake2b::BYTES_MIN && out.len() <= blake2b::BYTES_MAX,
             "invalid BLAKE2b output length: {}",
             out.len()
         );
@@ -433,45 +362,21 @@ impl Keeper {
             .blob_authentication_key
             .as_ref()
             .expect("need blob authentication key");
-        let salt: &[u8; 16] = b"blob~~~~blob~~~~";
+        let salt: &[u8; blake2b::SALTBYTES] = b"blob~~~~blob~~~~";
         let name_len = (blob_name.len() as u64).to_le_bytes();
 
-        let mut state = MaybeUninit::<crypto_generichash_blake2b_state>::uninit();
-        unsafe {
-            let ret = crypto_generichash_blake2b_init_salt_personal(
-                state.as_mut_ptr(),
-                key.unsecure().as_ptr(),
-                key.unsecure().len(),
-                out.len(),
-                salt.as_ptr(),
-                HAT_PERSONALIZATION.as_ptr(),
-            );
-            assert_eq!(ret, 0);
-            let ret = crypto_generichash_blake2b_update(
-                state.as_mut_ptr(),
-                name_len.as_ptr(),
-                name_len.len() as u64,
-            );
-            assert_eq!(ret, 0);
-            let ret = crypto_generichash_blake2b_update(
-                state.as_mut_ptr(),
-                blob_name.as_ptr(),
-                blob_name.len() as u64,
-            );
-            assert_eq!(ret, 0);
-            let ret = crypto_generichash_blake2b_update(
-                state.as_mut_ptr(),
-                blob.as_ptr(),
-                blob.len() as u64,
-            );
-            assert_eq!(ret, 0);
-            let ret = crypto_generichash_blake2b_final(
-                state.as_mut_ptr(),
-                out.as_mut_ptr(),
-                out.len(),
-            );
-            assert_eq!(ret, 0);
-        }
+        let mut state = blake2b::State::new_with_salt_and_personal(
+            Some(key.unsecure()),
+            out.len(),
+            Some(salt),
+            Some(&HAT_PERSONALIZATION[..]),
+        )
+        .expect("BLAKE2b state init failed");
+        state.update(&name_len);
+        state.update(blob_name);
+        state.update(blob);
+        let tag = state.finalize();
+        out.copy_from_slice(&tag);
     }
 
     pub fn symmetric_lock(
@@ -481,50 +386,26 @@ impl Keeper {
         key: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
         init_sodium();
-        let key_bytes = libsodium_sys::crypto_aead_xchacha20poly1305_ietf_KEYBYTES as usize;
-        let nonce_bytes = libsodium_sys::crypto_aead_xchacha20poly1305_ietf_NPUBBYTES as usize;
-        if key.len() != key_bytes {
-            return Err(format!(
+        let key = xchacha20poly1305::Key::from_bytes(key).map_err(|_| {
+            CryptoError::from(format!(
                 "crypto write failed: invalid key length {} (expected {})",
                 key.len(),
-                key_bytes
-            )
-            .into());
-        }
-        if nonce.len() != nonce_bytes {
-            return Err(format!(
+                xchacha20poly1305::KEYBYTES
+            ))
+        })?;
+        let nonce = xchacha20poly1305::Nonce::try_from(nonce).map_err(|_| {
+            CryptoError::from(format!(
                 "crypto write failed: invalid nonce length {} (expected {})",
                 nonce.len(),
-                nonce_bytes
-            )
-            .into());
-        }
-
-        let out_capacity = msg
-            .len()
-            .checked_add(libsodium_sys::crypto_aead_xchacha20poly1305_ietf_ABYTES as usize)
+                xchacha20poly1305::NPUBBYTES
+            ))
+        })?;
+        msg.len()
+            .checked_add(xchacha20poly1305::ABYTES)
             .ok_or_else(|| CryptoError::from("crypto write failed: ciphertext length overflow"))?;
-        let mut out = vec![0u8; out_capacity];
-        let mut out_len = 0;
 
-        let ret = unsafe {
-            libsodium_sys::crypto_aead_xchacha20poly1305_ietf_encrypt(
-                out.as_mut_ptr(),
-                &mut out_len,
-                msg.as_ptr(),
-                msg.len() as u64,
-                ad.as_ptr(),
-                ad.len() as u64,
-                ptr::null(),
-                nonce.as_ptr(),
-                key.as_ptr(),
-            )
-        };
-        if ret != 0 || out_len != out.len() as u64 {
-            return Err("crypto write failed: symmetric encryption failed".into());
-        }
-
-        Ok(out)
+        xchacha20poly1305::encrypt(msg, Some(ad), &nonce, &key)
+            .map_err(|_| CryptoError::from("crypto write failed: symmetric encryption failed"))
     }
 
     pub fn symmetric_unlock(
@@ -534,49 +415,22 @@ impl Keeper {
         nonce: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
         init_sodium();
-        let key_bytes = libsodium_sys::crypto_aead_xchacha20poly1305_ietf_KEYBYTES as usize;
-        let nonce_bytes = libsodium_sys::crypto_aead_xchacha20poly1305_ietf_NPUBBYTES as usize;
-        if key.len() != key_bytes {
-            return Err(format!(
+        let key = xchacha20poly1305::Key::from_bytes(key).map_err(|_| {
+            CryptoError::from(format!(
                 "crypto read failed: invalid key length {} (expected {})",
                 key.len(),
-                key_bytes
-            )
-            .into());
-        }
-        if nonce.len() != nonce_bytes {
-            return Err(format!(
+                xchacha20poly1305::KEYBYTES
+            ))
+        })?;
+        let nonce = xchacha20poly1305::Nonce::try_from(nonce).map_err(|_| {
+            CryptoError::from(format!(
                 "crypto read failed: invalid nonce length {} (expected {})",
                 nonce.len(),
-                nonce_bytes
-            )
-            .into());
-        }
+                xchacha20poly1305::NPUBBYTES
+            ))
+        })?;
 
-        let plain_len = ciphertext
-            .len()
-            .checked_sub(libsodium_sys::crypto_aead_xchacha20poly1305_ietf_ABYTES as usize)
-            .ok_or_else(|| CryptoError::from("crypto read failed: ciphertext too short"))?;
-        let mut out = vec![0u8; plain_len];
-        let mut out_len = 0;
-
-        let ret = unsafe {
-            libsodium_sys::crypto_aead_xchacha20poly1305_ietf_decrypt(
-                out.as_mut_ptr(),
-                &mut out_len,
-                ptr::null_mut(),
-                ciphertext.as_ptr(),
-                ciphertext.len() as u64,
-                ad.as_ptr(),
-                ad.len() as u64,
-                nonce.as_ptr(),
-                key.as_ptr(),
-            )
-        };
-        if ret != 0 || out_len != out.len() as u64 {
-            return Err("crypto read failed: symmetric decryption failed".into());
-        }
-
-        Ok(out)
+        xchacha20poly1305::decrypt(ciphertext, Some(ad), &nonce, &key)
+            .map_err(|_| CryptoError::from("crypto read failed: symmetric decryption failed"))
     }
 }
