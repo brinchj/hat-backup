@@ -35,6 +35,15 @@ A backend-agnostic snapshotting backup engine with:
 - Criterion benches: bulk MiB + filesystem-shaped trees (`cargo bench --bench hat_ops`)
 - Fixed-size blob padding documented as a confidentiality invariant
   ([`SECURITY.md`](SECURITY.md))
+- SQLite open hygiene: `0600` DB/sidecar permissions, WAL journal mode,
+  `SQLITE_DBCONFIG_DEFENSIVE`, and fail-closed `PRAGMA quick_check` on
+  hash/blob and key indexes (`db::open_connection`)
+- Crypto & safety hardening: migrated from archived `libsodium-sys` to
+  `libsodium-rs` (`#![forbid(unsafe_code)]` across crate roots); upgraded AEAD
+  to `XChaCha20-Poly1305-IETF` (24-byte random nonces, full chunk metadata AAD);
+  bound `blob_name` into whole-blob MAC and footer AAD; constant-time MAC/hash
+  checks; exact 32-byte atomic `0600` master key inside `0700` state/cache dirs;
+  root-hash pinning API (`Hat::recover_with_expected_root`)
 
 ---
 
@@ -44,9 +53,9 @@ Highest priority before any “safe for disposable data” claim.
 
 | Item | Notes |
 |------|--------|
-| `FileBackend` fsync / atomic put | **Puts done:** temp write, sync, rename, dir sync, then `done()`. `list` skips temp and non-hex names. Linux crash cut: `scripts/linux-powerfail.sh`. **Open:** deletes not dir-synced; stale `.tmp-*` files not swept; recovery orphan cleanup; macOS `F_BARRIERFSYNC` not power-fail tested |
+| `FileBackend` fsync / atomic put | **Puts done:** temp write, `sync_all()` (`F_FULLFSYNC` on macOS), rename, dir sync, then `done()`. `list` skips temp and non-hex names. Linux crash cut: `scripts/linux-powerfail.sh`. **Open:** deletes not dir-synced; stale `.tmp-*` files not swept; recovery orphan cleanup; macOS power-fail not yet tested |
 | Broader kill/reopen matrix | Already started; expand stages + cold remount |
-| Power-fail / block-fault lane | Linux: `scripts/linux-powerfail.sh` (privileged Docker, dm-linear, `suspend --noflush`). Proves a returned `store()` is on the block device and an unsynced sibling is not. macOS barrier and a real host power cut are still open |
+| Power-fail / block-fault lane | Linux: `scripts/linux-powerfail.sh` (privileged Docker, dm-linear, `suspend --noflush`). Proves a returned `store()` is on the block device and an unsynced sibling is not. macOS and real host power cut are still open |
 | Recover hardening | Read-only recover option; fewer panics; clear errors on missing roots |
 | Replace panic-heavy paths | Systematically remove `unwrap`/`expect` on recoverable errors |
 | Metadata restore completeness | Modes partially done; owners/times/non-utf8 paths still open |
@@ -82,7 +91,7 @@ See also [`SECURITY.md`](SECURITY.md).
 | Formal threat model | Adversaries: backend observer, stolen laptop, malicious blob store |
 | Key wrapping | Passphrase / OS keychain; stop shipping raw `secret-universal-key` as the only story |
 | Key rotation / recovery | Document and implement |
-| Local metadata stance | Encrypt indexes **or** explicitly treat state dir as secret as the key |
+| Local metadata stance | `0700`/`0600` fs permissions enforced on `cache/` and SQLite DBs/sidecars; treat state dir as secret as the key (or add SQLCipher/encrypted DB later alongside key wrapping) |
 | Side channels | Object count / timing; document residual leakage even with fixed-size blobs |
 | Keep fixed-size blob padding | Do not remove for perf without a reviewed replacement |
 
@@ -127,7 +136,8 @@ measured and acceptable.
 
 ## Suggested near-term order
 
-1. Durable `FileBackend` writes + tests  
+1. Finish `FileBackend` durability leftovers (delete dir-sync, `.tmp-*` sweep,
+   macOS power-fail proof)  
 2. Expand crash/reopen + recover UX  
 3. Metadata / non-utf8 restore  
 4. CLI defaults + docs for file backend  
