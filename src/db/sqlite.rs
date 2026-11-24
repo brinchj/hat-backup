@@ -93,7 +93,7 @@ pub(crate) fn open_connection(path: &str) -> Result<SqliteConnection, DieselErro
 /// every open for cost. Fail closed if SQLite reports anything but `ok`.
 pub(crate) fn configure_connection(conn: &mut SqliteConnection) -> Result<(), DieselResultError> {
     conn.set_defensive(true)?;
-    conn.batch_execute("PRAGMA journal_mode = WAL;")?;
+    conn.batch_execute("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;")?;
     quick_check(conn)?;
     Ok(())
 }

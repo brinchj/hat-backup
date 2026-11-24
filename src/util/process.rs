@@ -50,11 +50,26 @@
 /// A handler is allowed to call `reply()` **exactly** once. Not calling it or calling it multiple
 /// times will likely cause runtime panicure when using `send_reply()`.
 use std::fmt;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use std::thread;
 
+struct JoinOnDrop(Option<thread::JoinHandle<()>>);
+
+impl Drop for JoinOnDrop {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            if handle.thread().id() != thread::current().id() {
+                let _ = handle.join();
+            }
+        }
+    }
+}
+
 pub struct Process<Msg, Reply, E> {
+    // Field order is load-bearing: `sender` drops before `join_guard`, so when
+    // the last clone drops, the channel disconnects before joining the worker.
     sender: mpsc::SyncSender<(Msg, mpsc::Sender<Result<Reply, E>>)>,
+    join_guard: Arc<JoinOnDrop>,
 }
 
 /// When cloning a `process` we clone the input-channel, allowing multiple threads to share the same
@@ -63,6 +78,7 @@ impl<Msg: Send, Reply: Send, E> Clone for Process<Msg, Reply, E> {
     fn clone(&self) -> Process<Msg, Reply, E> {
         Process {
             sender: self.sender.clone(),
+            join_guard: self.join_guard.clone(),
         }
     }
 }
@@ -90,7 +106,7 @@ where
     {
         let (sender, receiver) = mpsc::sync_channel::<(Msg, mpsc::Sender<Result<Reply, E>>)>(10);
 
-        thread::spawn(move || {
+        let handle = thread::spawn(move || {
             while let Ok((msg, rep)) = receiver.recv() {
                 let mut did_reply = false;
                 let ret = handler.handle(msg, |r| {
@@ -106,7 +122,10 @@ where
             }
         });
 
-        Process { sender }
+        Process {
+            sender,
+            join_guard: Arc::new(JoinOnDrop(Some(handle))),
+        }
     }
 
     /// Synchronous send.
