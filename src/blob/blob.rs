@@ -147,11 +147,21 @@ impl BlobReader {
 
         let mut hrefs = Vec::new();
         while !footer_pos.is_empty() {
+            if footer_pos.len() < 2 {
+                return Err(BlobError::from(
+                    "corrupt blob footer: truncated entry length",
+                ));
+            }
             let len = footer_pos[0] as usize + 256 * (footer_pos[1] as usize);
-            assert!(footer_pos.len() > len);
+            let entry_end = len
+                .checked_add(2)
+                .ok_or_else(|| BlobError::from("corrupt blob footer: entry length overflow"))?;
+            if footer_pos.len() < entry_end {
+                return Err(BlobError::from("corrupt blob footer: truncated entry"));
+            }
 
-            hrefs.push(HashRef::from_bytes(&footer_pos[2..2 + len])?);
-            footer_pos = &footer_pos[len + 2..];
+            hrefs.push(HashRef::from_bytes(&footer_pos[2..entry_end])?);
+            footer_pos = &footer_pos[entry_end..];
         }
 
         Ok(hrefs)

@@ -213,8 +213,9 @@ impl<B: StoreBackend> StoreInner<B> {
                     .refs()?;
                 if hrefs.is_empty() {
                     Ok(None)
+                } else if blob.name[..] != hrefs[0].persistent_ref.blob_name[..] {
+                    Err(BlobError::from("blob name mismatch in recovered footer"))
                 } else {
-                    assert_eq!(&blob.name[..], &hrefs[0].persistent_ref.blob_name[..]);
                     Ok(Some(hrefs))
                 }
             }
@@ -224,7 +225,9 @@ impl<B: StoreBackend> StoreInner<B> {
     fn recover(&mut self) -> Result<(), String> {
         // Blob names are sealed i64 ids (always longer than the old literal "root" marker).
         for b in self.backend.list()? {
-            self.blob_index.recover(b.into_vec());
+            if let Err(e) = self.blob_index.recover(b.into_vec()) {
+                warn!("Skipping unrecognized backend object during recover: {}", e);
+            }
         }
         Ok(())
     }

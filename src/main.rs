@@ -235,13 +235,25 @@ fn main() {
 
     if let Some(("init", dir)) = matches.subcommand() {
         let dir = PathBuf::from(dir.get_one::<String>("DIR").expect("missing DIR to initialize"));
-        if dir.exists() {
-            eprintln!("Error: directory already exists ({})", dir.display());
-            std::process::exit(1);
+        if let Some(parent) = dir.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent).unwrap();
+            }
         }
-
-        fs::create_dir_all(&dir).unwrap();
-        fs::create_dir_all(dir.join("cache")).unwrap();
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        if let Err(e) = builder.create(&dir) {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                eprintln!("Error: directory already exists ({})", dir.display());
+                std::process::exit(1);
+            }
+            panic!("failed to create directory {}: {}", dir.display(), e);
+        }
+        builder.create(dir.join("cache")).unwrap();
         hat::crypto::keys::Keeper::write_new_universal_key(&dir).unwrap();
 
         std::process::exit(0);

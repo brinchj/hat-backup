@@ -54,11 +54,15 @@ impl InternalBlobIndex {
     }
 
     fn id_of_name(&self, name: &[u8]) -> Result<i64, String> {
-        Ok(crypto::FixedKey::new(&self.keys)
+        let pt = crypto::FixedKey::new(&self.keys)
             .unseal_blob_name(crypto::CipherTextRef::new(name))
-            .as_ref()
+            .map_err(|e| format!("invalid blob name: {}", e))?;
+        if pt.len() != 8 {
+            return Err(format!("invalid blob name payload length: {}", pt.len()));
+        }
+        pt.as_ref()
             .read_i64()
-            .unwrap())
+            .map_err(|e| format!("invalid blob id: {}", e))
     }
 
     fn new_blob_desc(&self) -> BlobDesc {
@@ -69,13 +73,18 @@ impl InternalBlobIndex {
         }
     }
 
-    fn recover(&self, name: Vec<u8>) -> BlobDesc {
-        let wanted_id = self.id_of_name(&name).unwrap();
+    fn recover(&self, name: Vec<u8>) -> Result<BlobDesc, String> {
+        let wanted_id = self.id_of_name(&name)?;
         if let Some(id) = self.index.lock().blob_id_from_name(&name[..]) {
-            assert_eq!(id, wanted_id);
+            if id != wanted_id {
+                return Err(format!(
+                    "blob id mismatch: index has {}, name decodes to {}",
+                    id, wanted_id
+                ));
+            }
 
             // Blob exists.
-            return BlobDesc { name, id };
+            return Ok(BlobDesc { name, id });
         }
 
         let blob = BlobDesc {
@@ -85,7 +94,7 @@ impl InternalBlobIndex {
         self.index.lock().blob_in_air(&blob);
         self.index.lock().blob_commit(&blob);
 
-        blob
+        Ok(blob)
     }
 
     fn reserve(&self) -> BlobDesc {
@@ -119,9 +128,9 @@ impl BlobIndex {
         self.0.index.lock().blob_commit(blob)
     }
 
-    /// Reinstall blob recovered by from external storage.
+    /// Reinstall blob recovered from external storage.
     /// Creates a new blob by a known external name.
-    pub fn recover(&self, name: Vec<u8>) -> BlobDesc {
+    pub fn recover(&self, name: Vec<u8>) -> Result<BlobDesc, String> {
         self.0.recover(name)
     }
 

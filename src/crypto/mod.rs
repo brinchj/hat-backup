@@ -18,6 +18,8 @@ pub use crate::errors::CryptoError;
 use crate::hash::tree::HashRef;
 use std::io;
 pub mod keys;
+#[cfg(test)]
+mod tests;
 
 pub struct PlainText(Vec<u8>);
 pub struct PlainTextRef<'a>(&'a [u8]);
@@ -150,12 +152,15 @@ impl<'a> PlainTextRef<'a> {
         nonce: &authed::desc::Nonce,
         key: &authed::desc::Key,
     ) -> CipherText {
-        CipherText::new(keys::Keeper::symmetric_lock(
-            self.0,
-            additional_data,
-            nonce.unsecure(),
-            key.unsecure(),
-        ))
+        CipherText::new(
+            keys::Keeper::symmetric_lock(
+                self.0,
+                additional_data,
+                nonce.unsecure(),
+                key.unsecure(),
+            )
+            .expect("symmetric_lock with validated key and nonce"),
+        )
     }
 }
 
@@ -204,6 +209,9 @@ impl CipherText {
         self.chunks.append(&mut other.chunks);
     }
     pub fn collapse(&mut self) -> CipherTextRef<'_> {
+        if self.chunks.is_empty() {
+            return CipherTextRef::new(&[]);
+        }
         if self.chunks.len() > 1 {
             let v = self.chunks.concat();
             self.chunks = vec![v];
@@ -314,7 +322,7 @@ impl<'a> CipherTextRef<'a> {
             self.0,
             additional_data,
             nonce.unsecure(),
-        )))
+        )?))
     }
 
     pub fn strip_authentication(&self, keys: &keys::Keeper) -> Result<CipherTextRef<'_>, CryptoError> {
@@ -357,20 +365,28 @@ impl RefKey {
         href: &HashRef,
         ct: CipherTextRef,
     ) -> Result<PlainText, CryptoError> {
-        assert!(ct.len() > href.persistent_ref.offset + href.persistent_ref.length);
-        let ct = ct.slice(
-            href.persistent_ref.offset,
-            href.persistent_ref.offset + href.persistent_ref.length,
-        );
+        if access_key.unsecure().len() != authed::desc::KEYBYTES {
+            return Err("crypto read failed: invalid access key length".into());
+        }
+        let end = href
+            .persistent_ref
+            .offset
+            .checked_add(href.persistent_ref.length)
+            .ok_or_else(|| CryptoError::from("crypto read failed: chunk range overflow"))?;
+        if end > ct.len() {
+            return Err("crypto read failed: chunk range out of bounds".into());
+        }
+        let ct = ct.slice(href.persistent_ref.offset, end);
         match href.persistent_ref.key {
             Some(Key::AeadChacha20Poly1305(ref key))
-                if href.hash.bytes.len() >= authed::desc::NONCEBYTES =>
+                if key.unsecure().len() == authed::desc::KEYBYTES
+                    && href.hash.bytes.len() >= authed::desc::NONCEBYTES =>
             {
                 let nonce = authed::desc::Nonce::from(&href.hash.bytes[..authed::desc::NONCEBYTES]);
 
                 let additional_data = keys::compute_salt(href.node, href.leaf);
                 let real_key = crate::crypto::authed::imp::mix_keys(access_key, key);
-                Ok(ct.to_plaintext(&additional_data, &nonce, &real_key)?)
+                ct.to_plaintext(&additional_data, &nonce, &real_key)
             }
             _ => Err("crypto read failed: unseal".into()),
         }
@@ -390,24 +406,24 @@ impl<'k> FixedKey<'k> {
         CipherText::new(self.keeper.naming_lock(pt.0))
     }
 
-    pub fn unseal_blob_name(&self, ct: CipherTextRef) -> PlainText {
-        PlainText::new(self.keeper.naming_unlock(ct.0))
+    pub fn unseal_blob_name(&self, ct: CipherTextRef) -> Result<PlainText, CryptoError> {
+        Ok(PlainText::new(self.keeper.naming_unlock(ct.0)?))
     }
 
     pub fn seal_blob_data(&self, pt: PlainTextRef) -> CipherText {
         CipherText::new(self.keeper.data_lock(pt.0))
     }
 
-    pub fn unseal_blob_data(&self, ct: CipherTextRef) -> PlainText {
-        PlainText::new(self.keeper.data_unlock(ct.0))
+    pub fn unseal_blob_data(&self, ct: CipherTextRef) -> Result<PlainText, CryptoError> {
+        Ok(PlainText::new(self.keeper.data_unlock(ct.0)?))
     }
 
     pub fn seal_blob_access(&self, pt: PlainTextRef) -> CipherText {
         CipherText::new(self.keeper.access_lock(pt.0))
     }
 
-    pub fn unseal_blob_access(&self, ct: CipherTextRef) -> PlainText {
-        PlainText::new(self.keeper.access_unlock(ct.0))
+    pub fn unseal_blob_access(&self, ct: CipherTextRef) -> Result<PlainText, CryptoError> {
+        Ok(PlainText::new(self.keeper.access_unlock(ct.0)?))
     }
 
     pub fn new_access_partial_key() -> crate::crypto::authed::desc::Key {
@@ -455,8 +471,10 @@ impl<'k> FixedKey<'k> {
     ) -> Result<(crate::crypto::authed::desc::Key, CipherText, CipherTextRef<'a>), CryptoError> {
         // Read sealed ciphertext length and unseal it.
         let (rest, access_ct) = ct.split_from_right(sealed::desc::access_cipher_bytes())?;
-        let mut access_pt = self.unseal_blob_access(access_ct).into_vec();
-        assert_eq!(access_pt.len(), sealed::desc::access_plain_bytes());
+        let mut access_pt = self.unseal_blob_access(access_ct)?.into_vec();
+        if access_pt.len() != sealed::desc::access_plain_bytes() {
+            return Err("crypto read failed: invalid access payload length".into());
+        }
 
         let access_key = access_pt
             .split_off(sealed::desc::access_plain_bytes() - crate::crypto::authed::desc::KEYBYTES);
@@ -472,9 +490,13 @@ impl<'k> FixedKey<'k> {
         footer_ct: CipherTextRef,
         ct: CipherTextRef<'a>,
     ) -> Result<(CipherTextRef<'a>, PlainText), CryptoError> {
-        assert_eq!(footer_ct.len(), sealed::desc::footer_cipher_bytes());
-        let foot_pt = self.unseal_blob_data(footer_ct);
-        assert_eq!(foot_pt.len(), sealed::desc::footer_plain_bytes());
+        if footer_ct.len() != sealed::desc::footer_cipher_bytes() {
+            return Err("crypto read failed: invalid footer ciphertext length".into());
+        }
+        let foot_pt = self.unseal_blob_data(footer_ct)?;
+        if foot_pt.len() != sealed::desc::footer_plain_bytes() {
+            return Err("crypto read failed: invalid footer payload length".into());
+        }
 
         // Read length as LittleEndian and inner key.
         let (foot_len, inner_key) = foot_pt
@@ -485,11 +507,15 @@ impl<'k> FixedKey<'k> {
         let ct_len = foot_len
             .read_i64()
             .map_err(|_| "crypto read failed: unseal")?;
-        assert!(ct_len > 0);
+        if ct_len <= 0 {
+            return Err("crypto read failed: invalid inner ciphertext length".into());
+        }
+        let ct_len = usize::try_from(ct_len)
+            .map_err(|_| CryptoError::from("crypto read failed: inner ciphertext length overflow"))?;
 
         // Read and unseal inner symmetric cipher text.
         let additional_data: &[u8] = b"hat_blob_seal~";
-        let (rest, ct_and_nonce) = ct.split_from_right(ct_len as usize)?;
+        let (rest, ct_and_nonce) = ct.split_from_right(ct_len)?;
         let (ct, nonce) = ct_and_nonce.split_from_right(crate::crypto::authed::desc::NONCEBYTES)?;
         Ok((
             rest,

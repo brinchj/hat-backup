@@ -13,14 +13,16 @@
 // limitations under the License.
 
 use crate::blob;
+use crate::errors::CryptoError;
 use libsodium_sys;
 use secstr;
-use std::path::Path;
 use std::fs;
-use std::io::{self, Write, Read};
-
+use std::io::{self, Read, Write};
+use std::path::Path;
+use std::ptr;
 
 const UNIVERSAL_KEY_FILENAME: &str = "secret-universal-key";
+pub const UNIVERSAL_KEY_BYTES: usize = 32;
 
 // Crypto personalizations. Do not change these.
 const UNIVERSAL_KEY_MSG: &[u8] = b"hat-backup:universal-key:rust";
@@ -64,8 +66,22 @@ pub fn keyed_fingerprint_simple(sk: &[u8], msg: &[u8], out: &mut [u8]) {
 
 #[cfg_attr(feature = "flame_it", flame)]
 pub fn keyed_fingerprint(sk: &[u8], msg: &[u8], salt: &[u8], out: &mut [u8]) {
-    use libsodium_sys::crypto_generichash_blake2b_SALTBYTES;
+    use libsodium_sys::{
+        crypto_generichash_blake2b_BYTES_MAX, crypto_generichash_blake2b_BYTES_MIN,
+        crypto_generichash_blake2b_KEYBYTES_MAX, crypto_generichash_blake2b_SALTBYTES,
+    };
     assert_eq!(crypto_generichash_blake2b_SALTBYTES, salt.len() as u32);
+    assert!(
+        !sk.is_empty() && sk.len() <= crypto_generichash_blake2b_KEYBYTES_MAX as usize,
+        "invalid BLAKE2b key length: {}",
+        sk.len()
+    );
+    assert!(
+        out.len() >= crypto_generichash_blake2b_BYTES_MIN as usize
+            && out.len() <= crypto_generichash_blake2b_BYTES_MAX as usize,
+        "invalid BLAKE2b output length: {}",
+        out.len()
+    );
 
     let outlen = out.len();
 
@@ -101,21 +117,77 @@ pub struct Keeper {
 
 impl Keeper {
     pub fn load_from_universal_key(dir: &Path) -> Result<Keeper, io::Error> {
-        let mut f = fs::File::open(dir.join(UNIVERSAL_KEY_FILENAME))?;
-        let mut buf = Vec::new();
-        f.read_to_end(&mut buf)?;
+        let f = fs::File::open(dir.join(UNIVERSAL_KEY_FILENAME))?;
+        let mut buf = Vec::with_capacity(UNIVERSAL_KEY_BYTES);
+        f.take((UNIVERSAL_KEY_BYTES + 1) as u64)
+            .read_to_end(&mut buf)?;
 
-        Ok(Keeper::new(secstr::SecStr::new(buf)))
+        let key = secstr::SecStr::new(buf);
+        if key.unsecure().len() != UNIVERSAL_KEY_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "invalid universal key length: expected {} bytes, got {}",
+                    UNIVERSAL_KEY_BYTES,
+                    key.unsecure().len()
+                ),
+            ));
+        }
+
+        Ok(Keeper::new(key))
     }
 
     pub fn write_new_universal_key(dir: &Path) -> Result<(), io::Error> {
-        let mut f = fs::File::create(dir.join(UNIVERSAL_KEY_FILENAME))?;
-        let keeper = Keeper::new(random_bytes(32));
-        f.write_all(keeper.universal_key.unsecure())?;
+        let final_path = dir.join(UNIVERSAL_KEY_FILENAME);
+        if final_path.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("universal key already exists: {}", final_path.display()),
+            ));
+        }
+
+        let suffix = hex::encode(random_bytes(8).unsecure());
+        let tmp_path = dir.join(format!(".{}.tmp-{}", UNIVERSAL_KEY_FILENAME, suffix));
+        let raw_key = random_bytes(UNIVERSAL_KEY_BYTES);
+
+        let write_result = (|| -> Result<(), io::Error> {
+            let mut opts = fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            let mut f = opts.open(&tmp_path)?;
+            f.write_all(raw_key.unsecure())?;
+            f.sync_all()?;
+            drop(f);
+
+            // hard_link fails atomically with AlreadyExists if final_path appeared concurrently.
+            fs::hard_link(&tmp_path, &final_path)?;
+            Ok(())
+        })();
+
+        let _ = fs::remove_file(&tmp_path);
+        write_result?;
+
+        #[cfg(unix)]
+        {
+            if let Ok(d) = fs::File::open(dir) {
+                let _ = d.sync_all();
+            }
+        }
+
         Ok(())
     }
 
     pub fn new(key: secstr::SecStr) -> Keeper {
+        assert_eq!(
+            key.unsecure().len(),
+            UNIVERSAL_KEY_BYTES,
+            "universal key must be {} bytes",
+            UNIVERSAL_KEY_BYTES
+        );
         // Personalize key for Hat and make it 256-bit (32 bytes).
         let universal_key = Keeper::from_key_and_nonce(&key, UNIVERSAL_KEY_MSG, 32);
 
@@ -215,8 +287,16 @@ impl Keeper {
         out
     }
 
-    fn asymmetric_unlock(pk: &PublicKey, sk: &SecretKey, ciphertext: &[u8]) -> Vec<u8> {
-        let mut out = vec![0; ciphertext.len() - libsodium_sys::crypto_box_SEALBYTES as usize];
+    fn asymmetric_unlock(
+        pk: &PublicKey,
+        sk: &SecretKey,
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
+        let plain_len = ciphertext
+            .len()
+            .checked_sub(libsodium_sys::crypto_box_SEALBYTES as usize)
+            .ok_or_else(|| CryptoError::from("crypto read failed: sealed box too short"))?;
+        let mut out = vec![0; plain_len];
         let ret = unsafe {
             libsodium_sys::crypto_box_seal_open(
                 out.as_mut_ptr(),
@@ -226,9 +306,11 @@ impl Keeper {
                 sk.0.unsecure().as_ptr(),
             )
         };
-        assert_eq!(0, ret);
+        if ret != 0 {
+            return Err("crypto read failed: sealed box open failed".into());
+        }
 
-        out
+        Ok(out)
     }
 
     pub fn data_lock(&self, msg: &[u8]) -> Vec<u8> {
@@ -238,31 +320,37 @@ impl Keeper {
         )
     }
 
-    pub fn data_unlock(&self, ciphertext: &[u8]) -> Vec<u8> {
-        Keeper::asymmetric_unlock(
-            self.data_key_pk.as_ref().expect("need data public key"),
-            self.data_key_sk.as_ref().expect("need data private key"),
-            ciphertext,
-        )
+    pub fn data_unlock(&self, ciphertext: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let pk = self
+            .data_key_pk
+            .as_ref()
+            .ok_or_else(|| CryptoError::from("missing data public key"))?;
+        let sk = self
+            .data_key_sk
+            .as_ref()
+            .ok_or_else(|| CryptoError::from("missing data private key"))?;
+        Keeper::asymmetric_unlock(pk, sk, ciphertext)
     }
 
     pub fn access_lock(&self, msg: &[u8]) -> Vec<u8> {
         Keeper::asymmetric_lock(
             self.access_key_pk
                 .as_ref()
-                .expect("need access publick key"),
+                .expect("need access public key"),
             msg,
         )
     }
 
-    pub fn access_unlock(&self, ciphertext: &[u8]) -> Vec<u8> {
-        Keeper::asymmetric_unlock(
-            self.access_key_pk.as_ref().expect("need access public key"),
-            self.access_key_sk
-                .as_ref()
-                .expect("need access private key"),
-            ciphertext,
-        )
+    pub fn access_unlock(&self, ciphertext: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let pk = self
+            .access_key_pk
+            .as_ref()
+            .ok_or_else(|| CryptoError::from("missing access public key"))?;
+        let sk = self
+            .access_key_sk
+            .as_ref()
+            .ok_or_else(|| CryptoError::from("missing access private key"))?;
+        Keeper::asymmetric_unlock(pk, sk, ciphertext)
     }
 
     pub fn naming_lock(&self, msg: &[u8]) -> Vec<u8> {
@@ -272,14 +360,16 @@ impl Keeper {
         )
     }
 
-    pub fn naming_unlock(&self, ciphertext: &[u8]) -> Vec<u8> {
-        Keeper::asymmetric_unlock(
-            self.naming_key_pk.as_ref().expect("need naming public key"),
-            self.naming_key_sk
-                .as_ref()
-                .expect("need naming private key"),
-            ciphertext,
-        )
+    pub fn naming_unlock(&self, ciphertext: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let pk = self
+            .naming_key_pk
+            .as_ref()
+            .ok_or_else(|| CryptoError::from("missing naming public key"))?;
+        let sk = self
+            .naming_key_sk
+            .as_ref()
+            .ok_or_else(|| CryptoError::from("missing naming private key"))?;
+        Keeper::asymmetric_unlock(pk, sk, ciphertext)
     }
 
     pub fn fingerprint(&self, msg: &[u8], salt: &[u8], out: &mut [u8]) {
@@ -295,9 +385,36 @@ impl Keeper {
         keyed_fingerprint(key.unsecure(), blob, salt, &mut out[..])
     }
 
-    pub fn symmetric_lock(msg: &[u8], ad: &[u8], nonce: &[u8], key: &[u8]) -> Vec<u8> {
-        let mut out =
-            vec![0u8; msg.len() + libsodium_sys::crypto_aead_chacha20poly1305_ABYTES as usize];
+    pub fn symmetric_lock(
+        msg: &[u8],
+        ad: &[u8],
+        nonce: &[u8],
+        key: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
+        let key_bytes = libsodium_sys::crypto_aead_chacha20poly1305_KEYBYTES as usize;
+        let nonce_bytes = libsodium_sys::crypto_aead_chacha20poly1305_NPUBBYTES as usize;
+        if key.len() != key_bytes {
+            return Err(format!(
+                "crypto write failed: invalid key length {} (expected {})",
+                key.len(),
+                key_bytes
+            )
+            .into());
+        }
+        if nonce.len() != nonce_bytes {
+            return Err(format!(
+                "crypto write failed: invalid nonce length {} (expected {})",
+                nonce.len(),
+                nonce_bytes
+            )
+            .into());
+        }
+
+        let out_capacity = msg
+            .len()
+            .checked_add(libsodium_sys::crypto_aead_chacha20poly1305_ABYTES as usize)
+            .ok_or_else(|| CryptoError::from("crypto write failed: ciphertext length overflow"))?;
+        let mut out = vec![0u8; out_capacity];
         let mut out_len = 0;
 
         let ret = unsafe {
@@ -308,30 +425,55 @@ impl Keeper {
                 msg.len() as u64,
                 ad.as_ptr(),
                 ad.len() as u64,
-                [0u8; 0].as_ptr(),
+                ptr::null(),
                 nonce.as_ptr(),
                 key.as_ptr(),
             )
         };
-        assert_eq!(0, ret);
-        assert_eq!(out_len, out.len() as u64);
+        if ret != 0 || out_len != out.len() as u64 {
+            return Err("crypto write failed: symmetric encryption failed".into());
+        }
 
-        out
+        Ok(out)
     }
 
-    pub fn symmetric_unlock(key: &[u8], ciphertext: &[u8], ad: &[u8], nonce: &[u8]) -> Vec<u8> {
-        let mut out = vec![
-            0u8;
-            ciphertext.len()
-                - libsodium_sys::crypto_aead_chacha20poly1305_ABYTES as usize
-        ];
+    pub fn symmetric_unlock(
+        key: &[u8],
+        ciphertext: &[u8],
+        ad: &[u8],
+        nonce: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
+        let key_bytes = libsodium_sys::crypto_aead_chacha20poly1305_KEYBYTES as usize;
+        let nonce_bytes = libsodium_sys::crypto_aead_chacha20poly1305_NPUBBYTES as usize;
+        if key.len() != key_bytes {
+            return Err(format!(
+                "crypto read failed: invalid key length {} (expected {})",
+                key.len(),
+                key_bytes
+            )
+            .into());
+        }
+        if nonce.len() != nonce_bytes {
+            return Err(format!(
+                "crypto read failed: invalid nonce length {} (expected {})",
+                nonce.len(),
+                nonce_bytes
+            )
+            .into());
+        }
+
+        let plain_len = ciphertext
+            .len()
+            .checked_sub(libsodium_sys::crypto_aead_chacha20poly1305_ABYTES as usize)
+            .ok_or_else(|| CryptoError::from("crypto read failed: ciphertext too short"))?;
+        let mut out = vec![0u8; plain_len];
         let mut out_len = 0;
 
         let ret = unsafe {
             libsodium_sys::crypto_aead_chacha20poly1305_decrypt(
                 out.as_mut_ptr(),
                 &mut out_len,
-                [0u8; 0].as_mut_ptr(),
+                ptr::null_mut(),
                 ciphertext.as_ptr(),
                 ciphertext.len() as u64,
                 ad.as_ptr(),
@@ -340,9 +482,10 @@ impl Keeper {
                 key.as_ptr(),
             )
         };
-        assert_eq!(0, ret);
-        assert_eq!(out_len, out.len() as u64);
+        if ret != 0 || out_len != out.len() as u64 {
+            return Err("crypto read failed: symmetric decryption failed".into());
+        }
 
-        out
+        Ok(out)
     }
 }

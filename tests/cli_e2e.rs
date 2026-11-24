@@ -141,3 +141,41 @@ fn cli_resume_after_kill() {
         assert_tree_eq(&sb.fixture, &leaf);
     }
 }
+
+#[test]
+fn cli_init_sets_restrictive_permissions_and_refuses_overwrite() {
+    let sb = sandbox();
+
+    hatbin()
+        .args(["init", sb.repo.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let key_path = sb.repo.join("secret-universal-key");
+    let orig_key = fs::read(&key_path).unwrap();
+    assert_eq!(orig_key.len(), 32);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&sb.repo).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(sb.repo.join("cache")).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&key_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    // Re-running init on the same directory must fail and keep original key untouched.
+    hatbin()
+        .args(["init", sb.repo.to_str().unwrap()])
+        .assert()
+        .failure();
+    assert_eq!(fs::read(&key_path).unwrap(), orig_key);
+}

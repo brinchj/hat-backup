@@ -131,3 +131,79 @@ fn check_command_detects_missing_hash() {
     let hat = open_hat(&sb.repo, &sb.backend);
     assert!(hat.check().is_err(), "check must fail when a blob is missing");
 }
+
+#[test]
+fn recover_ignores_stray_short_and_corrupt_hex_backend_files() {
+    let sb = sandbox();
+    write_fixture(&sb.fixture, &basic_fixture());
+    init_repo(&sb.repo);
+    {
+        let mut hat = open_hat(&sb.repo, &sb.backend);
+        commit_tree(&mut hat, "family", &sb.fixture);
+    }
+
+    // Inject stray hex filenames that previously crashed BlobIndex::id_of_name:
+    // - 1-byte hex name (< SEALBYTES -> integer underflow)
+    // - 64-byte random hex name (>= SEALBYTES -> crypto_box_seal_open auth failure panic)
+    fs::write(sb.backend.join("aa"), b"junk").unwrap();
+    fs::write(sb.backend.join("deadbeef".repeat(16)), b"more-junk").unwrap();
+
+    // Wipe local indexes; keep universal key + backend.
+    let cache = sb.repo.join("cache");
+    for entry in fs::read_dir(&cache).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() {
+            fs::remove_file(&path).unwrap();
+        } else if path.is_dir() {
+            fs::remove_dir_all(&path).unwrap();
+        }
+    }
+
+    let mut hat = open_hat(&sb.repo, &sb.backend);
+    hat.recover().expect("recover must ignore stray hex backend files");
+    hat.check().expect("recovered repo must pass check");
+    let leaf = checkout_and_leaf(&mut hat, "family", &sb.fixture, &sb.restore);
+    assert_tree_eq(&sb.fixture, &leaf);
+}
+
+#[test]
+fn recover_with_wrong_key_returns_err_instead_of_panicking() {
+    let sb = sandbox();
+    write_fixture(&sb.fixture, &basic_fixture());
+    init_repo(&sb.repo);
+    {
+        let mut hat = open_hat(&sb.repo, &sb.backend);
+        commit_tree(&mut hat, "family", &sb.fixture);
+    }
+
+    // Fresh repo dir with a different universal key pointing at the same backend.
+    let other_repo = sb.root.path().join("other-repo");
+    init_repo(&other_repo);
+
+    let mut hat = open_hat(&other_repo, &sb.backend);
+    assert!(
+        hat.recover().is_err(),
+        "recover with wrong key must return Err cleanly, not panic"
+    );
+}
+
+#[test]
+fn open_repository_rejects_empty_and_oversized_universal_key() {
+    use hat::backend::FileBackend;
+    use hat::Hat;
+    use std::sync::Arc;
+
+    let sb = sandbox();
+    init_repo(&sb.repo);
+    let key_path = sb.repo.join("secret-universal-key");
+
+    // 0-byte key must fail closed (never silently fall back to unkeyed BLAKE2b).
+    fs::write(&key_path, b"").unwrap();
+    let backend = Arc::new(FileBackend::new(sb.backend.clone()));
+    assert!(Hat::open_repository(sb.repo.clone(), backend, MAX_BLOB_SIZE).is_err());
+
+    // Oversized (> 64 bytes) key must return Err instead of panicking in libsodium.
+    fs::write(&key_path, vec![0x99u8; 128]).unwrap();
+    let backend = Arc::new(FileBackend::new(sb.backend.clone()));
+    assert!(Hat::open_repository(sb.repo.clone(), backend, MAX_BLOB_SIZE).is_err());
+}
