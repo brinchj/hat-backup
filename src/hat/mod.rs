@@ -244,6 +244,22 @@ impl<B: StoreBackend> HatRc<B> {
         )?);
 
         repository_root = repository_root.join("cache");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+            if !repository_root.exists() {
+                fs::DirBuilder::new().mode(0o700).create(&repository_root)?;
+            } else {
+                let mode = fs::metadata(&repository_root)?.permissions().mode();
+                if mode & 0o077 != 0 {
+                    fs::set_permissions(&repository_root, fs::Permissions::from_mode(0o700))?;
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        if !repository_root.exists() {
+            fs::create_dir(&repository_root)?;
+        }
 
         let hash_index_path = hash_index_name(repository_root.clone());
         let db_p = Arc::new(db::Index::new(&hash_index_path)?);

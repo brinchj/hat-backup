@@ -93,6 +93,8 @@ mod diesel_error {
         Migration(#[from] Box<dyn std::error::Error + Send + Sync>),
         #[error(transparent)]
         Execute(#[from] diesel::result::Error),
+        #[error(transparent)]
+        Io(#[from] std::io::Error),
     }
 
     impl From<diesel_migrations::MigrationError> for DieselError {

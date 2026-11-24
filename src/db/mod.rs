@@ -34,7 +34,7 @@ use crate::util::{Counter, PeriodicTimer};
 mod schema;
 mod sqlite;
 
-pub(crate) use sqlite::configure_connection;
+pub(crate) use sqlite::open_connection;
 
 pub struct Index(Mutex<InternalIndex>);
 pub type IndexGuard<'a> = MutexGuard<'a, InternalIndex>;
@@ -180,8 +180,7 @@ pub const MIGRATIONS: diesel_migrations::EmbeddedMigrations = embed_migrations!(
 
 impl InternalIndex {
     fn new(path: &str) -> Result<InternalIndex, DieselError> {
-        let mut conn = SqliteConnection::establish(path)?;
-        configure_connection(&mut conn)?;
+        let conn = open_connection(path)?;
 
         let mut idx = InternalIndex {
             conn,

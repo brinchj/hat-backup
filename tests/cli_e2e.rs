@@ -178,4 +178,36 @@ fn cli_init_sets_restrictive_permissions_and_refuses_overwrite() {
         .assert()
         .failure();
     assert_eq!(fs::read(&key_path).unwrap(), orig_key);
+
+    // Committing creates SQLite indexes (hash_index.sqlite3 + family index + WAL/SHM);
+    // every file inside cache/ must be 0600 and cache/ must remain 0700.
+    write_fixture(&sb.fixture, &[("hello.txt", FileSpec::file(b"secret-ish".to_vec()))]);
+    let mut cmd = hatbin();
+    with_file_backend(&mut cmd, &sb)
+        .args(["commit", "family", sb.fixture.to_str().unwrap()])
+        .assert()
+        .success();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let cache = sb.repo.join("cache");
+        assert_eq!(fs::metadata(&cache).unwrap().permissions().mode() & 0o777, 0o700);
+        let mut seen_files = 0usize;
+        for entry in fs::read_dir(&cache).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_file() {
+                seen_files += 1;
+                let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+                assert_eq!(
+                    mode,
+                    0o600,
+                    "cache file {} must have mode 0600, got {:o}",
+                    path.display(),
+                    mode
+                );
+            }
+        }
+        assert!(seen_files >= 2, "expected hash_index.sqlite3 and family index in cache/");
+    }
 }

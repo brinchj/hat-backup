@@ -124,8 +124,21 @@ pub struct Keeper {
 
 impl Keeper {
     pub fn load_from_universal_key(dir: &Path) -> Result<Keeper, io::Error> {
-        let f = fs::File::open(dir.join(UNIVERSAL_KEY_FILENAME))?;
-        let mut buf = Vec::with_capacity(UNIVERSAL_KEY_BYTES);
+        let key_path = dir.join(UNIVERSAL_KEY_FILENAME);
+        let f = fs::File::open(&key_path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = f.metadata()?.permissions().mode();
+            if mode & 0o077 != 0 {
+                warn!(
+                    "universal key {} has permissive mode {:o}; expected 0600",
+                    key_path.display(),
+                    mode & 0o777
+                );
+            }
+        }
+        let mut buf = Vec::with_capacity(UNIVERSAL_KEY_BYTES + 1);
         f.take((UNIVERSAL_KEY_BYTES + 1) as u64)
             .read_to_end(&mut buf)?;
 
