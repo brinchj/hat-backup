@@ -221,35 +221,57 @@ fn split_snapshot_path(path: &Path) -> Option<(String, String, Vec<OsString>)> {
 }
 
 /// Plan local destination paths for one or more selected items without silently clobbering
-/// colliding basenames from different subdirectories.
+/// colliding basenames from different subdirectories or different snapshots.
 pub fn plan_checkouts(
     targets: &[(PathBuf, BrowseItemKind)],
     dest_dir: &Path,
 ) -> Vec<PlannedCheckout> {
-    // First pass: count default basenames to detect collisions across selected items.
+    // First pass: count default basenames and snapshot-relative paths to detect collisions.
     let mut default_names: HashMap<OsString, usize> = HashMap::new();
+    let mut rel_paths: HashMap<PathBuf, usize> = HashMap::new();
+    let mut snap_rel_paths: HashMap<(String, PathBuf), usize> = HashMap::new();
     for (snap_path, kind) in targets {
-        if let Some((family, snap_id, sub)) = split_snapshot_path(snap_path) {
+        if let Some((family, snap_name, sub)) = split_snapshot_path(snap_path) {
             let key = match kind {
-                BrowseItemKind::Snapshot { .. } => OsString::from(format!("{}-{}", family, snap_id)),
+                BrowseItemKind::Snapshot { .. } => {
+                    OsString::from(format!("{}-{}", family, snap_name))
+                }
                 _ => sub
                     .last()
                     .cloned()
-                    .unwrap_or_else(|| OsString::from(format!("{}-{}", family, snap_id))),
+                    .unwrap_or_else(|| OsString::from(format!("{}-{}", family, snap_name))),
             };
             *default_names.entry(key).or_insert(0) += 1;
+
+            let mut rel = PathBuf::new();
+            for c in &sub {
+                rel.push(c);
+            }
+            *rel_paths.entry(rel.clone()).or_insert(0) += 1;
+            *snap_rel_paths.entry((snap_name, rel)).or_insert(0) += 1;
         }
     }
 
     let mut plan = Vec::with_capacity(targets.len());
     for (snap_path, kind) in targets {
-        let Some((family, snap_id, sub)) = split_snapshot_path(snap_path) else {
+        let Some((family, snap_name, sub)) = split_snapshot_path(snap_path) else {
             continue;
         };
 
+        let mut rel = PathBuf::new();
+        for c in &sub {
+            rel.push(c);
+        }
+        let rel_collides = rel_paths.get(&rel).copied().unwrap_or(0) > 1;
+        let snap_rel_collides = snap_rel_paths
+            .get(&(snap_name.clone(), rel.clone()))
+            .copied()
+            .unwrap_or(0)
+            > 1;
+
         let (checkout_target_dir, display_dest) = match kind {
             BrowseItemKind::Snapshot { .. } => {
-                let folder = format!("{}-{}", family, snap_id);
+                let folder = format!("{}-{}", family, snap_name);
                 let target = dest_dir.join(&folder);
                 (target.clone(), target)
             }
@@ -257,14 +279,17 @@ pub fn plan_checkouts(
                 let base = sub
                     .last()
                     .cloned()
-                    .unwrap_or_else(|| OsString::from(format!("{}-{}", family, snap_id)));
-                let collides = default_names.get(&base).copied().unwrap_or(0) > 1;
-                let target = if collides && sub.len() > 1 {
-                    let mut p = dest_dir.to_path_buf();
-                    for c in &sub {
-                        p.push(c);
-                    }
-                    p
+                    .unwrap_or_else(|| OsString::from(format!("{}-{}", family, snap_name)));
+                let base_collides = default_names.get(&base).copied().unwrap_or(0) > 1;
+                let target = if rel_collides {
+                    let prefix = if snap_rel_collides {
+                        format!("{}-{}", family, snap_name)
+                    } else {
+                        snap_name.clone()
+                    };
+                    dest_dir.join(prefix).join(&rel)
+                } else if base_collides && sub.len() > 1 {
+                    dest_dir.join(&rel)
                 } else {
                     dest_dir.join(&base)
                 };
@@ -274,8 +299,20 @@ pub fn plan_checkouts(
                 let Some(file_name) = sub.last().cloned() else {
                     continue;
                 };
-                let collides = default_names.get(&file_name).copied().unwrap_or(0) > 1;
-                if collides && sub.len() > 1 {
+                let base_collides = default_names.get(&file_name).copied().unwrap_or(0) > 1;
+                if rel_collides {
+                    let prefix = if snap_rel_collides {
+                        format!("{}-{}", family, snap_name)
+                    } else {
+                        snap_name.clone()
+                    };
+                    let mut parent = dest_dir.join(prefix);
+                    for c in &sub[..sub.len() - 1] {
+                        parent.push(c);
+                    }
+                    let display = parent.join(&file_name);
+                    (parent, display)
+                } else if base_collides && sub.len() > 1 {
                     let mut parent = dest_dir.to_path_buf();
                     for c in &sub[..sub.len() - 1] {
                         parent.push(c);
@@ -547,6 +584,137 @@ impl<B: StoreBackend> BrowserState<B> {
             self.status = Some(format!("Error: {}", e));
         } else {
             self.status = None;
+        }
+    }
+
+    /// Switch to the previous (`delta = -1`, older) or next (`delta = 1`, newer) snapshot
+    /// in the current family while staying in the same relative directory (or nearest existing
+    /// ancestor if the directory does not exist in the target snapshot).
+    pub fn switch_snapshot(&mut self, delta: isize) {
+        if self.cwd.len() < 2 {
+            self.status =
+                Some("Enter a snapshot first to switch between snapshots with [ / ].".to_string());
+            return;
+        }
+
+        if matches!(self.mode, Mode::FindResults { .. }) {
+            self.mode = Mode::Browse;
+        }
+
+        let family = self.cwd[0].to_string_lossy().into_owned();
+        let current_snap = self.cwd[1].to_string_lossy().into_owned();
+
+        let mut snaps: Vec<_> = self
+            .fs
+            .hat_mut()
+            .list_user_snapshots()
+            .into_iter()
+            .filter(|s| s.family_name == family && s.hash_ref.is_some())
+            .collect();
+        snaps.sort_by_key(|s| s.info.snapshot_id);
+
+        if snaps.is_empty() {
+            self.status = Some(format!("No snapshots in family '{}'.", family));
+            return;
+        }
+
+        let Some(cur_idx) = snaps.iter().position(|s| s.display_name() == current_snap) else {
+            self.status = Some(format!("Current snapshot '{}' not found.", current_snap));
+            return;
+        };
+
+        let target_idx = cur_idx as isize + delta;
+        if target_idx < 0 {
+            self.status = Some(format!("Already at oldest snapshot (1/{}).", snaps.len()));
+            return;
+        }
+        let target_idx = target_idx as usize;
+        if target_idx >= snaps.len() {
+            self.status = Some(format!(
+                "Already at newest snapshot ({}/{}).",
+                snaps.len(),
+                snaps.len()
+            ));
+            return;
+        }
+
+        let target_name = snaps[target_idx].display_name();
+        let prev_focus_name: Option<OsString> = self
+            .visible_items()
+            .get(self.cursor)
+            .filter(|it| it.kind != BrowseItemKind::ParentDir)
+            .and_then(|it| it.full_path.file_name().map(|n| n.to_os_string()));
+
+        let orig_rel = self.cwd[2..].to_vec();
+        let orig_rel_display = path_from_parts(&orig_rel).display().to_string();
+
+        for keep in (0..=orig_rel.len()).rev() {
+            let mut candidate_parts = Vec::with_capacity(2 + keep);
+            candidate_parts.push(self.cwd[0].clone());
+            candidate_parts.push(OsString::from(&target_name));
+            candidate_parts.extend(orig_rel[..keep].iter().cloned());
+
+            let candidate_path = path_from_parts(&candidate_parts);
+            match self.fs.ls(&candidate_path) {
+                Ok(Some(List::Dir(entries))) => {
+                    // Guard against a path that was a directory in the previous snapshot
+                    // but is a regular file or symlink in the target snapshot.
+                    if keep > 0
+                        && entries.len() == 1
+                        && !matches!(entries[0].1, Content::Dir(_))
+                    {
+                        let only_name: OsString = entries[0].0.info.name.clone().into();
+                        if only_name == orig_rel[keep - 1] {
+                            continue;
+                        }
+                    }
+
+                    self.cwd = candidate_parts;
+                    let focus_path = if keep == orig_rel.len() {
+                        prev_focus_name.as_ref().map(|n| candidate_path.join(n))
+                    } else {
+                        None
+                    };
+                    if let Err(e) = self.reload(focus_path.as_deref()) {
+                        self.status = Some(format!("Error: {}", e));
+                        return;
+                    }
+
+                    self.status = if keep == orig_rel.len() {
+                        Some(format!(
+                            "Snapshot {}/{}: {}",
+                            target_idx + 1,
+                            snaps.len(),
+                            target_name
+                        ))
+                    } else if keep == 0 {
+                        Some(format!(
+                            "Snapshot {}/{}: {} ('{}' not present; moved to snapshot root)",
+                            target_idx + 1,
+                            snaps.len(),
+                            target_name,
+                            orig_rel_display
+                        ))
+                    } else {
+                        let fallback_display =
+                            path_from_parts(&orig_rel[..keep]).display().to_string();
+                        Some(format!(
+                            "Snapshot {}/{}: {} ('{}' not present; moved to '{}')",
+                            target_idx + 1,
+                            snaps.len(),
+                            target_name,
+                            orig_rel_display,
+                            fallback_display
+                        ))
+                    };
+                    return;
+                }
+                Ok(_) => continue,
+                Err(e) => {
+                    self.status = Some(format!("Error switching snapshot: {}", e));
+                    return;
+                }
+            }
         }
     }
 
@@ -921,6 +1089,8 @@ impl<B: StoreBackend> BrowserState<B> {
                 KeyCode::End | KeyCode::Char('G') => self.move_bottom(),
                 KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => self.enter(),
                 KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => self.go_up(),
+                KeyCode::Char('[') => self.switch_snapshot(-1),
+                KeyCode::Char(']') => self.switch_snapshot(1),
                 KeyCode::Char(' ') => self.toggle_select(),
                 KeyCode::Char('a') => self.toggle_select_all(),
                 KeyCode::Char('u') => self.clear_selection(),
@@ -1020,6 +1190,7 @@ impl<B: StoreBackend> BrowserState<B> {
                     "  Up / Down, k / j      Move cursor",
                     "  Enter / Right / l     Open directory, snapshot, or jump to find match",
                     "  Backspace / Left / h  Go up one level (or exit find results)",
+                    "  [ / ]                 Previous (older) / next (newer) snapshot in same dir",
                     "  Space                 Mark / unmark item for checkout (persists across dirs)",
                     "  a / u                 Toggle select all in view / clear all selections",
                     "  c                     Checkout marked items (or highlighted item) into dest",
@@ -1179,7 +1350,7 @@ impl<B: StoreBackend> BrowserState<B> {
                     "Enter: jump  Space: mark  a: all  c: checkout  f: find again  Esc: back  q: quit"
                 }
                 Mode::Browse => {
-                    "Enter: open  Bksp: up  Space: mark  c: checkout  f: find  /: filter  ?: help  q: quit"
+                    "Enter: open  Bksp: up  [/]: prev/next snap  Space: mark  c: checkout  f: find  ?: help  q: quit"
                 }
             };
             write!(out, "{:<width$}", truncate_str(legend, cols), width = cols)?;
@@ -1405,5 +1576,95 @@ mod tests {
             "expected canonical composite snapshot path ending in Z-2, got {:?}",
             cur
         );
+    }
+
+    #[test]
+    fn browse_switch_snapshot_stays_in_dir_and_handles_missing_subdir_and_cross_snap_checkout() {
+        let (hat, tmp) = make_test_hat();
+        let dest = tmp.path().join("cwd_switch");
+        fs::create_dir_all(&dest).unwrap();
+
+        // Start inside `docs/1/alpha`.
+        let mut state = BrowserState::new(hat, Path::new("docs/1/alpha"), dest.clone()).unwrap();
+        let snap1_dir = state.current_path();
+        assert!(snap1_dir.to_string_lossy().ends_with("Z-1/alpha"));
+
+        // Focus `shared.txt` and mark it in snapshot 1.
+        let shared_idx = state
+            .visible_items()
+            .iter()
+            .position(|i| i.label == "shared.txt")
+            .unwrap();
+        state.cursor = shared_idx;
+        state.toggle_select();
+        // Put cursor back on `shared.txt` before switching snapshot.
+        state.cursor = shared_idx;
+
+        // Trying `[` at oldest snapshot stays put with clear boundary message.
+        state.switch_snapshot(-1);
+        assert_eq!(state.current_path(), snap1_dir);
+        assert!(state.status.as_deref().unwrap().contains("oldest snapshot"));
+
+        // Press `]` to move to snapshot 2 while staying in `alpha/` with cursor on `shared.txt`!
+        state.switch_snapshot(1);
+        let snap2_dir = state.current_path();
+        assert!(
+            snap2_dir.to_string_lossy().ends_with("Z-2/alpha"),
+            "expected to stay in alpha/ under snap 2, got {:?}",
+            snap2_dir
+        );
+        assert_eq!(state.visible_items()[state.cursor].label, "shared.txt");
+
+        // Mark `shared.txt` in snapshot 2 as well!
+        state.toggle_select();
+        assert_eq!(state.selected_count(), 2);
+
+        // Press `]` at newest snapshot -> boundary status message.
+        state.switch_snapshot(1);
+        assert_eq!(state.current_path(), snap2_dir);
+        assert!(state.status.as_deref().unwrap().contains("newest snapshot"));
+
+        // Checkout BOTH versions of `alpha/shared.txt` across snapshots -> neither overwrites the other!
+        state.begin_checkout();
+        assert_eq!(state.confirm_checkout().unwrap(), 2);
+        let snap1_name = snap1_dir
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_os_string();
+        let snap2_name = snap2_dir
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_os_string();
+        assert_eq!(
+            fs::read(dest.join(&snap1_name).join("alpha/shared.txt")).unwrap(),
+            b"from-alpha"
+        );
+        assert_eq!(
+            fs::read(dest.join(&snap2_name).join("alpha/shared.txt")).unwrap(),
+            b"v2-alpha"
+        );
+
+        // Switch back to snap 1, enter `deep/` (which does NOT exist in snap 2), then press `]`.
+        state.switch_snapshot(-1);
+        let deep_idx = state
+            .visible_items()
+            .iter()
+            .position(|i| i.label == "deep/")
+            .unwrap();
+        state.cursor = deep_idx;
+        state.enter();
+        assert!(state.current_path().to_string_lossy().ends_with("Z-1/alpha/deep"));
+
+        state.switch_snapshot(1);
+        assert!(
+            state.current_path().to_string_lossy().ends_with("Z-2/alpha"),
+            "expected graceful fallback to nearest ancestor alpha/, got {:?}",
+            state.current_path()
+        );
+        assert!(state.status.as_deref().unwrap().contains("not present"));
     }
 }

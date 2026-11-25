@@ -1028,6 +1028,7 @@ fn build_cli() -> Command {
                      hat browse docs/1 --dest ./restored\n\n\
                      Keys inside browse:\n  \
                      Arrows / j k : move   Enter / l : open   Bksp / h : up\n  \
+                     [ / ] : prev/next snapshot in same dir\n  \
                      Space : mark item     f : recursive find  / : filter\n  \
                      c : checkout marked   ? : help            q : quit",
                 )
