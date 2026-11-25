@@ -38,15 +38,33 @@ A backend-agnostic snapshotting backup engine with:
 - **Mark-and-sweep GC with local `tree_edges` cache:** deleted reference-counting
   GC (`src/gc/`) and multi-stage commit/delete tag state machines. `commit`
   flushes all blobs before atomically publishing one `Tag::Done` snapshot row;
-  `delete` is O(1) local; `gc`/`gc_pretend` mark liveness from `hashes.childs` +
-  `tree_edges` with **0 remote reads** (steady state and post-`recover`), fail
-  closed on missing hash IDs, and purge orphan `tree_edges` on startup
+  `delete` is O(1) local; `gc`/`gc_pretend` bulk-load the hash graph and
+  `tree_edges` in two SQLite scans (**0 remote reads** in steady state and
+  post-`recover`), fail closed on missing hash IDs, batch dead-hash deletes and
+  distinct live-blob tagging in 500-row SQL `IN` statements, report the true
+  distinct live data blob count, and purge orphan `tree_edges` on startup
+- **Keyed FastCDC chunking & default Zstd compression:** streaming FastCDC v2020
+  (16 KiB min / 64 KiB avg / 256 KiB max, per-repo keyed BLAKE2b seed, reused
+  thread-local small-file fast path `<= 16 KiB`), uncompressed-plaintext hashing
+  so dedup works across compression toggles, default Zstd level 3 with raw
+  fallback for incompressible chunks, bounded 16 MiB chunk decompression, and
+  `--compression zstd[:1-19]|none` persisted in `config.json`
+- **Parallel storage pipeline:** up to 8 `key::Store` workers sharing one
+  `BlobStore` (bounding partial tail blobs to one), with lock-free per-thread
+  reusable `zstd::bulk::Compressor` and detached concurrent `Blob::finish()` +
+  `backend.store()` outside the packing mutex under a `Condvar` flush barrier
 - **Chunked `SnapshotList`:** `meta_commit` splits large snapshot histories across
   multiple `SnapshotList` leaves so large repos never exceed `max_blob_size`
-- **Checkout & path safety:** path-traversal rejection, safe symlink restore
-  (including dangling and non-UTF-8 targets without chmodding targets), raw
-  non-UTF-8 filenames end-to-end, `checkout --id <ID>`, and `LeafIterator`
-  `Result` error propagation with clean CLI exit codes
+- **Checkout, browse & CLI ergonomics:** `hat browse` interactive terminal UI
+  (directory navigation, `[`/`]` snapshot time-travel in current dir, `/` live
+  filter, `f` recursive find, `Space` multi-select, collision-safe checkout),
+  composite `YYYY-MM-DDTHH-MM-SSZ-<id>` snapshot names with flexible selectors
+  (`latest`, numeric ID, unique date/time prefix), `ls -lR`, snapshot-path and
+  subpath `checkout`, hidden internal `__hat__roots__` family, automatic
+  exclusion of Hat's own state/cache/backend dirs (`CACHEDIR.TAG`),
+  path-traversal rejection, safe symlink restore (dangling and non-UTF-8
+  targets without chmodding targets), `mtime`/`atime` restore, raw non-UTF-8
+  filenames end-to-end, and `LeafIterator` `Result` error propagation
 - **Fail-fast exclusive repo lock:** `Hat::open_repository` acquires a `0600`
   non-blocking lock on `cache/.hat.lock`
 - **Crypto & safety hardening:** migrated to `libsodium-rs` (`#![forbid(unsafe_code)]`),
@@ -55,7 +73,7 @@ A backend-agnostic snapshotting backup engine with:
   atomic `0600` 32-byte master key inside `0700` state/cache dirs, fixed-size
   blob padding ([`SECURITY.md`](SECURITY.md)), and root-hash pinning API
   (`Hat::recover_with_expected_root`)
-- **Test & benchmark suites (112 tests):** in-memory dataloss suite, on-disk
+- **Test & benchmark suites (131 tests):** in-memory dataloss suite, on-disk
   `FileBackend` + checkout oracle, SIGKILL crash/reopen (`process_crash.rs`),
   CLI E2E (`cli_e2e.rs`), adversarial corruption/rollback (`adversarial.rs`),
   and Criterion benches (`cargo bench --bench hat_ops`)
@@ -73,7 +91,7 @@ Highest priority before any “safe for disposable data” claim.
 | Power-fail / block-fault lane | Linux: `scripts/linux-powerfail.sh` (privileged Docker, dm-linear, `suspend --noflush`). Proves a returned `store()` is on the block device and an unsynced sibling is not. macOS and real host power cut are still open |
 | Recover hardening | `recover` rebuilds `hashes` + `tree_edges` iteratively and supports root pinning (`recover_with_expected_root`). **Open:** read-only recover option; CLI flag for pinned root hash; fewer panics on corrupt CBOR/DB |
 | Replace panic-heavy paths | Systematically remove `unwrap`/`expect` on recoverable DB/IO errors |
-| Metadata restore completeness | **Done:** non-UTF-8 filenames and symlink targets, regular file modes. **Open:** owners (`uid`/`gid`), timestamps (`mtime`/`atime`), xattrs |
+| Metadata restore completeness | **Done:** non-UTF-8 filenames and symlink targets, regular file modes, timestamps (`mtime`/`atime` via `set_times_nofollow`). **Open:** owners (`uid`/`gid`), xattrs |
 | Symlink / special-file policy | **Done:** symlink round-trip (broken links, non-UTF-8 targets, no target chmod). **Open:** explicit policy/tests for symlink cycles, devices/FIFOs, sparse files |
 
 **Exit:** restore drills on real disk after kill; GC never deletes live shared
@@ -87,7 +105,7 @@ data; corrupt/missing blobs never look “healthy.”
 |------|--------|
 | First-class local file backend in CLI | `--backend file --backend-path` works; decide whether file backend should be default or co-equal with `CmdBackend` |
 | CmdBackend batching / long-lived helper | Cut process-per-put cost if external helpers stay |
-| Stable CLI + docs | `hat` binary with `init` (persists `config.json`), `commit`, `checkout`, `ls [-l]`, `delete [-n]`, `gc [-n]`, `resume`, `check`, `recover`, `mount`, `license`, global flags (`--state-dir`, `-q`, `-v`, `--json`), documented in `README.md` |
+| Stable CLI + docs | `hat` binary with `init` (persists `config.json`), `commit`, `checkout` (snapshot/subpath), `ls [-lR]`, `browse` (TUI), `delete [-n]`, `gc [-n]`, `resume`, `check`, `recover`, `mount`, `license`, composite snapshot selectors, global flags (`--state-dir`, `--compression`, `-q`, `-v`, `--json`), documented in `README.md` |
 | `--dry-run` where it matters | `-n`/`--dry-run` implemented on both `gc` and `delete` |
 | Progress without log spam | Library progress/warnings routed through `log` (`info!`/`warn!`) to `stderr`, controllable via `-q`/`-v`/`RUST_LOG`; `stdout` kept clean for data and `--json` |
 | Upgrade / migration story | Schema migrations exist (`migrations/`), but moving from pre-single-DB `hash_index.sqlite3` requires `recover`; document and formalize versioned upgrades |
@@ -104,10 +122,11 @@ See also [`SECURITY.md`](SECURITY.md).
 | Item | Notes |
 |------|--------|
 | Formal threat model | Adversaries: backend observer, stolen laptop, malicious blob store |
-| Key wrapping | Passphrase / OS keychain; stop shipping raw `secret-universal-key` as the only story |
+| Key wrapping | Passphrase (Argon2id via `libsodium-rs`) / OS keychain; stop shipping raw `secret-universal-key` as the only story |
+| Write-only public-key backup mode | Expose `Keeper`'s existing split Curve25519 sealed-box keypairs in CLI so backup hosts can encrypt/upload without holding decryption keys |
 | Key rotation / recovery | Document and implement |
 | Local metadata stance | `0700`/`0600` fs permissions enforced on `cache/` and single `cache/index.sqlite3` (+ WAL/SHM); treat state dir as secret as the key (or add SQLCipher/encrypted DB later alongside key wrapping) |
-| Side channels | Object count / timing; document residual leakage even with fixed-size blobs |
+| Side channels | Object count / timing / compress-then-encrypt volume leakage (`--compression none` opt-out documented in [`SECURITY.md`](SECURITY.md)) |
 | Keep fixed-size blob padding | Do not remove for perf without a reviewed replacement |
 
 **Exit:** confidentiality claims match documented guarantees; no silent
@@ -123,7 +142,9 @@ regressions of size-hiding.
 | Signed / published snapshot tips | Authenticity of “this is the backup set” (CLI exposure for `recover_with_expected_root`) |
 | Soak / large-tree benches & bounded scan RAM | Grow beyond ~800-file fixtures; consider streaming bottom-up `TreeList` writes if scaling past ~1M files (~1 GB `StagedTree` RAM) |
 | Concurrent access policy | **Done:** fail-fast exclusive `0600` lock (`cache/.hat.lock`) in `Hat::open_repository` |
-| Blob store I/O isolation | Background thread(s) for backend uploads/downloads |
+| Retention policies | Local policy pruning (`--keep-last`, `--keep-daily`, `--keep-weekly`, `--keep-monthly`, `--dry-run`) feeding `delete` + `gc` |
+| Blob repacking / compaction | Reclaim partially dead 4 MiB blobs under rolling retention; decide whether to decouple `ChunkRef` from hashed branch nodes before format freeze |
+| Blob store I/O isolation | **Partial:** `Blob::finish()` and `backend.store()` run concurrently outside the packing mutex with a `Condvar` flush barrier. **Open:** dedicated async upload/prefetch pool for high-latency remote backends |
 | Platform battle-testing | Linux/macOS CI matrix; restore on clean machine |
 
 **Exit:** ops can detect silent rot; performance and memory under “many small
@@ -155,8 +176,8 @@ files” are measured and acceptable.
    macOS power-fail proof)
 2. Replace remaining `unwrap`/`expect` on recoverable DB/IO paths + expose
    pinned-root / read-only `recover` flags in CLI
-3. Metadata restore (`mtime`, owners) + special-file policy tests
-4. Key wrapping + threat-model doc
-5. Stronger graph-level FSCK + large-tree soak / streaming commit if needed
+3. Metadata restore (owners, xattrs) + special-file policy tests
+4. Key wrapping (Argon2id) + write-only public-key backup CLI + threat-model doc
+5. Retention policies + stronger graph-level FSCK + large-tree soak / streaming commit if needed
 
 Update this file when a phase item lands or the bar moves.
