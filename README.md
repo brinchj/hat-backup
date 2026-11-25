@@ -13,6 +13,31 @@ Project
 Hat is a backend-agnostic, snapshotting backup system with content-addressed
 chunk deduplication, authenticated encryption, and crash-tolerant recovery.
 
+Why Hat (Design Niche)
+----------------------
+Most open-source backup tools (such as Restic, Borg, and Kopia) expose
+repository directory layouts (`snapshots/`, `index/`, `data/`), store
+variable-sized pack files, and rely on symmetric keys held on the backup host.
+Hat is built around a narrower storage contract and threat model:
+
+- **Opaque, fixed-size backend layout:** External storage holds only flat,
+  randomly named blobs padded with random bytes to exact `max_blob_size` and
+  authenticated against their own names—hiding repository structure, snapshot
+  boundaries, and per-blob fill levels *(disable Zstd via `--compression none`
+  when strict volume hiding is preferred; see [`SECURITY.md`](SECURITY.md))*.
+- **Minimal dumb-storage contract:** Backends require only four flat operations
+  (`put`, `get`, `delete`, `list`) with no server daemon, directory hierarchy,
+  or byte-range reads. Mark-and-sweep `gc` operates with zero remote reads.
+- **Asymmetric write-only backup architecture:** Blob access keys and footers
+  are sealed with Curve25519 public-key sealed boxes (`Keeper`), and `commit`,
+  `meta_commit`, `delete`, and `gc` never require decryption keys. Unattended
+  backup hosts can commit, deduplicate, and prune without being able to decrypt
+  historical backups *(key split exists in `Keeper`; CLI write-only key
+  management is tracked in [`ROADMAP.md`](ROADMAP.md))*.
+- **Zero-FUSE interactive browsing:** Built-in `hat browse` terminal UI provides
+  in-place snapshot time-travel (`[`/`]`), recursive search (`f`), and
+  collision-safe multi-file checkout without installing FUSE.
+
 Key design properties implemented today:
 
 - **Encrypted, fixed-size blobs:** File streams are split with keyed FastCDC
@@ -105,10 +130,10 @@ hat recover
 hat resume
 ```
 
-Global options (`--state-dir`, `--backend`, `--backend-path`, `-q/--quiet`,
-`-v/--verbose`, `--json`) can be passed before or after any subcommand. Precedence
-is CLI flags > environment variables (`HAT_STATE_DIR`, `HAT_BACKEND`,
-`HAT_BACKEND_PATH`) > `<state-dir>/config.json`.
+Global options (`--state-dir`, `--backend`, `--backend-path`, `--compression`,
+`-q/--quiet`, `-v/--verbose`, `--json`) can be passed before or after any
+subcommand. Precedence is CLI flags > environment variables (`HAT_STATE_DIR`,
+`HAT_BACKEND`, `HAT_BACKEND_PATH`, `HAT_COMPRESSION`) > `<state-dir>/config.json`.
 
 Testing & Benchmarks
 --------------------
