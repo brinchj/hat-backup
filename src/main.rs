@@ -18,7 +18,7 @@ use clap::{Arg, ArgMatches, Command};
 use hat::backend::{self, StoreBackend};
 use hat::hat::HatRc;
 use hat::Hat;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi;
 use std::fs;
@@ -123,34 +123,160 @@ fn do_resume<B: StoreBackend>(mut hat: HatRc<B>) {
     }
 }
 
-fn do_ls<B: StoreBackend>(hat: HatRc<B>, path: PathBuf) {
+#[cfg(unix)]
+fn format_unix_perm_bits(mode: u32) -> String {
+    let mut s = String::with_capacity(9);
+    s.push(if mode & 0o400 != 0 { 'r' } else { '-' });
+    s.push(if mode & 0o200 != 0 { 'w' } else { '-' });
+    s.push(match (mode & 0o100 != 0, mode & 0o4000 != 0) {
+        (true, true) => 's',
+        (false, true) => 'S',
+        (true, false) => 'x',
+        (false, false) => '-',
+    });
+    s.push(if mode & 0o040 != 0 { 'r' } else { '-' });
+    s.push(if mode & 0o020 != 0 { 'w' } else { '-' });
+    s.push(match (mode & 0o010 != 0, mode & 0o2000 != 0) {
+        (true, true) => 's',
+        (false, true) => 'S',
+        (true, false) => 'x',
+        (false, false) => '-',
+    });
+    s.push(if mode & 0o004 != 0 { 'r' } else { '-' });
+    s.push(if mode & 0o002 != 0 { 'w' } else { '-' });
+    s.push(match (mode & 0o001 != 0, mode & 0o1000 != 0) {
+        (true, true) => 't',
+        (false, true) => 'T',
+        (true, false) => 'x',
+        (false, false) => '-',
+    });
+    s
+}
+
+fn format_entry_mode(
+    content: &hat::hat::walker::Content,
+    perms: Option<&fs::Permissions>,
+) -> String {
+    let kind = match content {
+        hat::hat::walker::Content::Dir(_) => 'd',
+        hat::hat::walker::Content::Link(_) => 'l',
+        hat::hat::walker::Content::Data(_) => '-',
+    };
+    #[cfg(unix)]
+    let perm_str = if let Some(p) = perms {
+        use std::os::unix::fs::PermissionsExt;
+        format_unix_perm_bits(p.mode())
+    } else {
+        "---------".to_string()
+    };
+    #[cfg(not(unix))]
+    let perm_str = {
+        let _ = perms;
+        "---------".to_string()
+    };
+    format!("{}{}", kind, perm_str)
+}
+
+fn format_utc_datetime(dt: chrono::DateTime<chrono::Utc>) -> String {
+    dt.format("%Y-%m-%d %H:%M:%SZ").to_string()
+}
+
+fn format_unix_ts_utc(ts_secs: Option<i64>) -> String {
+    ts_secs
+        .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
+        .map(format_utc_datetime)
+        .unwrap_or_else(|| format!("{:>20}", "-"))
+}
+
+fn do_ls<B: StoreBackend>(hat: HatRc<B>, path: PathBuf, long: bool) {
     if let Some(f) = hat::vfs::Filesystem::new(hat)
         .ls(&path)
         .unwrap_or_else(|e| fail(e))
     {
         match f {
             hat::vfs::fs::List::Root(snapshots) => {
-                snapshots
-                    .into_iter()
-                    .map(|s| s.family_name)
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .for_each(|name| println!("{}", name));
+                if long {
+                    let mut families: BTreeMap<String, chrono::DateTime<chrono::Utc>> =
+                        BTreeMap::new();
+                    for s in snapshots {
+                        families
+                            .entry(s.family_name)
+                            .and_modify(|latest| {
+                                if s.created > *latest {
+                                    *latest = s.created;
+                                }
+                            })
+                            .or_insert(s.created);
+                    }
+                    for (name, latest_created) in families {
+                        println!(
+                            "dr-xr-xr-x {:>10} {} {}",
+                            "-",
+                            format_utc_datetime(latest_created),
+                            name
+                        );
+                    }
+                } else {
+                    snapshots
+                        .into_iter()
+                        .map(|s| s.family_name)
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .for_each(|name| println!("{}", name));
+                }
             }
             hat::vfs::fs::List::Snapshots(snapshots) => {
                 for si in snapshots {
-                    println!(
-                        "{}",
-                        PathBuf::from(si.family_name)
-                            .join(format!("{}", si.info.snapshot_id))
-                            .display()
-                    );
+                    let snap_path =
+                        PathBuf::from(si.family_name).join(format!("{}", si.info.snapshot_id));
+                    if long {
+                        println!(
+                            "dr-xr-xr-x {:>10} {} {}",
+                            "-",
+                            format_utc_datetime(si.created),
+                            snap_path.display()
+                        );
+                    } else {
+                        println!("{}", snap_path.display());
+                    }
                 }
             }
             hat::vfs::fs::List::Dir(files) => {
-                for (entry, _) in files {
+                for (entry, content) in files {
                     let name_os_string: ffi::OsString = entry.info.name.into();
-                    println!("{}", path.join(name_os_string).display());
+                    let full_path = path.join(name_os_string);
+                    if long {
+                        let mode = format_entry_mode(&content, entry.info.permissions.as_ref());
+                        let size = entry
+                            .info
+                            .byte_length
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|| "-".to_string());
+                        let mtime = format_unix_ts_utc(entry.info.modified_ts_secs);
+                        match content {
+                            hat::hat::walker::Content::Link(target) => {
+                                println!(
+                                    "{} {:>10} {} {} -> {}",
+                                    mode,
+                                    size,
+                                    mtime,
+                                    full_path.display(),
+                                    target.display()
+                                );
+                            }
+                            _ => {
+                                println!(
+                                    "{} {:>10} {} {}",
+                                    mode,
+                                    size,
+                                    mtime,
+                                    full_path.display()
+                                );
+                            }
+                        }
+                    } else {
+                        println!("{}", full_path.display());
+                    }
                 }
             }
         }
@@ -254,6 +380,13 @@ fn main() {
         .subcommand(
             Command::new("ls")
                 .about("List Hat snapshot paths")
+                .arg(
+                    Arg::new("long")
+                        .short('l')
+                        .long("long")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Use a long listing format including mode, size, and mtime/created time"),
+                )
                 .arg(
                     Arg::new("PATH")
                         .default_value("/")
@@ -395,9 +528,10 @@ fn main() {
         }
         Some(("ls", cmd)) => {
             let path: PathBuf = cmd.get_one::<String>("PATH").unwrap().into();
+            let long = cmd.get_flag("long");
             match kind {
-                "file" => do_ls(open_hat_file(cache_dir, &matches), path),
-                _ => do_ls(open_hat_cmd(cache_dir), path),
+                "file" => do_ls(open_hat_file(cache_dir, &matches), path, long),
+                _ => do_ls(open_hat_cmd(cache_dir), path, long),
             }
         }
         _ => {

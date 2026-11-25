@@ -70,9 +70,9 @@ hatbin --hat_state_dir /path/to/hat-state \
        --backend file --backend-path /path/to/blobs \
        commit docs /path/to/source-dir
 
-# List families, snapshots, or directory contents inside snapshots (defaults to `/`)
+# List families, snapshots, or directory contents inside snapshots (defaults to `/`; `-l` for mode/size/mtime)
 hatbin --hat_state_dir /path/to/hat-state --backend file --backend-path /path/to/blobs \
-       ls
+       ls -l
 
 # Checkout latest snapshot, a specific snapshot, or a subpath into a local destination directory
 hatbin --hat_state_dir /path/to/hat-state --backend file --backend-path /path/to/blobs \

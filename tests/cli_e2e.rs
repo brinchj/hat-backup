@@ -793,3 +793,114 @@ fn cli_checkout_by_snapshot_path_and_subpath() {
         );
     }
 }
+
+#[test]
+fn cli_ls_long_shows_timestamps_and_metadata() {
+    let sb = sandbox();
+    write_fixture(
+        &sb.fixture,
+        &[
+            ("pinned.txt", FileSpec::file_mode(b"hello world", 0o640)),
+            ("sub/inner.txt", FileSpec::file(b"x")),
+            ("link", FileSpec::Symlink {
+                target: std::path::PathBuf::from("pinned.txt"),
+            }),
+        ],
+    );
+    // Set deterministic mtime = 1_700_000_000 -> 2023-11-14 22:13:20Z.
+    hat::util::set_times_nofollow(&sb.fixture.join("pinned.txt"), 1_700_000_000, 1_700_000_000)
+        .unwrap();
+
+    hatbin()
+        .args(["init", sb.repo.to_str().unwrap()])
+        .assert()
+        .success();
+
+    with_file_backend(&mut hatbin(), &sb)
+        .args(["commit", "alpha", sb.fixture.to_str().unwrap()])
+        .assert()
+        .success();
+
+    // 1. `ls -l` (defaulting to `/`) shows family with latest snapshot created time.
+    let out_root = with_file_backend(&mut hatbin(), &sb)
+        .args(["ls", "-l"])
+        .output()
+        .unwrap();
+    assert!(out_root.status.success());
+    let root_stdout = String::from_utf8_lossy(&out_root.stdout);
+    let alpha_line = root_stdout
+        .lines()
+        .find(|l| l.ends_with(" alpha"))
+        .unwrap_or_else(|| panic!("expected family 'alpha' line in ls -l: {:?}", root_stdout));
+    let root_cols: Vec<&str> = alpha_line.split_whitespace().collect();
+    assert_eq!(root_cols.len(), 5, "unexpected ls -l root row: {:?}", alpha_line);
+    assert_eq!(root_cols[0], "dr-xr-xr-x");
+    assert_eq!(root_cols[1], "-");
+    assert!(root_cols[2].len() == 10 && root_cols[3].ends_with('Z'));
+    assert_eq!(root_cols[4], "alpha");
+
+    // 2. `ls -l alpha` shows snapshot created time on `alpha/1`.
+    let out_snap = with_file_backend(&mut hatbin(), &sb)
+        .args(["ls", "-l", "alpha"])
+        .output()
+        .unwrap();
+    assert!(out_snap.status.success());
+    let snap_stdout = String::from_utf8_lossy(&out_snap.stdout);
+    let snap_line = snap_stdout
+        .lines()
+        .find(|l| l.ends_with(" alpha/1"))
+        .unwrap_or_else(|| panic!("expected 'alpha/1' line in ls -l alpha: {:?}", snap_stdout));
+    let snap_cols: Vec<&str> = snap_line.split_whitespace().collect();
+    assert_eq!(snap_cols.len(), 5, "unexpected ls -l snap row: {:?}", snap_line);
+    assert_eq!(snap_cols[0], "dr-xr-xr-x");
+    assert_eq!(snap_cols[1], "-");
+    assert_eq!(snap_cols[2], root_cols[2]);
+    assert_eq!(snap_cols[3], root_cols[3]);
+    assert_eq!(snap_cols[4], "alpha/1");
+
+    // 3. `ls -l alpha/1` shows file mode, size, exact mtime, dir mode, and symlink target.
+    let out_dir = with_file_backend(&mut hatbin(), &sb)
+        .args(["ls", "-l", "alpha/1"])
+        .output()
+        .unwrap();
+    assert!(out_dir.status.success());
+    let dir_stdout = String::from_utf8_lossy(&out_dir.stdout);
+
+    let file_line = dir_stdout
+        .lines()
+        .find(|l| l.ends_with(" alpha/1/pinned.txt"))
+        .unwrap_or_else(|| panic!("expected pinned.txt in ls -l alpha/1: {:?}", dir_stdout));
+    assert!(
+        file_line.starts_with("-rw-r----- ")
+            && file_line.contains(" 11 ")
+            && file_line.contains(" 2023-11-14 22:13:20Z "),
+        "expected mode -rw-r-----, size 11, and exact UTC mtime on pinned.txt, got: {:?}",
+        file_line
+    );
+
+    let sub_line = dir_stdout
+        .lines()
+        .find(|l| l.ends_with(" alpha/1/sub"))
+        .unwrap_or_else(|| panic!("expected sub dir in ls -l alpha/1: {:?}", dir_stdout));
+    assert!(
+        sub_line.starts_with('d') && sub_line.contains("Z alpha/1/sub"),
+        "expected dir mode and timestamp on sub, got: {:?}",
+        sub_line
+    );
+
+    let link_line = dir_stdout
+        .lines()
+        .find(|l| l.contains(" alpha/1/link -> pinned.txt"))
+        .unwrap_or_else(|| panic!("expected symlink arrow in ls -l alpha/1: {:?}", dir_stdout));
+    assert!(
+        link_line.starts_with('l') && link_line.contains("Z alpha/1/link -> pinned.txt"),
+        "expected symlink mode, timestamp, and target, got: {:?}",
+        link_line
+    );
+
+    // 4. Top-level `-l` still prints license text (no flag collision with `ls -l`).
+    let lic = hatbin().arg("-l").output().unwrap();
+    assert!(lic.status.success());
+    let lic_stdout = String::from_utf8_lossy(&lic.stdout);
+    assert!(lic_stdout.contains("Apache License") || lic_stdout.contains("clap"));
+}
