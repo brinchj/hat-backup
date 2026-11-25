@@ -319,6 +319,64 @@ fn cli_ls_lists_families_and_snapshots() {
         "expected 'alpha/<id>' in ls alpha output: {:?}",
         fam_stdout
     );
+
+    // Leading `/` must resolve into the family / snapshot / subdir rather than falling back to root.
+    let out_slash_fam = with_file_backend(&mut hatbin(), &sb)
+        .args(["ls", "/alpha"])
+        .output()
+        .unwrap();
+    assert!(out_slash_fam.status.success());
+    let slash_fam_stdout = String::from_utf8_lossy(&out_slash_fam.stdout);
+    assert!(
+        slash_fam_stdout.lines().any(|l| l.trim() == "alpha/1"),
+        "expected 'alpha/1' in ls /alpha output: {:?}",
+        slash_fam_stdout
+    );
+    assert!(
+        !slash_fam_stdout.lines().any(|l| l.trim() == "__hat__roots__"),
+        "ls /alpha must not return root families: {:?}",
+        slash_fam_stdout
+    );
+
+    let out_snap_root = with_file_backend(&mut hatbin(), &sb)
+        .args(["ls", "/alpha/1"])
+        .output()
+        .unwrap();
+    assert!(out_snap_root.status.success());
+    let snap_root_stdout = String::from_utf8_lossy(&out_snap_root.stdout);
+    assert!(
+        snap_root_stdout
+            .lines()
+            .any(|l| l.trim() == "/alpha/1/readme.txt"),
+        "expected '/alpha/1/readme.txt' in ls /alpha/1 output: {:?}",
+        snap_root_stdout
+    );
+
+    let out_subdir = with_file_backend(&mut hatbin(), &sb)
+        .args(["ls", "/alpha/1/nested"])
+        .output()
+        .unwrap();
+    assert!(out_subdir.status.success());
+    let subdir_stdout = String::from_utf8_lossy(&out_subdir.stdout);
+    assert!(
+        subdir_stdout
+            .lines()
+            .any(|l| l.trim() == "/alpha/1/nested/a.txt"),
+        "expected '/alpha/1/nested/a.txt' in ls /alpha/1/nested output: {:?}",
+        subdir_stdout
+    );
+
+    // Invalid snapshot ID under a leading-slash path must NOT return root families.
+    let out_bad = with_file_backend(&mut hatbin(), &sb)
+        .args(["ls", "/alpha/alpha/"])
+        .output()
+        .unwrap();
+    assert!(out_bad.status.success());
+    assert!(
+        String::from_utf8_lossy(&out_bad.stdout).trim().is_empty(),
+        "ls /alpha/alpha/ must produce empty output, got: {:?}",
+        String::from_utf8_lossy(&out_bad.stdout)
+    );
 }
 
 #[test]

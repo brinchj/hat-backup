@@ -124,15 +124,23 @@ impl<B: StoreBackend> Filesystem<B> {
     pub fn ls(&mut self, path: &Path) -> Result<Option<List>, HatError> {
         let snapshots = self.hat.list_snapshots();
 
-        let mut components = path.components();
+        // Skip leading `/` or `.` so `/family/1/dir` and `family/1/dir` resolve identically,
+        // while `/` and `.` list root families.
+        let mut components = path
+            .components()
+            .skip_while(|c| matches!(c, path::Component::RootDir | path::Component::CurDir));
 
         let snapshots: Vec<_> = match components.next() {
-            None | Some(path::Component::RootDir) => return Ok(Some(List::Root(snapshots))),
+            None => return Ok(Some(List::Root(snapshots))),
             Some(f) => snapshots
                 .into_iter()
                 .filter(|s| s.family_name == f.as_os_str().to_string_lossy())
                 .collect(),
         };
+
+        if snapshots.is_empty() {
+            return Ok(None);
+        }
 
         let snapshot_opt = match components.next() {
             None => return Ok(Some(List::Snapshots(snapshots))),
