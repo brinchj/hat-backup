@@ -44,6 +44,11 @@ table! {
         hash -> Nullable<Binary>,
         hash_ref -> Nullable<Binary>,
         snapshot_ts_utc -> Nullable<BigInt>,
+        dev -> Nullable<BigInt>,
+        ino -> Nullable<BigInt>,
+        ctime -> Nullable<BigInt>,
+        ctime_nsec -> Nullable<BigInt>,
+        mtime_nsec -> Nullable<BigInt>,
     }
 }
 
@@ -94,6 +99,11 @@ pub struct KeyData {
     pub hash: Option<Vec<u8>>,
     pub hash_ref: Option<Vec<u8>>,
     pub snapshot_ts_utc: Option<i64>,
+    pub dev: Option<i64>,
+    pub ino: Option<i64>,
+    pub ctime: Option<i64>,
+    pub ctime_nsec: Option<i64>,
+    pub mtime_nsec: Option<i64>,
 }
 
 #[derive(Insertable)]
@@ -117,4 +127,9 @@ pub struct NewKeyData<'a> {
     pub hash: Option<&'a [u8]>,
     pub hash_ref: Option<&'a [u8]>,
     pub snapshot_ts_utc: Option<i64>,
+    pub dev: Option<i64>,
+    pub ino: Option<i64>,
+    pub ctime: Option<i64>,
+    pub ctime_nsec: Option<i64>,
+    pub mtime_nsec: Option<i64>,
 }

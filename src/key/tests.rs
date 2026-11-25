@@ -106,6 +106,11 @@ fn rng_filesystem(size: usize) -> FileSystem {
                         group_id: None,
 
                         snapshot_ts_utc: 0,
+                        dev: None,
+                        ino: None,
+                        ctime_secs: None,
+                        ctime_nsec: None,
+                        mtime_nsec: None,
                     },
                 },
             };
@@ -135,6 +140,11 @@ fn rng_filesystem(size: usize) -> FileSystem {
                 group_id: None,
                 byte_length: None,
                 snapshot_ts_utc: 0,
+                dev: None,
+                ino: None,
+                ctime_secs: None,
+                ctime_nsec: None,
+                mtime_nsec: None,
             },
         },
     };
@@ -282,6 +292,11 @@ fn data_looks_unchanged_checks_kind_metadata_and_racily_clean_window() {
             group_id: Some(1000),
             byte_length: Some(len),
             snapshot_ts_utc: snapshot_ts,
+            dev: Some(42),
+            ino: Some(100),
+            ctime_secs: Some(mtime),
+            ctime_nsec: Some(123_456),
+            mtime_nsec: Some(789_012),
         },
     };
 
@@ -304,6 +319,30 @@ fn data_looks_unchanged_checks_kind_metadata_and_racily_clean_window() {
     assert!(!make(Data::FilePlaceholder, 1000, 1006, 9, 0o644).data_looks_unchanged(&stored));
     assert!(!make(Data::FilePlaceholder, 1000, 1006, 8, 0o755).data_looks_unchanged(&stored));
     assert!(!make(Data::DirPlaceholder, 1000, 1006, 8, 0o644).data_looks_unchanged(&stored));
+
+    // Stat-identity changes (inode, device, ctime, sub-second mtime/ctime) must NOT skip
+    // even when 1-second mtime and byte_length match and are older than snapshot_ts_utc.
+    let mut diff_ino = fresh.clone();
+    diff_ino.info.ino = Some(101);
+    assert!(!diff_ino.data_looks_unchanged(&stored));
+
+    let mut diff_dev = fresh.clone();
+    diff_dev.info.dev = Some(43);
+    assert!(!diff_dev.data_looks_unchanged(&stored));
+
+    let mut diff_mtime_nsec = fresh.clone();
+    diff_mtime_nsec.info.mtime_nsec = Some(789_013);
+    assert!(!diff_mtime_nsec.data_looks_unchanged(&stored));
+
+    let mut diff_ctime = fresh.clone();
+    diff_ctime.info.ctime_secs = Some(1001);
+    assert!(!diff_ctime.data_looks_unchanged(&stored));
+
+    let mut racy_ctime = fresh.clone();
+    racy_ctime.info.ctime_secs = Some(1006);
+    let mut stored_racy_ctime = stored.clone();
+    stored_racy_ctime.info.ctime_secs = Some(1006);
+    assert!(!racy_ctime.data_looks_unchanged(&stored_racy_ctime));
 
     // Symlinks: identical target with clean old mtime skips; changed target does not.
     let stored_link = make(Data::Symlink(PathBuf::from("a")), 1000, 1005, 1, 0o777);

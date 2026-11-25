@@ -192,6 +192,11 @@ fn insert_1_key_updated_empty(bench: &mut Bencher) {
                     permissions: None,
                     byte_length: None,
                     snapshot_ts_utc: 0,
+                    dev: None,
+                    ino: None,
+                    ctime_secs: None,
+                    ctime_nsec: None,
+                    mtime_nsec: None,
                 },
             },
         };

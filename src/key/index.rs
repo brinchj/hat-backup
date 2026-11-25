@@ -66,6 +66,15 @@ pub struct Info {
 
     pub byte_length: Option<u64>,
     pub snapshot_ts_utc: i64,
+
+    // Local stat-cache identity (not serialized to remote snapshots): detects file
+    // replacement (different dev/ino), backdated utimes / metadata changes (ctime),
+    // and sub-second modifications (mtime_nsec/ctime_nsec).
+    pub dev: Option<u64>,
+    pub ino: Option<u64>,
+    pub ctime_secs: Option<i64>,
+    pub ctime_nsec: Option<i64>,
+    pub mtime_nsec: Option<i64>,
 }
 
 impl Entry {
@@ -98,30 +107,30 @@ impl Entry {
         let Some(mtime) = self.info.modified_ts_secs else {
             return false;
         };
-        // Racily-clean guard: mtime is stored at 1-second resolution, so never short-circuit
-        // if the entry was modified in the same second as either scan (or in the future).
+        // Racily-clean guard: mtime/ctime seconds are checked against the 1-second
+        // snapshot_ts_utc clock, so never short-circuit if either timestamp is in the
+        // same second as (or after) either scan.
         if mtime >= them.info.snapshot_ts_utc || mtime >= self.info.snapshot_ts_utc {
             return false;
         }
-        (
-            self.parent_id,
-            &self.info.name,
-            self.info.modified_ts_secs,
-            self.info.byte_length,
-            &self.info.permissions,
-            self.info.user_id,
-            self.info.group_id,
-            self.info.created_ts_secs,
-        ) == (
-            them.parent_id,
-            &them.info.name,
-            them.info.modified_ts_secs,
-            them.info.byte_length,
-            &them.info.permissions,
-            them.info.user_id,
-            them.info.group_id,
-            them.info.created_ts_secs,
-        )
+        if let Some(ctime) = self.info.ctime_secs {
+            if ctime >= them.info.snapshot_ts_utc || ctime >= self.info.snapshot_ts_utc {
+                return false;
+            }
+        }
+        self.parent_id == them.parent_id
+            && self.info.name == them.info.name
+            && self.info.modified_ts_secs == them.info.modified_ts_secs
+            && self.info.mtime_nsec == them.info.mtime_nsec
+            && self.info.ctime_secs == them.info.ctime_secs
+            && self.info.ctime_nsec == them.info.ctime_nsec
+            && self.info.dev == them.info.dev
+            && self.info.ino == them.info.ino
+            && self.info.byte_length == them.info.byte_length
+            && self.info.permissions == them.info.permissions
+            && self.info.user_id == them.info.user_id
+            && self.info.group_id == them.info.group_id
+            && self.info.created_ts_secs == them.info.created_ts_secs
     }
 }
 
@@ -161,6 +170,11 @@ impl From<models::FileInfo> for Info {
                 models::Owner::UserGroup(ref ug) => Some(ug.group_id as u64),
             },
             snapshot_ts_utc: info.snapshot_ts_utc,
+            dev: None,
+            ino: None,
+            ctime_secs: None,
+            ctime_nsec: None,
+            mtime_nsec: None,
         }
     }
 }
@@ -189,6 +203,12 @@ impl Info {
 
             byte_length: meta.map(|m| m.len()),
             snapshot_ts_utc: chrono::Utc::now().timestamp(),
+
+            dev: meta.map(|m| m.dev()),
+            ino: meta.map(|m| m.ino()),
+            ctime_secs: meta.map(|m| m.ctime()),
+            ctime_nsec: meta.map(|m| m.ctime_nsec()),
+            mtime_nsec: meta.map(|m| m.mtime_nsec()),
         }
     }
 
@@ -329,6 +349,11 @@ impl InternalKeyIndex {
                 hash: hash_ref_opt.map(|h| &h.hash.bytes[..]),
                 hash_ref: hash_ref_bytes.as_ref().map(|v| &v[..]),
                 snapshot_ts_utc: Some(entry.info.snapshot_ts_utc),
+                dev: entry.info.dev.map(|x| x as i64),
+                ino: entry.info.ino.map(|x| x as i64),
+                ctime: entry.info.ctime_secs,
+                ctime_nsec: entry.info.ctime_nsec,
+                mtime_nsec: entry.info.mtime_nsec,
             };
 
             // Insert replaces when (node_id, committed) already exists.
@@ -398,6 +423,11 @@ impl InternalKeyIndex {
                     group_id: data.group_id.map(|x| x as u64),
                     byte_length: data.file_size.map(|x| x as u64),
                     snapshot_ts_utc: data.snapshot_ts_utc.unwrap_or(0),
+                    dev: data.dev.map(|x| x as u64),
+                    ino: data.ino.map(|x| x as u64),
+                    ctime_secs: data.ctime,
+                    ctime_nsec: data.ctime_nsec,
+                    mtime_nsec: data.mtime_nsec,
                 },
             }))
         } else {
@@ -457,6 +487,11 @@ impl InternalKeyIndex {
                             group_id: data.group_id.map(|x| x as u64),
                             byte_length: data.file_size.map(|x| x as u64),
                             snapshot_ts_utc: data.snapshot_ts_utc.unwrap_or(0),
+                            dev: data.dev.map(|x| x as u64),
+                            ino: data.ino.map(|x| x as u64),
+                            ctime_secs: data.ctime,
+                            ctime_nsec: data.ctime_nsec,
+                            mtime_nsec: data.mtime_nsec,
                         },
                     },
                     data.hash_ref

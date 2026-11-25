@@ -752,3 +752,57 @@ fn open_repository_acquires_fail_fast_exclusive_lock() {
     drop(first);
     let _reopened = open_hat(&sb.repo, &sb.backend);
 }
+
+#[test]
+fn replaced_file_with_identical_old_mtime_and_size_is_rehashed() {
+    use hat::util::{set_times_nofollow, system_time_secs};
+    use std::time::SystemTime;
+
+    let sb = sandbox();
+    init_repo(&sb.repo);
+
+    let fix1 = sb.root.path().join("fix1");
+    let fix2 = sb.root.path().join("fix2");
+    fs::create_dir_all(&fix1).unwrap();
+    fs::create_dir_all(&fix2).unwrap();
+    write_fixture(&fix1, &[("v.txt", FileSpec::file(b"version-one".to_vec()))]);
+    write_fixture(&fix2, &[("v.txt", FileSpec::file(b"version-two".to_vec()))]);
+
+    // Backdate both files to an identical old mtime strictly before snapshot_ts_utc
+    // (deterministically reproducing the 1-second boundary race and mv/cp -p swaps).
+    let old_ts = system_time_secs(SystemTime::now()) - 10;
+    set_times_nofollow(&fix1.join("v.txt"), old_ts, old_ts).unwrap();
+    set_times_nofollow(&fix2.join("v.txt"), old_ts, old_ts).unwrap();
+
+    let mut hat = open_hat(&sb.repo, &sb.backend);
+    commit_tree(&mut hat, "family", &fix1);
+    let snap1 = hat.latest_snapshot_id("family").unwrap();
+
+    // Commit a different file of the exact same size and backdated mtime (different inode).
+    commit_tree(&mut hat, "family", &fix2);
+
+    // Also test atomic rename replacement inside the same directory with identical old mtime.
+    let tmp = fix2.join("v.txt.tmp");
+    fs::write(&tmp, b"version-thr").unwrap();
+    set_times_nofollow(&tmp, old_ts, old_ts).unwrap();
+    fs::rename(&tmp, fix2.join("v.txt")).unwrap();
+    commit_tree(&mut hat, "family", &fix2);
+
+    let r1 = sb.root.path().join("r1");
+    let r2 = sb.root.path().join("r2");
+    let r3 = sb.root.path().join("r3");
+    fs::create_dir_all(&r1).unwrap();
+    fs::create_dir_all(&r2).unwrap();
+    fs::create_dir_all(&r3).unwrap();
+
+    hat.checkout_snapshot_in_dir("family".into(), snap1, r1.clone())
+        .unwrap();
+    assert_eq!(fs::read(r1.join("v.txt")).unwrap(), b"version-one");
+
+    hat.checkout_snapshot_in_dir("family".into(), snap1 + 1, r2.clone())
+        .unwrap();
+    assert_eq!(fs::read(r2.join("v.txt")).unwrap(), b"version-two");
+
+    hat.checkout_in_dir("family".into(), r3.clone()).unwrap();
+    assert_eq!(fs::read(r3.join("v.txt")).unwrap(), b"version-thr");
+}
