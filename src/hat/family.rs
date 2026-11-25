@@ -24,6 +24,7 @@ use crate::cbor_util;
 use std::ffi;
 use std::fs;
 use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use crate::util::{FileIterator, PathHandler};
 
@@ -177,7 +178,7 @@ fn parse_dir_data(chunk: &[u8], out: &mut Vec<walker::FileEntry>) -> Result<(), 
                 walker::Content::Dir(From::from(d)),
             ),
             models::Content::SymbolicLink(path) => {
-                let link = PathBuf::from(String::from_utf8(path).unwrap());
+                let link = PathBuf::from(ffi::OsStr::from_bytes(&path[..]));
                 (
                     key::Data::Symlink(link.clone()),
                     walker::Content::Link(link),
@@ -444,7 +445,7 @@ impl<B: StoreBackend> Family<B> {
                     }
                     key::Data::Symlink(path) => {
                         // Set symbolic link content.
-                        models::Content::SymbolicLink(path.to_str().unwrap().into())
+                        models::Content::SymbolicLink(path.as_os_str().as_bytes().to_vec())
                     }
                     _ => unreachable!("Unexpected key::Data"),
                 };

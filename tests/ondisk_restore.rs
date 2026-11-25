@@ -481,3 +481,156 @@ fn same_second_racily_clean_and_metadata_mutations() {
         assert_tree_eq(&sb.fixture, &leaf);
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_filename_ondisk_roundtrip() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::symlink;
+
+    let sb = sandbox();
+    init_repo(&sb.repo);
+
+    // Probe whether the host filesystem allows non-UTF-8 filenames (Linux ext4/tmpfs does;
+    // macOS APFS rejects invalid UTF-8 at the kernel level with EILSEQ).
+    let probe = sb.fixture.join(OsStr::from_bytes(b"probe_\xff\xfe"));
+    if let Err(e) = fs::write(&probe, b"probe") {
+        eprintln!(
+            "skipping on-disk non-UTF-8 filename test: filesystem rejected non-UTF-8 name ({})",
+            e
+        );
+        return;
+    }
+    fs::remove_file(&probe).unwrap();
+
+    let raw_file = sb.fixture.join(OsStr::from_bytes(b"file_\xff\xfe.bin"));
+    let raw_dir = sb.fixture.join(OsStr::from_bytes(b"dir_\x80\x81"));
+    let raw_child = raw_dir.join(OsStr::from_bytes(b"child_\xc3\x28.dat"));
+    let raw_link = sb.fixture.join(OsStr::from_bytes(b"link_\xfe"));
+
+    fs::write(&raw_file, b"raw-file-bytes").unwrap();
+    fs::create_dir_all(&raw_dir).unwrap();
+    fs::write(&raw_child, b"raw-child-bytes").unwrap();
+    symlink(OsStr::from_bytes(b"target_\xff\xfe"), &raw_link).unwrap();
+
+    {
+        let mut hat = open_hat(&sb.repo, &sb.backend);
+        commit_tree(&mut hat, "family", &sb.fixture);
+        hat.check().unwrap();
+    }
+
+    // Reopen and checkout directly.
+    {
+        let mut hat = open_hat(&sb.repo, &sb.backend);
+        let leaf = checkout_and_leaf(&mut hat, "family", &sb.fixture, &sb.restore);
+        assert_tree_eq(&sb.fixture, &leaf);
+    }
+
+    // Wipe local cache, recover from backend, and checkout again.
+    for entry in fs::read_dir(sb.repo.join("cache")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            fs::remove_dir_all(&path).unwrap();
+        } else {
+            fs::remove_file(&path).unwrap();
+        }
+    }
+    let restore2 = sb.root.path().join("restore_recovered");
+    {
+        let mut hat = open_hat(&sb.repo, &sb.backend);
+        hat.recover().unwrap();
+        hat.check().unwrap();
+        let leaf = checkout_and_leaf(&mut hat, "family", &sb.fixture, &restore2);
+        assert_tree_eq(&sb.fixture, &leaf);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_symlink_target_ondisk_roundtrip() {
+    use hat::util::{set_times_nofollow, system_time_secs};
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::symlink;
+    use std::time::SystemTime;
+
+    let sb = sandbox();
+    init_repo(&sb.repo);
+
+    let link_path = sb.fixture.join("raw_target_link");
+    let target_v1 = OsStr::from_bytes(b"bad_target_\xff\xfe/sub_\x80");
+    let target_v2 = OsStr::from_bytes(b"bad_target_\x81\x82/sub_\xc3\x28");
+
+    if let Err(e) = symlink(target_v1, &link_path) {
+        eprintln!(
+            "skipping on-disk non-UTF-8 symlink target test: filesystem rejected target ({})",
+            e
+        );
+        return;
+    }
+
+    let old_ts = system_time_secs(SystemTime::now()) - 60;
+    set_times_nofollow(&link_path, old_ts, old_ts).unwrap();
+
+    // Commit v1 and verify checkout restores exact raw symlink target bytes.
+    {
+        let mut hat = open_hat(&sb.repo, &sb.backend);
+        commit_tree(&mut hat, "family", &sb.fixture);
+        hat.check().unwrap();
+        let leaf = checkout_and_leaf(&mut hat, "family", &sb.fixture, &sb.restore);
+        assert_tree_eq(&sb.fixture, &leaf);
+        assert_eq!(
+            fs::read_link(leaf.join("raw_target_link"))
+                .unwrap()
+                .as_os_str()
+                .as_bytes(),
+            target_v1.as_bytes()
+        );
+    }
+
+    // Retarget to a different non-UTF-8 target with the same old mtime, commit v2.
+    fs::remove_file(&link_path).unwrap();
+    symlink(target_v2, &link_path).unwrap();
+    set_times_nofollow(&link_path, old_ts, old_ts).unwrap();
+
+    {
+        let mut hat = open_hat(&sb.repo, &sb.backend);
+        commit_tree(&mut hat, "family", &sb.fixture);
+        hat.check().unwrap();
+        let leaf = checkout_and_leaf(&mut hat, "family", &sb.fixture, &sb.restore);
+        assert_tree_eq(&sb.fixture, &leaf);
+        assert_eq!(
+            fs::read_link(leaf.join("raw_target_link"))
+                .unwrap()
+                .as_os_str()
+                .as_bytes(),
+            target_v2.as_bytes()
+        );
+    }
+
+    // Wipe cache, recover from backend, and verify non-UTF-8 target survives recovery.
+    for entry in fs::read_dir(sb.repo.join("cache")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            fs::remove_dir_all(&path).unwrap();
+        } else {
+            fs::remove_file(&path).unwrap();
+        }
+    }
+    let restore2 = sb.root.path().join("restore_recovered");
+    {
+        let mut hat = open_hat(&sb.repo, &sb.backend);
+        hat.recover().unwrap();
+        hat.check().unwrap();
+        let leaf = checkout_and_leaf(&mut hat, "family", &sb.fixture, &restore2);
+        assert_tree_eq(&sb.fixture, &leaf);
+        assert_eq!(
+            fs::read_link(leaf.join("raw_target_link"))
+                .unwrap()
+                .as_os_str()
+                .as_bytes(),
+            target_v2.as_bytes()
+        );
+    }
+}

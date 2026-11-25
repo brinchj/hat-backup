@@ -588,3 +588,126 @@ fn recover_fails_or_stays_safe_if_blobs_missing() {
         }
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_filename_roundtrip_vfs_and_recover() {
+    use crate::models::FileName;
+    use crate::vfs::fs::{FileReader, List};
+    use crate::vfs::Filesystem;
+    use std::ffi::{OsStr, OsString};
+    use std::os::unix::ffi::OsStrExt;
+
+    let (backend, mut hat, mut fam) = setup_family();
+
+    let dir_raw: &[u8] = b"dir_\xff\xfe";
+    let nested_raw: &[u8] = b"nested_\x80\x81.bin";
+    let top_raw: &[u8] = b"top_\xc3\x28.dat";
+    let link_raw: &[u8] = b"link_\xfe";
+    let link_target_raw: &[u8] = b"target_\xff\xfe/sub_\x80";
+
+    let dir_name = FileName::from(OsStr::from_bytes(dir_raw).to_owned());
+    let nested_name = FileName::from(OsStr::from_bytes(nested_raw).to_owned());
+    let top_name = FileName::from(OsStr::from_bytes(top_raw).to_owned());
+    let link_name = FileName::from(OsStr::from_bytes(link_raw).to_owned());
+    let link_target = PathBuf::from(OsStr::from_bytes(link_target_raw));
+
+    assert!(matches!(dir_name, FileName::RawAndLossyUtf8(_, _)));
+    assert!(matches!(nested_name, FileName::RawAndLossyUtf8(_, _)));
+    assert!(matches!(top_name, FileName::RawAndLossyUtf8(_, _)));
+    assert!(matches!(link_name, FileName::RawAndLossyUtf8(_, _)));
+
+    let dir_entry = key::Entry::new(None, dir_name.clone(), key::Data::DirPlaceholder, None);
+    let dir_id = fam.snapshot_direct(dir_entry, true, None).unwrap();
+
+    let nested_entry = key::Entry::new(
+        Some(dir_id),
+        nested_name.clone(),
+        key::Data::FilePlaceholder,
+        None,
+    );
+    fam.snapshot_direct(
+        nested_entry,
+        false,
+        Some(FileIterator::from_bytes(b"nested-raw-bytes".to_vec())),
+    )
+    .unwrap();
+
+    let top_entry = key::Entry::new(None, top_name.clone(), key::Data::FilePlaceholder, None);
+    fam.snapshot_direct(
+        top_entry,
+        false,
+        Some(FileIterator::from_bytes(b"top-raw-bytes".to_vec())),
+    )
+    .unwrap();
+
+    let link_entry = key::Entry::new(
+        None,
+        link_name.clone(),
+        key::Data::Symlink(link_target.clone()),
+        None,
+    );
+    fam.snapshot_direct(link_entry, false, None).unwrap();
+
+    fam.flush().unwrap();
+    hat.commit(&mut fam, None).unwrap();
+    hat.meta_commit().unwrap();
+    hat.data_flush().unwrap();
+    hat.check().unwrap();
+
+    let assert_snapshot_ok = |h: &mut HatRc<MemoryBackend>| {
+        let files = read_snapshot_files(h, "familyname", 1).unwrap();
+        let mut expected_nested_path = PathBuf::from(OsStr::from_bytes(dir_raw));
+        expected_nested_path.push(OsStr::from_bytes(nested_raw));
+        let expected_top_path = PathBuf::from(OsStr::from_bytes(top_raw));
+
+        assert_eq!(files.len(), 2);
+        assert_eq!(files.get(&expected_nested_path).unwrap(), b"nested-raw-bytes");
+        assert_eq!(files.get(&expected_top_path).unwrap(), b"top-raw-bytes");
+
+        // Verify symlink entry preserved exact non-UTF-8 name and non-UTF-8 target bytes.
+        let root_ref = snapshot_root_ref(h, "familyname", 1);
+        let root_entries = Family::<MemoryBackend>::fetch_dir_data(root_ref, h.hash_backend()).unwrap();
+        let link = root_entries
+            .iter()
+            .find(|(e, _)| {
+                let os: OsString = e.info.name.clone().into();
+                os.as_bytes() == link_raw
+            })
+            .expect("non-UTF-8 symlink entry missing");
+        match &link.1 {
+            Content::Link(target) => {
+                assert_eq!(target.as_os_str().as_bytes(), link_target_raw);
+                assert_eq!(target, &link_target);
+            }
+            other => panic!("expected Content::Link, got {:?}", other),
+        }
+    };
+
+    assert_snapshot_ok(&mut hat);
+
+    // Verify recovery into a fresh index preserves non-UTF-8 names and VFS lookup works.
+    let mut hat2 = setup_hat(backend);
+    hat2.recover().unwrap();
+    hat2.check().unwrap();
+    assert_snapshot_ok(&mut hat2);
+
+    let hash_backend = hat2.hash_backend();
+    let mut vfs = Filesystem::new(hat2);
+    let mut vfs_path = PathBuf::from("familyname/1");
+    vfs_path.push(OsStr::from_bytes(dir_raw));
+    vfs_path.push(OsStr::from_bytes(nested_raw));
+    let listing = vfs
+        .ls(&vfs_path)
+        .unwrap()
+        .expect("VFS ls must resolve non-UTF-8 path");
+    let List::Dir(entries) = listing else {
+        panic!("expected List::Dir for file entry");
+    };
+    assert_eq!(entries.len(), 1);
+    let Content::Data(href) = entries[0].1.clone() else {
+        panic!("expected Content::Data");
+    };
+    let mut reader = FileReader::new(hash_backend, href).unwrap();
+    assert_eq!(&*reader.read(0, 1024).unwrap(), b"nested-raw-bytes");
+}

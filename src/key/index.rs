@@ -14,9 +14,10 @@
 
 //! Local state for keys in the snapshot in progress (the "index").
 
+use std::ffi;
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
-use std::str;
 
 use diesel::connection::TransactionManager;
 use diesel::prelude::*;
@@ -307,7 +308,7 @@ impl InternalKeyIndex {
         {
             let link_path = match &entry.data {
                 &Data::DirPlaceholder | &Data::FilePlaceholder => None,
-                Data::Symlink(path) => path.to_str(),
+                Data::Symlink(path) => Some(path.as_os_str().as_bytes()),
                 &Data::FileHash(_) => unreachable!("Unexpected FileHash"),
             };
             assert!(!(link_path.is_some() && hash_ref_opt.is_some()));
@@ -324,7 +325,7 @@ impl InternalKeyIndex {
                 group_id: entry.info.group_id.map(|u| u as i64),
                 user_id: entry.info.user_id.map(|u| u as i64),
                 file_size: entry.info.byte_length.map(|b| b as i64),
-                symbolic_link_path: link_path.map(|s| s.as_bytes()),
+                symbolic_link_path: link_path,
                 hash: hash_ref_opt.map(|h| &h.hash.bytes[..]),
                 hash_ref: hash_ref_bytes.as_ref().map(|v| &v[..]),
                 snapshot_ts_utc: Some(entry.info.snapshot_ts_utc),
@@ -378,7 +379,7 @@ impl InternalKeyIndex {
                     (Some(h), None) => Data::FileHash(h),
                     (None, None) => Data::DirPlaceholder,
                     (None, Some(path)) => {
-                        Data::Symlink(PathBuf::from(str::from_utf8(&path[..]).unwrap()))
+                        Data::Symlink(PathBuf::from(ffi::OsStr::from_bytes(&path[..])))
                     }
                     (Some(_), Some(lp)) => {
                         unreachable!("Cannot have both file data and link path: {:?}", lp)
@@ -438,7 +439,7 @@ impl InternalKeyIndex {
                             (Some(_), None) => Data::FilePlaceholder,
                             (None, None) => Data::DirPlaceholder,
                             (None, Some(path)) => {
-                                Data::Symlink(PathBuf::from(str::from_utf8(&path[..]).unwrap()))
+                                Data::Symlink(PathBuf::from(ffi::OsStr::from_bytes(&path[..])))
                             }
                             (Some(_), Some(lp)) => {
                                 unreachable!("Cannot have both file data and link path: {:?}", lp)

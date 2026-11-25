@@ -311,4 +311,18 @@ fn data_looks_unchanged_checks_kind_metadata_and_racily_clean_window() {
         .data_looks_unchanged(&stored_link));
     assert!(!make(Data::Symlink(PathBuf::from("b")), 1000, 1006, 1, 0o777)
         .data_looks_unchanged(&stored_link));
+
+    // Non-UTF-8 symlink targets compare raw bytes accurately.
+    #[cfg(unix)]
+    {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let raw_a = PathBuf::from(OsStr::from_bytes(b"target_\xff\xfe"));
+        let raw_b = PathBuf::from(OsStr::from_bytes(b"target_\xff\xfd"));
+        let stored_raw = make(Data::Symlink(raw_a.clone()), 1000, 1005, 9, 0o777);
+        assert!(make(Data::Symlink(raw_a), 1000, 1006, 9, 0o777)
+            .data_looks_unchanged(&stored_raw));
+        assert!(!make(Data::Symlink(raw_b), 1000, 1006, 9, 0o777)
+            .data_looks_unchanged(&stored_raw));
+    }
 }
