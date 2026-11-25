@@ -47,6 +47,7 @@ pub mod vfs;
 
 // Re-export the main types
 
+pub use crate::blob::Compression;
 pub use crate::errors::HatError;
 pub use crate::hat::Hat;
 pub use crate::key::Entry as KeyEntry;

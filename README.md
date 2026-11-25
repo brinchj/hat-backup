@@ -15,10 +15,14 @@ chunk deduplication, authenticated encryption, and crash-tolerant recovery.
 
 Key design properties implemented today:
 
-- **Encrypted, fixed-size blobs:** Chunks are sealed with `XChaCha20-Poly1305-IETF`
-  (24-byte random nonces, metadata-bound AAD) via `libsodium-rs` (`#![forbid(unsafe_code)]`),
-  packed into random-padded `max_blob_size` blobs with keyed BLAKE2b-512
-  authentication tags covering both blob name and ciphertext.
+- **Encrypted, fixed-size blobs:** File streams are split with keyed FastCDC
+  content-defined chunking (16 KiB min / 64 KiB avg / 256 KiB max), hashed
+  uncompressed, compressed with Zstd by default (falling back to raw if
+  incompressible; configurable via `--compression zstd[:1-19]|none`), and
+  sealed with `XChaCha20-Poly1305-IETF` (24-byte random nonces, metadata-bound
+  AAD) via `libsodium-rs` (`#![forbid(unsafe_code)]`), packed into
+  random-padded `max_blob_size` blobs with keyed BLAKE2b-512 authentication
+  tags covering both blob name and ciphertext.
 - **Single local SQLite cache (`cache/index.sqlite3`):** All local state
   (`hashes`, `blobs`, `family`, `snapshots`, flat per-family `stat_cache`, and
   local `tree_edges`) lives in one `0600` WAL-mode SQLite file protected by a

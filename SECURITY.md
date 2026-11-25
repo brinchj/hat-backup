@@ -99,8 +99,15 @@ Be honest in reviews and releases:
 - **Traffic analysis:** Fixed blob size hides *fill level per object*, not
   *how many* blobs were uploaded or *when*. Timing and object-count side
   channels remain.
-- **Dedup:** Identical content still collapses to shared hashes; a capable
-  adversary with chosen-plaintext access may learn about content sharing.
+- **Compression side channel:** Zstd chunk compression is enabled by default
+  (chunks that do not shrink are stored raw). Compress-then-encrypt can leak
+  approximate data compressibility through total blob counts across large
+  uploads; pass `--compression none` (or configure it at `hat init`) when
+  strict volume/compressibility hiding is preferred over storage savings.
+- **Keyed chunking & dedup:** FastCDC uses a per-repository keyed seed derived
+  from the master key so chunk boundaries are not predictable without the key,
+  but identical content still collapses to shared hashes; a capable adversary
+  with chosen-plaintext access may learn about content sharing.
 - **Recovery rollback:** Without an out-of-band pinned root hash
   (`Hat::recover_with_expected_root`), a backend attacker who deletes recent
   blobs can cause `recover` to select an older surviving `SnapshotList`.

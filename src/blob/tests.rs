@@ -13,7 +13,10 @@
 // limitations under the License
 
 use crate::backend::{MemoryBackend, StoreBackend};
-use crate::blob::{Blob, BlobError, BlobIndex, BlobReader, BlobStore, ChunkRef, LeafType, NodeType};
+use crate::blob::{
+    Blob, BlobError, BlobIndex, BlobReader, BlobStore, ChunkRef, Compression, LeafType, NodeType,
+    Packing,
+};
 use crate::crypto;
 use crate::db;
 use crate::hash;
@@ -342,4 +345,125 @@ fn blob_ciphertext_authed_allbytes() {
     }
     // We did not corrupt the blob.
     assert_eq!(vs, verify(&keys, &bytes[..]).unwrap());
+}
+
+#[test]
+fn compression_roundtrip_and_incompressible_fallback() {
+    let backend = Arc::new(MemoryBackend::new());
+    let keys = Arc::new(crypto::keys::Keeper::new_for_testing());
+    let db = Arc::new(db::Index::new_for_testing());
+    let blob_index = Arc::new(BlobIndex::new(keys.clone(), db).unwrap());
+    let bs = BlobStore::new(keys.clone(), blob_index, backend.clone(), 256 * 1024);
+
+    assert_eq!(bs.compression(), Compression::Zstd(3));
+
+    // Compressible chunk shrinks significantly and records Packing::Zstd.
+    let repetitive = b"hat-backup-compressible-log-line\n".repeat(2048);
+    let rep_hash = hash::Hash::new(&keys, NodeType::Leaf, LeafType::FileChunk, &repetitive);
+    let rep_ref = bs.store(
+        &repetitive,
+        rep_hash,
+        NodeType::Leaf,
+        LeafType::FileChunk,
+        None,
+        Box::new(|| {}),
+    );
+    assert_eq!(rep_ref.persistent_ref.packing, Some(Packing::Zstd));
+    assert!(
+        rep_ref.persistent_ref.length < repetitive.len() / 10,
+        "expected strong zstd compression, got {} bytes from {}",
+        rep_ref.persistent_ref.length,
+        repetitive.len()
+    );
+
+    // High-entropy chunk does not inflate: falls back to raw (packing = None).
+    let mut state: u64 = 0x1234_5678_9abc_def0;
+    let incompressible: Vec<u8> = (0..65536)
+        .map(|_| {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 33) as u8
+        })
+        .collect();
+    let inc_hash = hash::Hash::new(&keys, NodeType::Leaf, LeafType::FileChunk, &incompressible);
+    let inc_ref = bs.store(
+        &incompressible,
+        inc_hash,
+        NodeType::Leaf,
+        LeafType::FileChunk,
+        None,
+        Box::new(|| {}),
+    );
+    assert_eq!(inc_ref.persistent_ref.packing, None);
+
+    // Switching to Compression::None stores even repetitive data raw.
+    bs.set_compression(Compression::None);
+    let raw_hash = hash::Hash::new(&keys, NodeType::Leaf, LeafType::FileChunk, &repetitive);
+    let raw_ref = bs.store(
+        &repetitive,
+        raw_hash,
+        NodeType::Leaf,
+        LeafType::FileChunk,
+        None,
+        Box::new(|| {}),
+    );
+    assert_eq!(raw_ref.persistent_ref.packing, None);
+
+    bs.flush();
+
+    assert_eq!(bs.retrieve(&rep_ref).unwrap().unwrap(), repetitive);
+    assert_eq!(bs.retrieve(&inc_ref).unwrap().unwrap(), incompressible);
+    assert_eq!(bs.retrieve(&raw_ref).unwrap().unwrap(), repetitive);
+}
+
+#[test]
+fn compression_parsing_and_display() {
+    assert_eq!("none".parse::<Compression>().unwrap(), Compression::None);
+    assert_eq!("off".parse::<Compression>().unwrap(), Compression::None);
+    assert_eq!("zstd".parse::<Compression>().unwrap(), Compression::Zstd(3));
+    assert_eq!("ZSTD:1".parse::<Compression>().unwrap(), Compression::Zstd(1));
+    assert_eq!(
+        "zstd:19".parse::<Compression>().unwrap(),
+        Compression::Zstd(19)
+    );
+
+    assert_eq!(Compression::None.to_string(), "none");
+    assert_eq!(Compression::Zstd(3).to_string(), "zstd");
+    assert_eq!(Compression::Zstd(7).to_string(), "zstd:7");
+
+    assert!("zstd:0".parse::<Compression>().is_err());
+    assert!("zstd:20".parse::<Compression>().is_err());
+    assert!("zstd:abc".parse::<Compression>().is_err());
+    assert!("gzip".parse::<Compression>().is_err());
+}
+
+#[test]
+fn corrupt_zstd_payload_returns_error() {
+    let keys = Arc::new(crypto::keys::Keeper::new_for_testing());
+    let mut blob = Blob::new(keys.clone(), 4096);
+    let mut href = crate::hash::tree::HashRef {
+        hash: hash::Hash { bytes: vec![1; 64] },
+        node: NodeType::Leaf,
+        leaf: LeafType::FileChunk,
+        info: None,
+        persistent_ref: ChunkRef {
+            blob_id: Some(1),
+            blob_name: b"testblob".to_vec(),
+            offset: 0,
+            length: 0,
+            packing: Some(Packing::Zstd),
+            key: None,
+        },
+    };
+    blob.try_append(b"definitely-not-valid-zstd-frame", &mut href)
+        .unwrap();
+    let ct = blob.finish(b"testblob").unwrap().to_vec();
+
+    let mut reader =
+        BlobReader::new(keys, b"testblob", crypto::CipherTextRef::new(&ct)).unwrap();
+    let err = reader.read_chunk(&href).unwrap_err();
+    assert!(
+        err.to_string().contains("zstd"),
+        "expected zstd decode error, got: {}",
+        err
+    );
 }

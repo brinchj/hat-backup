@@ -425,6 +425,14 @@ impl<B: StoreBackend> Hat<B> {
         self.commit_fault = Some(fault);
     }
 
+    pub fn compression(&self) -> blob::Compression {
+        self.blob_store.compression()
+    }
+
+    pub fn set_compression(&self, compression: blob::Compression) {
+        self.blob_store.set_compression(compression);
+    }
+
     /// Number of unfinished snapshots currently in the local index (always 0 under atomic commits).
     pub fn unfinished_snapshot_count(&mut self) -> usize {
         self.snapshot_index.list_not_done().len()

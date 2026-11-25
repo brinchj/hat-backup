@@ -364,6 +364,14 @@ impl Keeper {
         keyed_fingerprint(key.unsecure(), msg, salt, out);
     }
 
+    /// Derive a deterministic per-repository 64-bit seed for content-defined chunking.
+    pub fn chunker_seed(&self) -> u64 {
+        let mut out = [0u8; blake2b::BYTES_MIN];
+        let salt: &[u8; blake2b::SALTBYTES] = b"fastcdc~fastcdc~";
+        self.fingerprint(b"hat_fastcdc_seed", salt, &mut out);
+        u64::from_le_bytes(out[..8].try_into().expect("BLAKE2b min bytes >= 8"))
+    }
+
     pub fn blob_authentication(&self, blob_name: &[u8], blob: &[u8], out: &mut [u8]) {
         init_sodium();
         assert!(

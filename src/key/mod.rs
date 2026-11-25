@@ -279,32 +279,59 @@ impl<B: StoreBackend> Store<B> {
             },
         };
 
-        // Stream file chunks into a content-addressed FileChunk hash tree.
+        // Stream file chunks into a content-addressed FileChunk hash tree using
+        // keyed FastCDC content-defined chunking.
         let mut tree = self.hash_tree_writer(blob::LeafType::FileChunk);
-        let max_chunk_len = 128 * 1024;
-        let mut chunk = vec![0; max_chunk_len];
         let mut file_len = 0u64;
-        loop {
-            let mut chunk_len = 0;
-            while chunk_len < max_chunk_len {
-                chunk_len += match reader.read(&mut chunk[chunk_len..]) {
-                    Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(e) => {
-                        return Err(MsgError::from(format!(
-                            "failed reading file {:?}: {}",
-                            insert_entry.info.name.utf8(),
-                            e
-                        )));
-                    }
-                    Ok(0) => break,
-                    Ok(size) => size,
+        let max_blob_size = self.blob_store.max_blob_size();
+        if let Some((min_size, avg_size, max_size)) = fastcdc_params(max_blob_size) {
+            let chunker = fastcdc::v2020::StreamCDC::with_level_and_seed(
+                RetryOnInterrupt(reader),
+                min_size,
+                avg_size,
+                max_size,
+                fastcdc::v2020::Normalization::Level1,
+                self.keys.chunker_seed(),
+            );
+            for chunk_res in chunker {
+                let chunk = chunk_res.map_err(|e| {
+                    MsgError::from(format!(
+                        "failed reading file {:?}: {}",
+                        insert_entry.info.name.utf8(),
+                        e
+                    ))
+                })?;
+                if chunk.data.is_empty() {
+                    continue;
                 }
+                file_len += chunk.data.len() as u64;
+                tree.append(&chunk.data)?;
             }
-            if chunk_len == 0 {
-                break;
+        } else {
+            let max_chunk_len = (max_blob_size / 4).max(1);
+            let mut chunk = vec![0; max_chunk_len];
+            loop {
+                let mut chunk_len = 0;
+                while chunk_len < max_chunk_len {
+                    chunk_len += match reader.read(&mut chunk[chunk_len..]) {
+                        Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(e) => {
+                            return Err(MsgError::from(format!(
+                                "failed reading file {:?}: {}",
+                                insert_entry.info.name.utf8(),
+                                e
+                            )));
+                        }
+                        Ok(0) => break,
+                        Ok(size) => size,
+                    }
+                }
+                if chunk_len == 0 {
+                    break;
+                }
+                file_len += chunk_len as u64;
+                tree.append(&chunk[..chunk_len])?;
             }
-            file_len += chunk_len as u64;
-            tree.append(&chunk[..chunk_len])?
         }
 
         if let Some(s) = insert_entry.info.byte_length {
@@ -344,5 +371,46 @@ fn file_size_warning(name: &str, wanted: u64, got: u64) {
             "Could not read whole file (or it shrank): {} (wanted {}, got {})",
             name, wanted, got
         );
+    }
+}
+
+pub const FASTCDC_MIN_CHUNK_SIZE: usize = 16 * 1024;
+pub const FASTCDC_AVG_CHUNK_SIZE: usize = 64 * 1024;
+pub const FASTCDC_MAX_CHUNK_SIZE: usize = 256 * 1024;
+
+/// Choose FastCDC `(min, avg, max)` chunk sizes for a given `max_blob_size`.
+///
+/// Normal repositories (`max_blob_size >= 512 KiB`) always use the canonical
+/// 16 KiB / 64 KiB / 256 KiB parameters. Smaller test blob sizes scale down so
+/// a chunk never exceeds blob capacity; returns `None` if `max_blob_size` is
+/// below FastCDC's minimum supported max chunk size.
+fn fastcdc_params(max_blob_size: usize) -> Option<(usize, usize, usize)> {
+    if max_blob_size >= 512 * 1024 {
+        return Some((
+            FASTCDC_MIN_CHUNK_SIZE,
+            FASTCDC_AVG_CHUNK_SIZE,
+            FASTCDC_MAX_CHUNK_SIZE,
+        ));
+    }
+    let cap = (max_blob_size / 2) & !1;
+    if cap < fastcdc::v2020::MAXIMUM_MIN {
+        return None;
+    }
+    let max_size = cap.min(FASTCDC_MAX_CHUNK_SIZE);
+    let avg_size = ((max_size / 4).max(fastcdc::v2020::AVERAGE_MIN)) & !1;
+    let min_size = ((avg_size / 4).max(fastcdc::v2020::MINIMUM_MIN)) & !1;
+    Some((min_size, avg_size, max_size))
+}
+
+struct RetryOnInterrupt<R>(R);
+
+impl<R: io::Read> io::Read for RetryOnInterrupt<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            match self.0.read(buf) {
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                other => return other,
+            }
+        }
     }
 }

@@ -16,10 +16,68 @@ use crate::crypto;
 use crate::crypto::{CipherText, CipherTextRef, PlainTextRef};
 use crate::hash::tree::HashRef;
 
+use std::borrow::Cow;
+use std::io::Read;
 use std::mem;
 use std::sync::Arc;
 
-use super::BlobError;
+use super::{BlobError, Compression, Packing};
+
+/// Upper bound on a single decompressed chunk to guard against corrupt or
+/// malicious zstd frames expanding without limit.
+pub const MAX_DECOMPRESSED_CHUNK_BYTES: usize = 16 * 1024 * 1024;
+
+/// Compress `chunk` according to `compression`, returning the payload bytes to
+/// seal and the resulting wire `Packing`. If compression does not strictly
+/// reduce byte length, the original uncompressed bytes are returned with `None`.
+pub(crate) fn compress_chunk(
+    chunk: &[u8],
+    compression: Compression,
+) -> Result<(Cow<'_, [u8]>, Option<Packing>), BlobError> {
+    if chunk.is_empty() {
+        return Ok((Cow::Borrowed(chunk), None));
+    }
+    match compression {
+        Compression::None => Ok((Cow::Borrowed(chunk), None)),
+        Compression::Zstd(level) => {
+            let compressed = zstd::bulk::compress(chunk, level)
+                .map_err(|e| BlobError::from(format!("zstd compress failed: {}", e)))?;
+            if compressed.len() < chunk.len() {
+                Ok((Cow::Owned(compressed), Some(Packing::Zstd)))
+            } else {
+                Ok((Cow::Borrowed(chunk), None))
+            }
+        }
+    }
+}
+
+/// Decompress a decrypted chunk payload according to its recorded `Packing`.
+pub(crate) fn decompress_chunk(
+    data: Vec<u8>,
+    packing: Option<Packing>,
+) -> Result<Vec<u8>, BlobError> {
+    match packing {
+        None => Ok(data),
+        Some(Packing::Zstd) => {
+            let decoder = zstd::stream::read::Decoder::new(&data[..])
+                .map_err(|e| BlobError::from(format!("zstd decoder init failed: {}", e)))?;
+            let mut limited = decoder.take((MAX_DECOMPRESSED_CHUNK_BYTES + 1) as u64);
+            let mut out = Vec::new();
+            limited
+                .read_to_end(&mut out)
+                .map_err(|e| BlobError::from(format!("zstd decompress failed: {}", e)))?;
+            if out.len() > MAX_DECOMPRESSED_CHUNK_BYTES {
+                return Err(BlobError::from(format!(
+                    "zstd decompressed chunk exceeds limit of {} bytes",
+                    MAX_DECOMPRESSED_CHUNK_BYTES
+                )));
+            }
+            Ok(out)
+        }
+        Some(Packing::GZip) => Err(BlobError::from("unsupported chunk packing: gzip")),
+        Some(Packing::Snappy) => Err(BlobError::from("unsupported chunk packing: snappy")),
+    }
+}
 
 pub struct Blob {
     keys: Arc<crypto::keys::Keeper>,
@@ -40,6 +98,10 @@ impl Blob {
             overhead: crypto::sealed::desc::overhead() + crypto::authed::hash::DIGESTBYTES,
             max_len,
         }
+    }
+
+    pub fn max_len(&self) -> usize {
+        self.max_len
     }
 
     pub fn upperbound_len(&self) -> usize {
@@ -181,6 +243,7 @@ impl BlobReader {
     }
 
     pub fn read_chunk(&mut self, href: &HashRef) -> Result<Vec<u8>, BlobError> {
-        Ok(crypto::RefKey::unseal(&self.access_key, href, self.blob.collapse())?.into_vec())
+        let raw = crypto::RefKey::unseal(&self.access_key, href, self.blob.collapse())?.into_vec();
+        decompress_chunk(raw, href.persistent_ref.packing.clone())
     }
 }

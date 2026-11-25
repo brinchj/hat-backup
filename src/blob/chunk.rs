@@ -16,11 +16,79 @@ use crate::models;
 pub use crate::models::LeafType;
 
 use crate::cbor_util;
+use std::fmt;
+use std::str::FromStr;
+
+pub const DEFAULT_ZSTD_LEVEL: i32 = 3;
+pub const MIN_ZSTD_LEVEL: i32 = 1;
+pub const MAX_ZSTD_LEVEL: i32 = 19;
+
+/// Write-side chunk compression policy.
+///
+/// Chunks are always hashed before compression so deduplication works across
+/// compression setting changes. Chunks that do not shrink under compression are
+/// stored raw (`Packing::Raw`).
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum Compression {
+    None,
+    Zstd(i32),
+}
+
+impl Default for Compression {
+    fn default() -> Self {
+        Compression::Zstd(DEFAULT_ZSTD_LEVEL)
+    }
+}
+
+impl fmt::Display for Compression {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Compression::None => f.write_str("none"),
+            Compression::Zstd(DEFAULT_ZSTD_LEVEL) => f.write_str("zstd"),
+            Compression::Zstd(level) => write!(f, "zstd:{}", level),
+        }
+    }
+}
+
+impl FromStr for Compression {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let lower = s.trim().to_ascii_lowercase();
+        match lower.as_str() {
+            "none" | "off" => Ok(Compression::None),
+            "zstd" => Ok(Compression::Zstd(DEFAULT_ZSTD_LEVEL)),
+            _ => {
+                if let Some(level_str) = lower.strip_prefix("zstd:") {
+                    let level: i32 = level_str.parse().map_err(|_| {
+                        format!(
+                            "invalid zstd compression level '{}' (expected integer {}..={})",
+                            level_str, MIN_ZSTD_LEVEL, MAX_ZSTD_LEVEL
+                        )
+                    })?;
+                    if !(MIN_ZSTD_LEVEL..=MAX_ZSTD_LEVEL).contains(&level) {
+                        return Err(format!(
+                            "zstd compression level {} out of range (expected {}..={})",
+                            level, MIN_ZSTD_LEVEL, MAX_ZSTD_LEVEL
+                        ));
+                    }
+                    Ok(Compression::Zstd(level))
+                } else {
+                    Err(format!(
+                        "unsupported compression '{}' (expected 'zstd', 'zstd:<{}..={}>', or 'none')",
+                        s, MIN_ZSTD_LEVEL, MAX_ZSTD_LEVEL
+                    ))
+                }
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Packing {
     GZip,
     Snappy,
+    Zstd,
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +163,7 @@ impl From<models::ChunkRef> for ChunkRef {
                 models::Packing::Raw => None,
                 models::Packing::GZip => Some(Packing::GZip),
                 models::Packing::Snappy => Some(Packing::Snappy),
+                models::Packing::Zstd => Some(Packing::Zstd),
             },
             key: match chunk_ref.key {
                 models::Key::None => None,
@@ -119,6 +188,7 @@ impl ChunkRef {
                 None => models::Packing::Raw,
                 Some(Packing::GZip) => models::Packing::GZip,
                 Some(Packing::Snappy) => models::Packing::Snappy,
+                Some(Packing::Zstd) => models::Packing::Zstd,
             },
             key: match self.key {
                 None => models::Key::None,

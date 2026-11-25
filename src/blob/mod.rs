@@ -40,7 +40,7 @@ pub mod tests;
 mod benchmarks;
 
 pub use self::blob::{Blob, BlobReader};
-pub use self::chunk::{ChunkRef, Key, LeafType, NodeType};
+pub use self::chunk::{ChunkRef, Compression, Key, LeafType, NodeType, Packing};
 pub use self::index::{BlobDesc, BlobIndex};
 
 #[derive(Debug, thiserror::Error)]
@@ -76,6 +76,7 @@ pub struct StoreInner<B> {
     blob_desc: BlobDesc,
     blob_refs: Vec<Box<dyn FnOnce() + Send>>,
     blob: Blob,
+    compression: Compression,
     read_cache: LruCache<Vec<u8>, BlobReader>,
 }
 
@@ -100,6 +101,7 @@ impl<B: StoreBackend> StoreInner<B> {
             blob_desc: Default::default(),
             blob_refs: Vec::new(),
             blob: Blob::new(keys, max_blob_size),
+            compression: Compression::default(),
             read_cache: LruCache::new(NonZeroUsize::new(64).unwrap()),
         };
         bs.reserve_new_blob();
@@ -161,14 +163,17 @@ impl<B: StoreBackend> StoreInner<B> {
             // We are not going to store an empty chunk, so commit it ASAP.
             thread::spawn(callback);
         } else {
+            let (payload, packing) =
+                blob::compress_chunk(chunk, self.compression).expect("chunk compression failed");
+            href.persistent_ref.packing = packing;
             href.persistent_ref.blob_id = Some(self.blob_desc.id);
             href.persistent_ref.blob_name = self.blob_desc.name.clone();
-            if let Err(()) = self.blob.try_append(chunk, &mut href) {
+            if let Err(()) = self.blob.try_append(&payload, &mut href) {
                 self.flush();
                 href.persistent_ref.blob_id = Some(self.blob_desc.id);
                 href.persistent_ref.blob_name = self.blob_desc.name.clone();
 
-                self.blob.try_append(chunk, &mut href).unwrap();
+                self.blob.try_append(&payload, &mut href).unwrap();
             }
 
             // Queue the callback; we will trigger it when the blob has been pushed.
@@ -349,5 +354,17 @@ impl<B: StoreBackend> BlobStore<B> {
         let mut guard = self.lock();
         guard.flush();
         guard.blob_index.flush();
+    }
+
+    pub fn max_blob_size(&self) -> usize {
+        self.lock().blob.max_len()
+    }
+
+    pub fn compression(&self) -> Compression {
+        self.lock().compression
+    }
+
+    pub fn set_compression(&self, compression: Compression) {
+        self.lock().compression = compression;
     }
 }

@@ -1434,3 +1434,91 @@ fn cli_ls_recursive_and_latest_and_browse_non_tty() {
         non_tty_err
     );
 }
+
+#[test]
+fn cli_compression_flag_config_and_validation() {
+    let sb = sandbox();
+    write_fixture(
+        &sb.fixture,
+        &[("notes.txt", FileSpec::file(b"compressible line\n".repeat(4096)))],
+    );
+
+    // `init --compression none` persists compression in config.json and reports it in JSON.
+    let init_out = hatbin()
+        .args([
+            "init",
+            sb.repo.to_str().unwrap(),
+            "--backend",
+            "file",
+            "--backend-path",
+            sb.backend.to_str().unwrap(),
+            "--compression",
+            "none",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(init_out.status.success());
+    let init_json: serde_json::Value = serde_json::from_slice(&init_out.stdout).unwrap();
+    assert_eq!(init_json["compression"], "none");
+
+    let cfg: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(sb.repo.join("config.json")).unwrap()).unwrap();
+    assert_eq!(cfg["compression"], "none");
+
+    // Commit with default config (`none`), then override on CLI with `--compression zstd:1`.
+    hatbin()
+        .args([
+            "commit",
+            "docs",
+            sb.fixture.to_str().unwrap(),
+            "--state-dir",
+            sb.repo.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    hatbin()
+        .args([
+            "commit",
+            "docs",
+            sb.fixture.to_str().unwrap(),
+            "--state-dir",
+            sb.repo.to_str().unwrap(),
+            "--compression",
+            "zstd:1",
+        ])
+        .assert()
+        .success();
+
+    hatbin()
+        .args(["check", "--state-dir", sb.repo.to_str().unwrap()])
+        .assert()
+        .success();
+
+    hatbin()
+        .args([
+            "checkout",
+            "docs/latest",
+            sb.restore.to_str().unwrap(),
+            "--state-dir",
+            sb.repo.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert_tree_eq(&sb.fixture, &sb.restore);
+
+    // Invalid compression specs fail non-zero cleanly.
+    for bad in ["bogus", "zstd:0", "zstd:20"] {
+        hatbin()
+            .args([
+                "check",
+                "--state-dir",
+                sb.repo.to_str().unwrap(),
+                "--compression",
+                bad,
+            ])
+            .assert()
+            .failure();
+    }
+}

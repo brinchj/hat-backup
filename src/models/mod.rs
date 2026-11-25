@@ -41,6 +41,8 @@ pub enum Packing {
     GZip,
     #[serde(rename = "s")]
     Snappy,
+    #[serde(rename = "z")]
+    Zstd,
 }
 
 #[derive(Serialize, Deserialize)]

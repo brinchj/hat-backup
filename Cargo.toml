@@ -18,6 +18,7 @@ crossterm = "0.28"
 diesel = { version = "2", default-features = false, features = ["sqlite", "chrono", "returning_clauses_for_sqlite_3_35", "32-column-tables"] }
 diesel_migrations = { version = "2", features = ["sqlite"] }
 env_logger = "0.11"
+fastcdc = "5"
 fuser = { version = "0.16", optional = true, features = ["libfuse"] }
 hex = "0.4"
 libc = "0.2"
@@ -29,6 +30,7 @@ secstr = "0.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+zstd = { version = "0.14", default-features = false }
 
 [features]
 benchmarks = []

@@ -44,6 +44,8 @@ struct RepoConfig {
     backend: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     backend_path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    compression: Option<String>,
 }
 
 enum BackendSpec {
@@ -157,20 +159,20 @@ fn require_state_dir(matches: &ArgMatches) -> PathBuf {
         })
 }
 
-fn resolve_backend(state_dir: &Path, matches: &ArgMatches) -> BackendSpec {
-    let file_cfg = load_repo_config(state_dir);
-
+fn resolve_backend(file_cfg: &RepoConfig, matches: &ArgMatches) -> BackendSpec {
     let cli_or_env_backend = matches.get_one::<String>("backend").cloned();
     let cli_or_env_path = matches.get_one::<PathBuf>("backend_path").cloned();
 
-    let backend_path = cli_or_env_path.or(file_cfg.backend_path);
-    let kind = cli_or_env_backend.or(file_cfg.backend).or_else(|| {
-        if backend_path.is_some() {
-            Some("file".to_string())
-        } else {
-            None
-        }
-    });
+    let backend_path = cli_or_env_path.or_else(|| file_cfg.backend_path.clone());
+    let kind = cli_or_env_backend
+        .or_else(|| file_cfg.backend.clone())
+        .or_else(|| {
+            if backend_path.is_some() {
+                Some("file".to_string())
+            } else {
+                None
+            }
+        });
 
     match kind.as_deref() {
         Some("file") => {
@@ -193,19 +195,45 @@ fn resolve_backend(state_dir: &Path, matches: &ArgMatches) -> BackendSpec {
     }
 }
 
-fn open_hat_cmd(state_dir: PathBuf) -> HatRc<backend::CmdBackend> {
-    let backend = Arc::new(backend::CmdBackend::new());
-    Hat::open_repository(state_dir, backend, MAX_BLOB_SIZE).unwrap_or_else(|e| fail(e))
+fn resolve_compression(file_cfg: &RepoConfig, matches: &ArgMatches) -> hat::Compression {
+    let spec = matches
+        .get_one::<String>("compression")
+        .map(String::as_str)
+        .or(file_cfg.compression.as_deref());
+    match spec {
+        Some(raw) => raw.parse::<hat::Compression>().unwrap_or_else(|e| fail(e)),
+        None => hat::Compression::default(),
+    }
 }
 
-fn open_hat_file(state_dir: PathBuf, backend_path: PathBuf) -> HatRc<backend::FileBackend> {
+fn open_hat_cmd(
+    state_dir: PathBuf,
+    compression: hat::Compression,
+) -> HatRc<backend::CmdBackend> {
+    let backend = Arc::new(backend::CmdBackend::new());
+    let hat = Hat::open_repository(state_dir, backend, MAX_BLOB_SIZE).unwrap_or_else(|e| fail(e));
+    hat.set_compression(compression);
+    hat
+}
+
+fn open_hat_file(
+    state_dir: PathBuf,
+    backend_path: PathBuf,
+    compression: hat::Compression,
+) -> HatRc<backend::FileBackend> {
     let backend = Arc::new(backend::FileBackend::new(backend_path));
-    Hat::open_repository(state_dir, backend, MAX_BLOB_SIZE).unwrap_or_else(|e| fail(e))
+    let hat = Hat::open_repository(state_dir, backend, MAX_BLOB_SIZE).unwrap_or_else(|e| fail(e));
+    hat.set_compression(compression);
+    hat
 }
 
 fn do_init(dir: PathBuf, matches: &ArgMatches, out: &OutputConfig) {
     let backend = matches.get_one::<String>("backend").cloned();
     let backend_path = matches.get_one::<PathBuf>("backend_path").cloned();
+    let compression = matches
+        .get_one::<String>("compression")
+        .map(|s| s.parse::<hat::Compression>().unwrap_or_else(|e| fail(e)))
+        .map(|c| c.to_string());
 
     let effective_backend = match (backend.as_deref(), backend_path.as_ref()) {
         (Some("file"), None) => {
@@ -241,10 +269,11 @@ fn do_init(dir: PathBuf, matches: &ArgMatches, out: &OutputConfig) {
         .unwrap_or_else(|e| fail(e));
     hat::crypto::keys::Keeper::write_new_universal_key(&dir).unwrap_or_else(|e| fail(e));
 
-    if effective_backend.is_some() || backend_path.is_some() {
+    if effective_backend.is_some() || backend_path.is_some() || compression.is_some() {
         let cfg = RepoConfig {
             backend: effective_backend.clone(),
             backend_path: backend_path.clone(),
+            compression: compression.clone(),
         };
         write_repo_config(&dir, &cfg);
     }
@@ -254,6 +283,7 @@ fn do_init(dir: PathBuf, matches: &ArgMatches, out: &OutputConfig) {
             "state_dir": dir,
             "backend": effective_backend,
             "backend_path": backend_path,
+            "compression": compression.unwrap_or_else(|| hat::Compression::default().to_string()),
         }));
     } else if !out.quiet {
         eprintln!("Initialized repository at {}", dir.display());
@@ -903,6 +933,14 @@ fn build_cli() -> Command {
                 .help("Blob storage directory for the file backend"),
         )
         .arg(
+            Arg::new("compression")
+                .long("compression")
+                .value_name("SPEC")
+                .global(true)
+                .env("HAT_COMPRESSION")
+                .help("Chunk compression: 'zstd', 'zstd:<1-19>', or 'none' (default: zstd)"),
+        )
+        .arg(
             Arg::new("quiet")
                 .short('q')
                 .long("quiet")
@@ -1135,21 +1173,25 @@ fn main() {
     }
 
     let state_dir = require_state_dir(&matches);
-    let backend = resolve_backend(&state_dir, &matches);
+    let file_cfg = load_repo_config(&state_dir);
+    let backend = resolve_backend(&file_cfg, &matches);
+    let compression = resolve_compression(&file_cfg, &matches);
 
     match matches.subcommand() {
         Some(("resume", _)) => match backend {
-            BackendSpec::File(p) => do_resume(open_hat_file(state_dir, p), &out),
-            BackendSpec::Cmd => do_resume(open_hat_cmd(state_dir), &out),
+            BackendSpec::File(p) => do_resume(open_hat_file(state_dir, p, compression), &out),
+            BackendSpec::Cmd => do_resume(open_hat_cmd(state_dir, compression), &out),
         },
         Some(("commit", cmd)) => {
             let family = cmd.get_one::<String>("FAMILY").unwrap().to_owned();
             let source_dir = cmd.get_one::<PathBuf>("SOURCE_DIR").unwrap().clone();
             match backend {
                 BackendSpec::File(p) => {
-                    do_commit(open_hat_file(state_dir, p), family, source_dir, &out)
+                    do_commit(open_hat_file(state_dir, p, compression), family, source_dir, &out)
                 }
-                BackendSpec::Cmd => do_commit(open_hat_cmd(state_dir), family, source_dir, &out),
+                BackendSpec::Cmd => {
+                    do_commit(open_hat_cmd(state_dir, compression), family, source_dir, &out)
+                }
             }
         }
         Some(("checkout", cmd)) => {
@@ -1157,17 +1199,25 @@ fn main() {
             let dest_dir = cmd.get_one::<PathBuf>("DEST_DIR").unwrap().clone();
             let id = cmd.get_one::<u64>("id").copied();
             match backend {
-                BackendSpec::File(p) => {
-                    do_checkout(open_hat_file(state_dir, p), snapshot_path, id, dest_dir, &out)
-                }
-                BackendSpec::Cmd => {
-                    do_checkout(open_hat_cmd(state_dir), snapshot_path, id, dest_dir, &out)
-                }
+                BackendSpec::File(p) => do_checkout(
+                    open_hat_file(state_dir, p, compression),
+                    snapshot_path,
+                    id,
+                    dest_dir,
+                    &out,
+                ),
+                BackendSpec::Cmd => do_checkout(
+                    open_hat_cmd(state_dir, compression),
+                    snapshot_path,
+                    id,
+                    dest_dir,
+                    &out,
+                ),
             }
         }
         Some(("recover", _)) => match backend {
-            BackendSpec::File(p) => do_recover(open_hat_file(state_dir, p), &out),
-            BackendSpec::Cmd => do_recover(open_hat_cmd(state_dir), &out),
+            BackendSpec::File(p) => do_recover(open_hat_file(state_dir, p, compression), &out),
+            BackendSpec::Cmd => do_recover(open_hat_cmd(state_dir, compression), &out),
         },
         Some(("delete", cmd)) => {
             let snapshot_arg = cmd.get_one::<String>("SNAPSHOT").unwrap();
@@ -1175,24 +1225,32 @@ fn main() {
             let (family, selector) = parse_delete_target(snapshot_arg, id_arg);
             let dry_run = cmd.get_flag("dry_run");
             match backend {
-                BackendSpec::File(p) => {
-                    do_delete(open_hat_file(state_dir, p), family, selector, dry_run, &out)
-                }
-                BackendSpec::Cmd => {
-                    do_delete(open_hat_cmd(state_dir), family, selector, dry_run, &out)
-                }
+                BackendSpec::File(p) => do_delete(
+                    open_hat_file(state_dir, p, compression),
+                    family,
+                    selector,
+                    dry_run,
+                    &out,
+                ),
+                BackendSpec::Cmd => do_delete(
+                    open_hat_cmd(state_dir, compression),
+                    family,
+                    selector,
+                    dry_run,
+                    &out,
+                ),
             }
         }
         Some(("gc", cmd)) => {
             let dry_run = cmd.get_flag("dry_run");
             match backend {
-                BackendSpec::File(p) => do_gc(open_hat_file(state_dir, p), dry_run, &out),
-                BackendSpec::Cmd => do_gc(open_hat_cmd(state_dir), dry_run, &out),
+                BackendSpec::File(p) => do_gc(open_hat_file(state_dir, p, compression), dry_run, &out),
+                BackendSpec::Cmd => do_gc(open_hat_cmd(state_dir, compression), dry_run, &out),
             }
         }
         Some(("check", _)) => match backend {
-            BackendSpec::File(p) => do_check(open_hat_file(state_dir, p), &out),
-            BackendSpec::Cmd => do_check(open_hat_cmd(state_dir), &out),
+            BackendSpec::File(p) => do_check(open_hat_file(state_dir, p, compression), &out),
+            BackendSpec::Cmd => do_check(open_hat_cmd(state_dir, compression), &out),
         },
         Some(("mount", cmd)) => {
             #[cfg(feature = "fuse")]
@@ -1200,13 +1258,13 @@ fn main() {
                 let mountpoint = cmd.get_one::<PathBuf>("MOUNTPOINT").unwrap();
                 match backend {
                     BackendSpec::File(p) => {
-                        let hat = open_hat_file(state_dir, p);
+                        let hat = open_hat_file(state_dir, p, compression);
                         hat::vfs::Fuse::new(hat)
                             .mount(mountpoint)
                             .unwrap_or_else(|e| fail(e));
                     }
                     BackendSpec::Cmd => {
-                        let hat = open_hat_cmd(state_dir);
+                        let hat = open_hat_cmd(state_dir, compression);
                         hat::vfs::Fuse::new(hat)
                             .mount(mountpoint)
                             .unwrap_or_else(|e| fail(e));
@@ -1215,7 +1273,7 @@ fn main() {
             }
             #[cfg(not(feature = "fuse"))]
             {
-                let _ = (cmd, state_dir, backend);
+                let _ = (cmd, state_dir, backend, compression);
                 fail(
                     "FUSE support was not enabled at build time. Rebuild with '--features fuse'",
                 );
@@ -1226,10 +1284,16 @@ fn main() {
             let long = cmd.get_flag("long");
             let recursive = cmd.get_flag("recursive");
             match backend {
-                BackendSpec::File(p) => {
-                    do_ls(open_hat_file(state_dir, p), path, long, recursive, &out)
+                BackendSpec::File(p) => do_ls(
+                    open_hat_file(state_dir, p, compression),
+                    path,
+                    long,
+                    recursive,
+                    &out,
+                ),
+                BackendSpec::Cmd => {
+                    do_ls(open_hat_cmd(state_dir, compression), path, long, recursive, &out)
                 }
-                BackendSpec::Cmd => do_ls(open_hat_cmd(state_dir), path, long, recursive, &out),
             }
         }
         Some(("browse", cmd)) => {
@@ -1239,8 +1303,12 @@ fn main() {
                 .cloned()
                 .unwrap_or_else(|| env::current_dir().unwrap_or_else(|e| fail(e)));
             match backend {
-                BackendSpec::File(p) => do_browse(open_hat_file(state_dir, p), start_path, dest_dir),
-                BackendSpec::Cmd => do_browse(open_hat_cmd(state_dir), start_path, dest_dir),
+                BackendSpec::File(p) => {
+                    do_browse(open_hat_file(state_dir, p, compression), start_path, dest_dir)
+                }
+                BackendSpec::Cmd => {
+                    do_browse(open_hat_cmd(state_dir, compression), start_path, dest_dir)
+                }
             }
         }
         _ => unreachable!("clap enforces subcommand_required(true)"),

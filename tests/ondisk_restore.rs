@@ -867,3 +867,137 @@ fn backup_automatically_excludes_own_state_cache_and_backend_dirs() {
         "Directly backing up Hat state_dir must skip it cleanly"
     );
 }
+
+#[test]
+fn fastcdc_deduplicates_across_byte_insertion() {
+    let sb = sandbox();
+    init_repo(&sb.repo);
+
+    // 4 MiB incompressible file: inserting 137 bytes at offset 0 would invalidate
+    // every fixed-size chunk and add >= 4 MiB (>= 4 blobs). FastCDC resynchronizes
+    // after the first chunk boundary so almost all chunks deduplicate.
+    let base = random_bytes_seeded(777, 4 * 1024 * 1024);
+    let mut shifted = random_bytes_seeded(778, 137);
+    shifted.extend_from_slice(&base);
+
+    let fix1 = sb.root.path().join("fix1");
+    let fix2 = sb.root.path().join("fix2");
+    fs::create_dir_all(&fix1).unwrap();
+    fs::create_dir_all(&fix2).unwrap();
+    write_fixture(&fix1, &[("payload.bin", FileSpec::file(base.clone()))]);
+    write_fixture(&fix2, &[("payload.bin", FileSpec::file(shifted.clone()))]);
+
+    let mut hat = open_hat(&sb.repo, &sb.backend);
+    commit_tree(&mut hat, "cdc", &fix1);
+    let snap1 = hat.latest_snapshot_id("cdc").unwrap();
+    let blobs_after_1 = backend_files(&sb.backend).len();
+
+    commit_tree(&mut hat, "cdc", &fix2);
+    let snap2 = hat.latest_snapshot_id("cdc").unwrap();
+    let blobs_after_2 = backend_files(&sb.backend).len();
+    hat.check().unwrap();
+
+    let delta = blobs_after_2 - blobs_after_1;
+    assert!(
+        delta <= 2,
+        "expected FastCDC to deduplicate shifted 4 MiB file (delta <= 2 blobs), got {} (before={}, after={})",
+        delta,
+        blobs_after_1,
+        blobs_after_2
+    );
+
+    // Verify both snapshots restore byte-for-byte identically.
+    let r1 = sb.root.path().join("r1");
+    let r2 = sb.root.path().join("r2");
+    fs::create_dir_all(&r1).unwrap();
+    fs::create_dir_all(&r2).unwrap();
+    hat.checkout_snapshot_in_dir("cdc".into(), snap1, r1.clone())
+        .unwrap();
+    hat.checkout_snapshot_in_dir("cdc".into(), snap2, r2.clone())
+        .unwrap();
+    assert_eq!(fs::read(r1.join("payload.bin")).unwrap(), base);
+    assert_eq!(fs::read(r2.join("payload.bin")).unwrap(), shifted);
+}
+
+#[test]
+fn zstd_compression_reduces_blobs_and_dedups_across_modes() {
+    // 4 MiB of compressible structured text.
+    let line = b"2026-11-25T12:00:00Z INFO hat::backup chunk=verified status=ok\n";
+    let mut text = Vec::with_capacity(4 * 1024 * 1024);
+    while text.len() < 4 * 1024 * 1024 {
+        text.extend_from_slice(line);
+    }
+
+    // Repo A: default compression (zstd).
+    let sb_zstd = sandbox();
+    init_repo(&sb_zstd.repo);
+    write_fixture(&sb_zstd.fixture, &[("app.log", FileSpec::file(text.clone()))]);
+    {
+        let mut hat = open_hat(&sb_zstd.repo, &sb_zstd.backend);
+        assert_eq!(hat.compression(), hat::Compression::Zstd(3));
+        commit_tree(&mut hat, "logs", &sb_zstd.fixture);
+        hat.check().unwrap();
+    }
+    let blobs_zstd = backend_files(&sb_zstd.backend).len();
+    assert!(
+        blobs_zstd <= 2,
+        "expected compressed 4 MiB text to fit in <= 2 blobs, got {}",
+        blobs_zstd
+    );
+
+    // Repo B: compression disabled.
+    let sb_none = sandbox();
+    init_repo(&sb_none.repo);
+    write_fixture(&sb_none.fixture, &[("app.log", FileSpec::file(text.clone()))]);
+    {
+        let mut hat = open_hat(&sb_none.repo, &sb_none.backend);
+        hat.set_compression(hat::Compression::None);
+        commit_tree(&mut hat, "logs", &sb_none.fixture);
+        hat.check().unwrap();
+    }
+    let blobs_none = backend_files(&sb_none.backend).len();
+    assert!(
+        blobs_none >= 4,
+        "expected uncompressed 4 MiB text to require >= 4 blobs (1 MiB each), got {}",
+        blobs_none
+    );
+
+    // Switching Repo A to Compression::None must still deduplicate the existing
+    // 4 MiB file (hashed uncompressed) and survive cache wipe + recover.
+    let fix2 = sb_zstd.root.path().join("fix2");
+    fs::create_dir_all(&fix2).unwrap();
+    write_fixture(
+        &fix2,
+        &[
+            ("app.log", FileSpec::file(text.clone())),
+            ("extra.txt", FileSpec::file(b"small extra note".to_vec())),
+        ],
+    );
+    {
+        let mut hat = open_hat(&sb_zstd.repo, &sb_zstd.backend);
+        hat.set_compression(hat::Compression::None);
+        commit_tree(&mut hat, "logs", &fix2);
+        hat.check().unwrap();
+    }
+    let blobs_after_mixed = backend_files(&sb_zstd.backend).len();
+    assert!(
+        blobs_after_mixed <= blobs_zstd + 2,
+        "expected uncompressed-hash dedup across compression toggle, grew from {} to {} blobs",
+        blobs_zstd,
+        blobs_after_mixed
+    );
+
+    // Wipe cache, recover from backend, and verify full restore of compressed + raw chunks.
+    fs::remove_dir_all(sb_zstd.repo.join("cache")).unwrap();
+    fs::create_dir_all(sb_zstd.repo.join("cache")).unwrap();
+    let mut hat = open_hat(&sb_zstd.repo, &sb_zstd.backend);
+    hat.recover().unwrap();
+    hat.check().unwrap();
+    hat.checkout_in_dir("logs".into(), sb_zstd.restore.clone())
+        .unwrap();
+    assert_eq!(fs::read(sb_zstd.restore.join("app.log")).unwrap(), text);
+    assert_eq!(
+        fs::read(sb_zstd.restore.join("extra.txt")).unwrap(),
+        b"small extra note"
+    );
+}
