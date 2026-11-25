@@ -365,8 +365,10 @@ fn cli_ls_lists_families_and_snapshots() {
     assert!(out_slash_fam.status.success());
     let slash_fam_stdout = String::from_utf8_lossy(&out_slash_fam.stdout);
     assert!(
-        slash_fam_stdout.lines().any(|l| l.trim() == "alpha/1"),
-        "expected 'alpha/1' in ls /alpha output: {:?}",
+        slash_fam_stdout
+            .lines()
+            .any(|l| l.trim().starts_with("alpha/") && l.trim().ends_with("Z-1")),
+        "expected 'alpha/<ts>Z-1' in ls /alpha output: {:?}",
         slash_fam_stdout
     );
     assert!(
@@ -867,7 +869,7 @@ fn cli_ls_long_shows_timestamps_and_metadata() {
     assert!(root_cols[2].len() == 10 && root_cols[3].ends_with('Z'));
     assert_eq!(root_cols[4], "alpha");
 
-    // 2. `ls -l alpha` shows snapshot created time on `alpha/1`.
+    // 2. `ls -l alpha` shows snapshot created time on `alpha/<ts>Z-1`.
     let out_snap = with_file_backend(&mut hatbin(), &sb)
         .args(["ls", "-l", "alpha"])
         .output()
@@ -876,15 +878,24 @@ fn cli_ls_long_shows_timestamps_and_metadata() {
     let snap_stdout = String::from_utf8_lossy(&out_snap.stdout);
     let snap_line = snap_stdout
         .lines()
-        .find(|l| l.ends_with(" alpha/1"))
-        .unwrap_or_else(|| panic!("expected 'alpha/1' line in ls -l alpha: {:?}", snap_stdout));
+        .find(|l| l.ends_with("Z-1"))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected 'alpha/<ts>Z-1' line in ls -l alpha: {:?}",
+                snap_stdout
+            )
+        });
     let snap_cols: Vec<&str> = snap_line.split_whitespace().collect();
     assert_eq!(snap_cols.len(), 5, "unexpected ls -l snap row: {:?}", snap_line);
     assert_eq!(snap_cols[0], "dr-xr-xr-x");
     assert_eq!(snap_cols[1], "-");
     assert_eq!(snap_cols[2], root_cols[2]);
     assert_eq!(snap_cols[3], root_cols[3]);
-    assert_eq!(snap_cols[4], "alpha/1");
+    assert!(
+        snap_cols[4].starts_with("alpha/") && snap_cols[4].ends_with("Z-1"),
+        "unexpected composite snapshot path: {:?}",
+        snap_cols[4]
+    );
 
     // 3. `ls -l alpha/1` shows file mode, size, exact mtime, dir mode, and symlink target.
     let out_dir = with_file_backend(&mut hatbin(), &sb)
@@ -1016,7 +1027,7 @@ fn cli_ergonomics_help_global_flags_config_and_delete_dry_run() {
     );
     let commit_err = String::from_utf8_lossy(&commit_out.stderr);
     assert!(
-        commit_err.contains("Committed docs/1"),
+        commit_err.contains("Committed docs/") && commit_err.trim().ends_with("Z-1"),
         "expected confirmation on stderr, got: {:?}",
         commit_err
     );
@@ -1054,7 +1065,12 @@ fn cli_ergonomics_help_global_flags_config_and_delete_dry_run() {
         .output()
         .unwrap();
     assert!(del_dry.status.success());
-    assert!(String::from_utf8_lossy(&del_dry.stdout).contains("Would delete docs/1"));
+    let del_dry_out = String::from_utf8_lossy(&del_dry.stdout);
+    assert!(
+        del_dry_out.contains("Would delete docs/") && del_dry_out.trim().ends_with("Z-1"),
+        "expected composite snapshot name in dry-run delete, got: {:?}",
+        del_dry_out
+    );
 
     // Snapshot 1 still exists after dry-run.
     hatbin()
@@ -1088,7 +1104,7 @@ fn cli_ergonomics_help_global_flags_config_and_delete_dry_run() {
     assert!(del_real.status.success());
     let del_err = String::from_utf8_lossy(&del_real.stderr);
     assert!(
-        del_err.contains("Deleted docs/1") && del_err.contains("hat gc"),
+        del_err.contains("Deleted docs/") && del_err.contains("Z-1") && del_err.contains("hat gc"),
         "expected delete confirmation and gc hint on stderr, got: {:?}",
         del_err
     );
@@ -1247,17 +1263,90 @@ fn cli_ls_recursive_and_latest_and_browse_non_tty() {
         .unwrap()
         .lines()
         .collect();
+    assert_eq!(root_lines.len(), 7, "got: {:?}", root_lines);
+    assert_eq!(root_lines[0], "docs");
+    let snap_path = root_lines[1];
+    assert!(
+        snap_path.starts_with("docs/") && snap_path.ends_with("Z-1"),
+        "expected composite snapshot path, got: {:?}",
+        snap_path
+    );
     assert_eq!(
         root_lines,
         vec![
-            "docs",
-            "docs/1",
-            "docs/1/sub",
-            "docs/1/sub/a.txt",
-            "docs/1/sub/deep",
-            "docs/1/sub/deep/b.txt",
-            "docs/1/top.txt",
+            "docs".to_string(),
+            snap_path.to_string(),
+            format!("{}/sub", snap_path),
+            format!("{}/sub/a.txt", snap_path),
+            format!("{}/sub/deep", snap_path),
+            format!("{}/sub/deep/b.txt", snap_path),
+            format!("{}/top.txt", snap_path),
         ]
+    );
+
+    // Composite snapshot name AND unique date prefix work for `ls`, `checkout`, and `delete --dry-run`.
+    let date_prefix = &snap_path["docs/".len().."docs/".len() + 10]; // YYYY-MM-DD
+    hatbin()
+        .args([
+            "ls",
+            &format!("docs/{}", date_prefix),
+            "--state-dir",
+            sb.repo.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let prefix_restore = sb.root.path().join("prefix_restore");
+    hatbin()
+        .args([
+            "checkout",
+            &format!("docs/{}/sub/deep", date_prefix),
+            prefix_restore.to_str().unwrap(),
+            "--state-dir",
+            sb.repo.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert_eq!(fs::read(prefix_restore.join("b.txt")).unwrap(), b"b");
+
+    hatbin()
+        .args([
+            "delete",
+            snap_path,
+            "--dry-run",
+            "--state-dir",
+            sb.repo.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // Commit a second snapshot on the same day -> date prefix becomes ambiguous and fails cleanly listing both!
+    hatbin()
+        .args([
+            "commit",
+            "docs",
+            sb.fixture.to_str().unwrap(),
+            "--state-dir",
+            sb.repo.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let ambig = hatbin()
+        .args([
+            "checkout",
+            &format!("docs/{}", date_prefix),
+            sb.restore.to_str().unwrap(),
+            "--state-dir",
+            sb.repo.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!ambig.status.success());
+    let ambig_err = String::from_utf8_lossy(&ambig.stderr);
+    assert!(
+        ambig_err.contains("Ambiguous") && ambig_err.contains("Z-1") && ambig_err.contains("Z-2"),
+        "expected ambiguity error listing both snapshots, got: {:?}",
+        ambig_err
     );
 
     // `ls -lR docs/latest` resolves `latest`, shows modes & timestamps recursively.

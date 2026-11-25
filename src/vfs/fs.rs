@@ -123,6 +123,7 @@ pub enum WalkItem {
     Snapshot {
         family: String,
         snapshot_id: u64,
+        name: String,
         path: PathBuf,
         created: chrono::DateTime<chrono::Utc>,
     },
@@ -139,17 +140,19 @@ pub struct Filesystem<B: StoreBackend> {
 
 fn find_snapshot_by_selector<'a>(
     snapshots: &'a [db::SnapshotStatus],
+    family_name: &str,
     selector: &str,
-) -> Option<&'a db::SnapshotStatus> {
-    if selector == "latest" {
-        snapshots
-            .iter()
-            .filter(|s| s.hash_ref.is_some())
-            .max_by_key(|s| s.info.snapshot_id)
-    } else {
-        snapshots
-            .iter()
-            .find(|s| format!("{}", s.info.snapshot_id) == selector)
+) -> Result<Option<&'a db::SnapshotStatus>, HatError> {
+    match hat::match_snapshot_selector(snapshots, selector) {
+        hat::SelectorLookup::Found(s) => Ok(Some(s)),
+        hat::SelectorLookup::NotFound => Ok(None),
+        hat::SelectorLookup::Ambiguous(candidates) => Err(format!(
+            "Ambiguous snapshot selector '{}' in family '{}'; matches: {}",
+            selector,
+            family_name,
+            candidates.join(", ")
+        )
+        .into()),
     }
 }
 
@@ -171,12 +174,16 @@ impl<B: StoreBackend> Filesystem<B> {
             .components()
             .skip_while(|c| matches!(c, path::Component::RootDir | path::Component::CurDir));
 
+        let family_name_str;
         let snapshots: Vec<_> = match components.next() {
             None => return Ok(Some(List::Root(snapshots))),
-            Some(f) => snapshots
-                .into_iter()
-                .filter(|s| s.family_name == f.as_os_str().to_string_lossy())
-                .collect(),
+            Some(f) => {
+                family_name_str = f.as_os_str().to_string_lossy().into_owned();
+                snapshots
+                    .into_iter()
+                    .filter(|s| s.family_name == family_name_str)
+                    .collect()
+            }
         };
 
         if snapshots.is_empty() {
@@ -185,7 +192,11 @@ impl<B: StoreBackend> Filesystem<B> {
 
         let snapshot_opt = match components.next() {
             None => return Ok(Some(List::Snapshots(snapshots))),
-            Some(n) => find_snapshot_by_selector(&snapshots, &n.as_os_str().to_string_lossy()),
+            Some(n) => find_snapshot_by_selector(
+                &snapshots,
+                &family_name_str,
+                &n.as_os_str().to_string_lossy(),
+            )?,
         };
 
         if let Some(href_bytes) = snapshot_opt.and_then(|s| s.hash_ref.as_ref()) {
@@ -250,11 +261,12 @@ impl<B: StoreBackend> Filesystem<B> {
                     });
                 }
                 for si in fam_snaps {
-                    let snap_path =
-                        PathBuf::from(&si.family_name).join(si.info.snapshot_id.to_string());
+                    let snap_name = si.display_name();
+                    let snap_path = PathBuf::from(&si.family_name).join(&snap_name);
                     visitor(WalkItem::Snapshot {
                         family: si.family_name.clone(),
                         snapshot_id: si.info.snapshot_id,
+                        name: snap_name,
                         path: snap_path.clone(),
                         created: si.created,
                     });
@@ -279,11 +291,12 @@ impl<B: StoreBackend> Filesystem<B> {
 
         let Some(snap_comp) = components.next() else {
             for si in fam_snaps {
-                let snap_path =
-                    PathBuf::from(&si.family_name).join(si.info.snapshot_id.to_string());
+                let snap_name = si.display_name();
+                let snap_path = PathBuf::from(&si.family_name).join(&snap_name);
                 visitor(WalkItem::Snapshot {
                     family: si.family_name.clone(),
                     snapshot_id: si.info.snapshot_id,
+                    name: snap_name,
                     path: snap_path.clone(),
                     created: si.created,
                 });
@@ -296,7 +309,7 @@ impl<B: StoreBackend> Filesystem<B> {
         };
 
         let selector = snap_comp.as_os_str().to_string_lossy().into_owned();
-        let Some(href_bytes) = find_snapshot_by_selector(&fam_snaps, &selector)
+        let Some(href_bytes) = find_snapshot_by_selector(&fam_snaps, &family_name, &selector)?
             .and_then(|s| s.hash_ref.as_ref())
             .cloned()
         else {
@@ -395,13 +408,15 @@ impl<B: StoreBackend> Filesystem<B> {
                     WalkItem::Snapshot {
                         family,
                         snapshot_id,
+                        name,
                         path: p,
                         ..
                     } => {
                         if match_full_path {
                             p.to_string_lossy().to_lowercase().contains(&needle)
                         } else {
-                            snapshot_id.to_string().contains(&needle)
+                            name.to_lowercase().contains(&needle)
+                                || snapshot_id.to_string().contains(&needle)
                                 || family.to_lowercase().contains(&needle)
                         }
                     }

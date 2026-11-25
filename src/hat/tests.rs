@@ -1087,3 +1087,75 @@ fn stat_cache_prunes_deleted_files_on_commit_and_deleted_families_on_gc() {
     assert_eq!(hat.db.lock().stat_cache_count_for_family(fam2_id), 0);
     assert_eq!(hat.db.lock().stat_cache_count_for_family(fam1_id), 1);
 }
+
+#[test]
+fn snapshot_selector_supports_composite_id_latest_and_date_prefix() {
+    use super::{match_snapshot_selector, SelectorLookup};
+    use crate::db;
+    use chrono::TimeZone;
+
+    let make = |id: u64, ts: i64| db::SnapshotStatus {
+        family_name: "docs".to_string(),
+        info: db::SnapshotInfo {
+            unique_id: id,
+            family_id: 1,
+            snapshot_id: id,
+        },
+        hash: None,
+        hash_ref: None,
+        created: chrono::Utc.timestamp_opt(ts, 0).single().unwrap(),
+        msg: None,
+        status: db::SnapshotWorkStatus::CommitComplete,
+    };
+
+    // 2026-11-24T10:00:00Z, 2026-11-25T12:41:09Z, 2026-11-25T12:41:09Z (same-second tie!)
+    let snaps = vec![
+        make(1, 1_795_514_400),
+        make(2, 1_795_610_469),
+        make(3, 1_795_610_469),
+    ];
+
+    assert_eq!(snaps[0].display_name(), "2026-11-24T10-00-00Z-1");
+    assert_eq!(snaps[1].display_name(), "2026-11-25T12-41-09Z-2");
+    assert_eq!(snaps[2].display_name(), "2026-11-25T12-41-09Z-3");
+
+    // `latest` picks highest snapshot_id.
+    assert!(matches!(
+        match_snapshot_selector(&snaps, "latest"),
+        SelectorLookup::Found(s) if s.info.snapshot_id == 3
+    ));
+    // Exact composite name breaks same-second ties uniquely.
+    assert!(matches!(
+        match_snapshot_selector(&snaps, "2026-11-25T12-41-09Z-2"),
+        SelectorLookup::Found(s) if s.info.snapshot_id == 2
+    ));
+    // Short numeric ID works directly.
+    assert!(matches!(
+        match_snapshot_selector(&snaps, "1"),
+        SelectorLookup::Found(s) if s.info.snapshot_id == 1
+    ));
+    // Unique date prefix with colons or spaces normalizes cleanly.
+    assert!(matches!(
+        match_snapshot_selector(&snaps, "2026-11-24"),
+        SelectorLookup::Found(s) if s.info.snapshot_id == 1
+    ));
+    assert!(matches!(
+        match_snapshot_selector(&snaps, "2026-11-24 10:00"),
+        SelectorLookup::Found(s) if s.info.snapshot_id == 1
+    ));
+    // Ambiguous date prefix lists all matching composite names in ID order.
+    match match_snapshot_selector(&snaps, "2026-11-25T12:41") {
+        SelectorLookup::Ambiguous(names) => {
+            assert_eq!(
+                names,
+                vec!["2026-11-25T12-41-09Z-2", "2026-11-25T12-41-09Z-3"]
+            );
+        }
+        _ => panic!("expected Ambiguous"),
+    }
+    // Non-matching selector returns NotFound.
+    assert!(matches!(
+        match_snapshot_selector(&snaps, "notanid"),
+        SelectorLookup::NotFound
+    ));
+}

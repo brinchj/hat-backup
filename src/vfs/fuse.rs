@@ -132,7 +132,7 @@ impl<B: backend::StoreBackend> Fuse<B> {
                     attr.mtime = created;
 
                     self.add_file(File {
-                        name: format!("{}", s.info.snapshot_id).into(),
+                        name: s.display_name().into(),
                         file_type: NodeKind::ParentTop(hash_ref),
                         attr,
                         parent: Some(family_ino),

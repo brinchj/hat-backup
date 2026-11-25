@@ -133,6 +133,70 @@ fn index_db_path(root: PathBuf) -> String {
 
 pub const SYNTHETIC_ROOTS_FAMILY: &str = "__hat__roots__";
 
+/// Result of resolving a user-supplied snapshot selector within a family.
+pub enum SelectorLookup<'a> {
+    Found(&'a db::SnapshotStatus),
+    NotFound,
+    Ambiguous(Vec<String>),
+}
+
+/// Resolve a snapshot selector against a family's snapshots.
+///
+/// Accepts:
+/// 1. `"latest"` (highest `snapshot_id`)
+/// 2. Exact composite name (`YYYY-MM-DDTHH-MM-SSZ-<id>`)
+/// 3. Exact numeric snapshot ID (`1`, `2`, ...)
+/// 4. Unique prefix of the composite name (e.g. `2026-11-25` or `2026-11-25T12:41`,
+///    normalizing `:` to `-` and spaces to `T`)
+pub fn match_snapshot_selector<'a>(
+    snapshots: &'a [db::SnapshotStatus],
+    selector: &str,
+) -> SelectorLookup<'a> {
+    if selector.is_empty() {
+        return SelectorLookup::NotFound;
+    }
+
+    if selector == "latest" {
+        return match snapshots.iter().max_by_key(|s| s.info.snapshot_id) {
+            Some(s) => SelectorLookup::Found(s),
+            None => SelectorLookup::NotFound,
+        };
+    }
+
+    if let Some(s) = snapshots.iter().find(|s| s.display_name() == selector) {
+        return SelectorLookup::Found(s);
+    }
+
+    if let Ok(id) = selector.parse::<u64>() {
+        if let Some(s) = snapshots.iter().find(|s| s.info.snapshot_id == id) {
+            return SelectorLookup::Found(s);
+        }
+    }
+
+    let normalized: String = selector
+        .chars()
+        .map(|c| match c {
+            ':' => '-',
+            ' ' => 'T',
+            other => other,
+        })
+        .collect();
+
+    let mut matches: Vec<&db::SnapshotStatus> = snapshots
+        .iter()
+        .filter(|s| s.display_name().starts_with(&normalized))
+        .collect();
+
+    match matches.len() {
+        0 => SelectorLookup::NotFound,
+        1 => SelectorLookup::Found(matches[0]),
+        _ => {
+            matches.sort_by_key(|s| s.info.snapshot_id);
+            SelectorLookup::Ambiguous(matches.into_iter().map(|s| s.display_name()).collect())
+        }
+    }
+}
+
 fn synthetic_roots_family() -> String {
     SYNTHETIC_ROOTS_FAMILY.to_string()
 }
@@ -1005,46 +1069,42 @@ impl<B: StoreBackend> Hat<B> {
                     (info.snapshot_id.to_string(), dir_ref)
                 }
             },
-            Some(id_os) => {
+            Some(selector_os) => {
                 if snapshot_id_override.is_some() {
                     return Err(format!(
-                        "Cannot specify snapshot ID both in '{}' and via --id",
+                        "Cannot specify snapshot both in '{}' and via --id",
                         snapshot_path.display()
                     )
                     .into());
                 }
-                let id_str = id_os.to_string_lossy();
-                if id_str == "latest" {
-                    let (info, _h, dir_ref) = match self.snapshot_index.latest(&family_name) {
-                        Some((i, h, Some(r))) => (i, h, r),
-                        _ => {
-                            return Err(format!(
-                                "Tried to checkout family '{}' before first completed commit",
-                                family_name
-                            )
-                            .into())
-                        }
-                    };
-                    (info.snapshot_id.to_string(), dir_ref)
-                } else {
-                    let id: u64 = id_str.parse().map_err(|_| {
-                        format!(
-                            "Invalid snapshot ID '{}' in '{}' (expected a numeric ID or 'latest')",
-                            id_str,
-                            snapshot_path.display()
+                let selector = selector_os.to_string_lossy();
+                let family_snaps: Vec<_> = self
+                    .list_user_snapshots()
+                    .into_iter()
+                    .filter(|s| s.family_name == family_name && s.hash_ref.is_some())
+                    .collect();
+                match match_snapshot_selector(&family_snaps, &selector) {
+                    SelectorLookup::Found(snap) => {
+                        let href_bytes = snap.hash_ref.as_ref().expect("filtered hash_ref.is_some");
+                        let dir_ref = hash::tree::HashRef::from_bytes(&href_bytes[..])?;
+                        (snap.display_name(), dir_ref)
+                    }
+                    SelectorLookup::Ambiguous(candidates) => {
+                        return Err(format!(
+                            "Ambiguous snapshot selector '{}' in family '{}'; matches: {}",
+                            selector,
+                            family_name,
+                            candidates.join(", ")
                         )
-                    })?;
-                    let (_info, _h, dir_ref) = match self.snapshot_index.lookup(&family_name, id) {
-                        Some((i, h, Some(r))) => (i, h, r),
-                        _ => {
-                            return Err(format!(
-                                "No complete snapshot found for family '{}' with id {}",
-                                family_name, id
-                            )
-                            .into())
-                        }
-                    };
-                    (id.to_string(), dir_ref)
+                        .into());
+                    }
+                    SelectorLookup::NotFound => {
+                        return Err(format!(
+                            "No complete snapshot matching '{}' found in family '{}' (use snapshot name, numeric ID, date prefix, or 'latest')",
+                            selector, family_name
+                        )
+                        .into());
+                    }
                 }
             }
         };

@@ -127,6 +127,18 @@ pub struct SnapshotStatus {
     pub status: SnapshotWorkStatus,
 }
 
+impl SnapshotStatus {
+    /// Canonical filesystem-safe, chronologically sortable snapshot name:
+    /// `YYYY-MM-DDTHH-MM-SSZ-<id>` (e.g. `2026-11-25T12-41-09Z-1`).
+    pub fn display_name(&self) -> String {
+        format!(
+            "{}-{}",
+            self.created.format("%Y-%m-%dT%H-%M-%SZ"),
+            self.info.snapshot_id
+        )
+    }
+}
+
 fn tag_to_work_status(tag: tags::Tag) -> SnapshotWorkStatus {
     match tag {
         tags::Tag::Reserved | tags::Tag::InProgress => SnapshotWorkStatus::CommitInProgress,

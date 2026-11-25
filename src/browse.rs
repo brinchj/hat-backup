@@ -149,19 +149,31 @@ fn parse_start_parts<B: StoreBackend>(
         }
     }
 
-    // Resolve `latest` snapshot alias into its concrete snapshot ID so navigation breadcrumbs
-    // and checkout paths stay canonical.
-    if parts.len() >= 2 && parts[1] == "latest" {
+    // Resolve any snapshot selector (`latest`, numeric ID, date prefix, or composite name)
+    // into its canonical composite snapshot name so breadcrumbs and checkout paths stay canonical.
+    if parts.len() >= 2 {
         let family = parts[0].to_string_lossy().into_owned();
-        if let Some(latest_id) = fs
+        let selector = parts[1].to_string_lossy().into_owned();
+        let family_snaps: Vec<_> = fs
             .hat_mut()
             .list_user_snapshots()
             .into_iter()
             .filter(|s| s.family_name == family && s.hash_ref.is_some())
-            .map(|s| s.info.snapshot_id)
-            .max()
-        {
-            parts[1] = OsString::from(latest_id.to_string());
+            .collect();
+        match hat::hat::match_snapshot_selector(&family_snaps, &selector) {
+            hat::hat::SelectorLookup::Found(s) => {
+                parts[1] = OsString::from(s.display_name());
+            }
+            hat::hat::SelectorLookup::Ambiguous(candidates) => {
+                return Err(format!(
+                    "Ambiguous snapshot selector '{}' in family '{}'; matches: {}",
+                    selector,
+                    family,
+                    candidates.join(", ")
+                )
+                .into());
+            }
+            hat::hat::SelectorLookup::NotFound => {}
         }
     }
 
@@ -378,14 +390,14 @@ impl<B: StoreBackend> BrowserState<B> {
                 // Show newest snapshots first for quick browsing.
                 snapshots.sort_by(|a, b| b.info.snapshot_id.cmp(&a.info.snapshot_id));
                 for si in snapshots {
-                    let full_path =
-                        PathBuf::from(&si.family_name).join(si.info.snapshot_id.to_string());
+                    let snap_name = si.display_name();
+                    let full_path = PathBuf::from(&si.family_name).join(&snap_name);
                     items.push(BrowseItem {
                         kind: BrowseItemKind::Snapshot {
                             family: si.family_name,
                             snapshot_id: si.info.snapshot_id,
                         },
-                        label: format!("{}/", si.info.snapshot_id),
+                        label: format!("{}/", snap_name),
                         full_path,
                         mode: "dr-xr-xr-x".to_string(),
                         size: None,
@@ -687,6 +699,7 @@ impl<B: StoreBackend> BrowserState<B> {
                     snapshot_id,
                     path,
                     created,
+                    ..
                 } => {
                     let rel = path
                         .strip_prefix(&base_path)
@@ -1286,16 +1299,24 @@ mod tests {
         assert_eq!(state.visible_items().len(), 1);
         assert_eq!(state.visible_items()[0].label, "docs/");
 
-        // Enter family `docs` -> shows `..`, `2/`, `1/` (newest first).
+        // Enter family `docs` -> shows `..`, `<ts>-2/`, `<ts>-1/` (newest first).
         state.enter();
         assert_eq!(state.current_path(), PathBuf::from("docs"));
-        let labels: Vec<&str> = state.visible_items().iter().map(|i| i.label.as_str()).collect();
-        assert_eq!(labels, vec!["..", "2/", "1/"]);
+        let labels: Vec<String> = state
+            .visible_items()
+            .iter()
+            .map(|i| i.label.clone())
+            .collect();
+        assert_eq!(labels.len(), 3);
+        assert_eq!(labels[0], "..");
+        assert!(labels[1].ends_with("Z-2/"), "got {:?}", labels);
+        assert!(labels[2].ends_with("Z-1/"), "got {:?}", labels);
+        let snap1_name = labels[2].trim_end_matches('/').to_string();
 
         // Move to snapshot 1 and enter it.
         state.move_cursor(2);
         state.enter();
-        assert_eq!(state.current_path(), PathBuf::from("docs/1"));
+        assert_eq!(state.current_path(), PathBuf::from("docs").join(&snap1_name));
 
         // Run recursive `find` for "shared" -> finds both alpha/shared.txt and beta/shared.txt!
         state.run_find("SHARED".to_string());
@@ -1315,14 +1336,20 @@ mod tests {
         state.toggle_select();
         assert_eq!(state.selected_count(), 3);
 
-        // Enter jumps from find results to parent dir `docs/1/alpha/deep` focusing `needle_notes.txt`.
+        // Enter jumps from find results to parent dir `docs/<snap1>/alpha/deep` focusing `needle_notes.txt`.
         state.enter();
         assert!(!state.is_find_results());
-        assert_eq!(state.current_path(), PathBuf::from("docs/1/alpha/deep"));
+        assert_eq!(
+            state.current_path(),
+            PathBuf::from("docs").join(&snap1_name).join("alpha/deep")
+        );
 
-        // Go up to `docs/1/alpha` -> cursor restores onto `deep/`.
+        // Go up to `docs/<snap1>/alpha` -> cursor restores onto `deep/`.
         state.go_up();
-        assert_eq!(state.current_path(), PathBuf::from("docs/1/alpha"));
+        assert_eq!(
+            state.current_path(),
+            PathBuf::from("docs").join(&snap1_name).join("alpha")
+        );
         assert_eq!(state.visible_items()[state.cursor].label, "deep/");
 
         // Begin and confirm checkout of all 3 marked items!
@@ -1372,6 +1399,11 @@ mod tests {
         fs::create_dir_all(&dest).unwrap();
 
         let state = BrowserState::new(hat, Path::new("docs/latest"), dest).unwrap();
-        assert_eq!(state.current_path(), PathBuf::from("docs/2"));
+        let cur = state.current_path().to_string_lossy().into_owned();
+        assert!(
+            cur.starts_with("docs/") && cur.ends_with("Z-2"),
+            "expected canonical composite snapshot path ending in Z-2, got {:?}",
+            cur
+        );
     }
 }

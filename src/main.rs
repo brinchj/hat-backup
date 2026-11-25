@@ -280,21 +280,21 @@ fn do_commit<B: StoreBackend>(
     hat.meta_commit().unwrap_or_else(|e| fail(e));
     hat.data_flush().unwrap_or_else(|e| fail(e));
 
-    let snapshot_id = hat
+    let committed = hat
         .list_user_snapshots()
         .into_iter()
         .filter(|s| s.family_name == family_name)
-        .map(|s| s.info.snapshot_id)
-        .max();
+        .max_by_key(|s| s.info.snapshot_id);
 
     if out.json {
         print_json(&serde_json::json!({
             "family": family_name,
-            "snapshot_id": snapshot_id,
+            "snapshot": committed.as_ref().map(|s| s.display_name()),
+            "snapshot_id": committed.as_ref().map(|s| s.info.snapshot_id),
         }));
     } else if !out.quiet {
-        match snapshot_id {
-            Some(id) => eprintln!("Committed {}/{}", family_name, id),
+        match committed {
+            Some(s) => eprintln!("Committed {}/{}", family_name, s.display_name()),
             None => eprintln!("Committed {}", family_name),
         }
     }
@@ -348,7 +348,7 @@ fn do_recover<B: StoreBackend>(mut hat: HatRc<B>, out: &OutputConfig) {
     }
 }
 
-fn parse_delete_target(snapshot_arg: &str, id_arg: Option<&str>) -> (String, u64) {
+fn parse_delete_target(snapshot_arg: &str, selector_arg: Option<&str>) -> (String, String) {
     let path = Path::new(snapshot_arg);
     let mut parts = Vec::new();
     for comp in path.components() {
@@ -361,32 +361,19 @@ fn parse_delete_target(snapshot_arg: &str, id_arg: Option<&str>) -> (String, u64
         }
     }
 
-    match (parts.as_slice(), id_arg) {
-        ([family, id_str], None) => {
-            let id = id_str.parse::<u64>().unwrap_or_else(|e| {
-                fail(format!(
-                    "invalid snapshot ID '{}' in '{}': {}",
-                    id_str, snapshot_arg, e
-                ))
-            });
-            (family.clone(), id)
-        }
-        ([family], Some(id_str)) => {
-            let id = id_str
-                .parse::<u64>()
-                .unwrap_or_else(|e| fail(format!("invalid snapshot ID '{}': {}", id_str, e)));
-            (family.clone(), id)
-        }
+    match (parts.as_slice(), selector_arg) {
+        ([family, selector], None) => (family.clone(), selector.clone()),
+        ([family], Some(selector)) => (family.clone(), selector.to_string()),
         ([_, _], Some(_)) => fail(format!(
-            "snapshot ID specified twice (in '{}' and positional argument)",
+            "snapshot selector specified twice (in '{}' and positional argument)",
             snapshot_arg
         )),
         ([family], None) => fail(format!(
-            "missing snapshot ID. Use 'hat delete {}/<id>' (or 'hat delete {} <id>')",
-            family, family
+            "missing snapshot selector. Use 'hat delete {}/<snapshot>' (name, ID, date prefix, or 'latest')",
+            family
         )),
         _ => fail(format!(
-            "invalid snapshot target '{}'. Expected '<family>/<id>' or '<family> <id>'",
+            "invalid snapshot target '{}'. Expected '<family>/<snapshot>' or '<family> <snapshot>'",
             snapshot_arg
         )),
     }
@@ -395,29 +382,42 @@ fn parse_delete_target(snapshot_arg: &str, id_arg: Option<&str>) -> (String, u64
 fn do_delete<B: StoreBackend>(
     mut hat: HatRc<B>,
     family: String,
-    id: u64,
+    selector: String,
     dry_run: bool,
     out: &OutputConfig,
 ) {
     if family == hat::hat::SYNTHETIC_ROOTS_FAMILY {
-        fail(format!("snapshot '{}/{}' not found", family, id));
+        fail(format!("snapshot '{}/{}' not found", family, selector));
     }
-    if dry_run {
-        let exists = hat
-            .list_user_snapshots()
-            .into_iter()
-            .any(|s| s.family_name == family && s.info.snapshot_id == id);
-        if !exists {
-            fail(format!("snapshot '{}/{}' not found", family, id));
+
+    let family_snaps: Vec<_> = hat
+        .list_user_snapshots()
+        .into_iter()
+        .filter(|s| s.family_name == family)
+        .collect();
+    let (id, display_name) = match hat::hat::match_snapshot_selector(&family_snaps, &selector) {
+        hat::hat::SelectorLookup::Found(s) => (s.info.snapshot_id, s.display_name()),
+        hat::hat::SelectorLookup::Ambiguous(candidates) => fail(format!(
+            "ambiguous snapshot selector '{}' in family '{}'; matches: {}",
+            selector,
+            family,
+            candidates.join(", ")
+        )),
+        hat::hat::SelectorLookup::NotFound => {
+            fail(format!("snapshot '{}/{}' not found", family, selector))
         }
+    };
+
+    if dry_run {
         if out.json {
             print_json(&serde_json::json!({
                 "dry_run": true,
                 "family": family,
+                "snapshot": display_name,
                 "snapshot_id": id,
             }));
         } else if !out.quiet {
-            println!("Would delete {}/{}", family, id);
+            println!("Would delete {}/{}", family, display_name);
         }
         return;
     }
@@ -431,12 +431,13 @@ fn do_delete<B: StoreBackend>(
         print_json(&serde_json::json!({
             "dry_run": false,
             "family": family,
+            "snapshot": display_name,
             "snapshot_id": id,
         }));
     } else if !out.quiet {
         eprintln!(
             "Deleted {}/{}. Run 'hat gc' to reclaim unused blobs.",
-            family, id
+            family, display_name
         );
     }
 }
@@ -680,11 +681,13 @@ fn do_ls_recursive<B: StoreBackend>(
                 hat::vfs::fs::WalkItem::Snapshot {
                     family,
                     snapshot_id,
+                    name,
                     path,
                     created,
                 } => serde_json::json!({
                     "kind": "snapshot",
                     "family": family,
+                    "name": name,
                     "snapshot_id": snapshot_id,
                     "path": path.to_string_lossy(),
                     "created": format_utc_rfc3339(created),
@@ -800,10 +803,12 @@ fn do_ls<B: StoreBackend>(
                 let items: Vec<_> = snapshots
                     .into_iter()
                     .map(|si| {
-                        let snap_path = format!("{}/{}", si.family_name, si.info.snapshot_id);
+                        let snap_name = si.display_name();
+                        let snap_path = format!("{}/{}", si.family_name, snap_name);
                         serde_json::json!({
                             "kind": "snapshot",
                             "family": si.family_name,
+                            "name": snap_name,
                             "snapshot_id": si.info.snapshot_id,
                             "path": snap_path,
                             "created": format_utc_rfc3339(si.created),
@@ -813,8 +818,7 @@ fn do_ls<B: StoreBackend>(
                 print_json(&items);
             } else {
                 for si in snapshots {
-                    let snap_path =
-                        PathBuf::from(si.family_name).join(format!("{}", si.info.snapshot_id));
+                    let snap_path = PathBuf::from(&si.family_name).join(si.display_name());
                     if long {
                         println!(
                             "dr-xr-xr-x {:>10} {} {}",
@@ -966,7 +970,8 @@ fn build_cli() -> Command {
                         .required(true)
                         .value_parser(clap::value_parser!(PathBuf))
                         .help(
-                            "Snapshot path: <family>, <family>/<id|latest>, or <family>/<id|latest>/<subpath>",
+                            "Snapshot path: <family>, <family>/<snapshot>, or <family>/<snapshot>/<subpath> \
+                             (<snapshot> may be full name, numeric ID, date prefix, or 'latest')",
                         ),
                 )
                 .arg(
@@ -1052,11 +1057,11 @@ fn build_cli() -> Command {
                 .arg(
                     Arg::new("SNAPSHOT")
                         .required(true)
-                        .help("Snapshot target as <family>/<id> (or <family> followed by <id>)"),
+                        .help("Snapshot target as <family>/<snapshot> (full name, ID, date prefix, or 'latest')"),
                 )
                 .arg(
                     Arg::new("ID")
-                        .help("Snapshot ID when SNAPSHOT is a family name"),
+                        .help("Snapshot selector when SNAPSHOT is a family name"),
                 )
                 .arg(
                     Arg::new("dry_run")
@@ -1166,13 +1171,15 @@ fn main() {
         Some(("delete", cmd)) => {
             let snapshot_arg = cmd.get_one::<String>("SNAPSHOT").unwrap();
             let id_arg = cmd.get_one::<String>("ID").map(|s| s.as_str());
-            let (family, id) = parse_delete_target(snapshot_arg, id_arg);
+            let (family, selector) = parse_delete_target(snapshot_arg, id_arg);
             let dry_run = cmd.get_flag("dry_run");
             match backend {
                 BackendSpec::File(p) => {
-                    do_delete(open_hat_file(state_dir, p), family, id, dry_run, &out)
+                    do_delete(open_hat_file(state_dir, p), family, selector, dry_run, &out)
                 }
-                BackendSpec::Cmd => do_delete(open_hat_cmd(state_dir), family, id, dry_run, &out),
+                BackendSpec::Cmd => {
+                    do_delete(open_hat_cmd(state_dir), family, selector, dry_run, &out)
+                }
             }
         }
         Some(("gc", cmd)) => {

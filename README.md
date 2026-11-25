@@ -80,10 +80,10 @@ hat ls -lR docs/latest
 hat browse
 hat browse docs/latest --dest ./restore-dir
 
-# Checkout latest snapshot, a specific snapshot, or a subpath into a local destination directory
+# Checkout latest snapshot, a specific snapshot (by composite name, ID, or date prefix), or a subpath
 hat checkout docs /path/to/restore-dir
 hat checkout docs/1 /path/to/restore-dir
-hat checkout docs/1/subdir /path/to/restore-dir
+hat checkout docs/2026-11-25/subdir /path/to/restore-dir
 
 # Verify every indexed hash chunk against the backend
 hat check
