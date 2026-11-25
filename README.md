@@ -1,121 +1,131 @@
 Hat Backup System
 =================
+
 Disclaimer: This is not an official Google product.
 
-Warning: This is an incomplete work-in-progress.
-
-Warning: This project does currently NOT support security or privacy.
-
-[![Build Status](https://travis-ci.org/brinchj/hat-backup.svg?branch=master)](https://travis-ci.org/brinchj/hat-backup)
+Warning: This software is pre-alpha and under active development. Do not use it
+as the sole copy of important data. See [`SECURITY.md`](SECURITY.md) for current
+confidentiality guarantees and known gaps, and [`ROADMAP.md`](ROADMAP.md) for
+what remains before a stable release.
 
 Project
 -------
-The goal of hat is to provide a backend-agnostic snapshotting backup system,
-complete with deduplication of file blocks and efficient navigation of backed up
-files.
+Hat is a backend-agnostic, snapshotting backup system with content-addressed
+chunk deduplication, authenticated encryption, and crash-tolerant recovery.
 
-A sub-goal is to do so in a safe and fault-tolerant manner, where a process
-crash is followed by quick and safe recovery.
+Key design properties implemented today:
 
-Further, we aim for readable and maintainable code, partly by splitting the
-system into a few sub-systems with clear responsibility.
+- **Encrypted, fixed-size blobs:** Chunks are sealed with `XChaCha20-Poly1305-IETF`
+  (24-byte random nonces, metadata-bound AAD) via `libsodium-rs` (`#![forbid(unsafe_code)]`),
+  packed into random-padded `max_blob_size` blobs with keyed BLAKE2b-512
+  authentication tags covering both blob name and ciphertext.
+- **Single local SQLite cache (`cache/index.sqlite3`):** All local state
+  (`hashes`, `blobs`, `family`, `snapshots`, flat per-family `stat_cache`, and
+  local `tree_edges`) lives in one `0600` WAL-mode SQLite file protected by a
+  fail-fast `0600` lock (`cache/.hat.lock`).
+- **Incremental scanning:** Filesystem walks stage into an ephemeral in-memory
+  `StagedTree` and skip re-reading/re-hashing unchanged files via `stat_cache`
+  (keyed by `(family_id, rel_path)` with `dev`/`ino`/sub-second `mtime`/`ctime`
+  identity and a racily-clean guard). Stale rows are pruned per family on commit
+  and for deleted families during `gc`.
+- **Atomic commits & zero-remote-read mark-and-sweep GC:** Blobs are flushed to
+  the backend before SQLite publishes a completed snapshot row. Snapshot deletion
+  is O(1) local, and mark-and-sweep `gc` computes liveness locally from
+  `hashes.childs` + `tree_edges` (0 remote reads in steady state and after
+  `recover`), failing closed if index invariants are violated.
+- **Full local cache recovery:** `recover` rebuilds the local SQLite index and
+  `tree_edges` cache from backend blobs and the repository key alone.
 
-Disclaimer: The above text describes our goal and not the current status.
-
-Status
-------
-This software is pre-alpha and should be considered severely unstable.
-
-This software should not be considered ready for any use; the code is currently
-provided for development and experimentation purposes only.
-
-Roadmap to a first stable release
----------------------------------
-**Cleanup:**
-
-I am currently focusing on reaching a feature complete and useful state and as a result, I am skipping quickly over some implementation details. The following items will have to be revisited and cleaned up before a stable release:
-
-- Properly support non-utf8 paths.
-- Store and restore all relevant file metadata
-  - same for symlinks.
-- ~~Use prepared statements when communicating with SQLite.~~
-- ~~Run rustfmt on the code when it is ready.~~
-- ~~Reimplement argument handling in main; possibly using docopt.~~ [thanks kbknapp]
-- ~~Replace all uses of JSON with either Protocol Buffers or Cap'n Proto.~~
-- Go through uses of 'unwrap', 'expect' etc and remove them where possible; preferably, the caller/initiater should handle errors.
-- Think about parallelism and change the pipeline of threads to make better use of it.
-  - ~~Parallel snapshotting~~
-- Figure out how to battle test the code on supported platforms.
-
-**Functionality:**
-
-There are a bunch of lacking functionality needed before a feature complete release is in sight:
-
-- ~~Commit hash-tree tops of known snapshots to external storage.~~
-- Add recovery function to restore local metadata from external hash-tree tops (for when all local state is gone).
-  - ~~Basic read-only recovery.~~
-  - ~~Full read-write recovery with GC metadata rebuilding.~~
-  - Need to allow users to opt for read-only.
-- ~~Add book-keeping for metadata needed to identify live hashes (e.g. reference sets in each family's keyindex).~~
-- ~~Add deletion and garbage-collection.~~
-  - ~~Make 'commit' crash-safe by retrying failed 'register' and 'deregister' runs~~. Add tests as this is fragile logic.
-  - ~~GC should not be able to break the index. This can be avoided by having 'snapshot' check if hashes it wants to reuse still exist (i.e. have not been GC'ed yet).~~
-  - ~~GC should delete hashes top-down to avoid removing a child hash before its parent hash.~~
-- Have the blobstore talk to external thread(s) to isolate communication with external storage.
-- Make the API used for talking to the external storage easy to change (put it in separate put/get/del programs).
-- Add encryption through NaCL/sodiumdioxide; preferably as late as possible.
-
-**Future wishlist: (not blocking first release)**
-
-- Output a dot graph over current hash trees to show dependencies and reuse.
-- FSCK style metadata verification ("check" subcommand?).
-- Commit snapshots while indexing them (possibly through "weak" snapshots that are ignored by GC). The purpose is to allow checking out a partial snapshot.
-- Add "--pretend" to all subcommands and have it give a signal as to what would happen without it.
+Roadmap & Security
+------------------
+- [`ROADMAP.md`](ROADMAP.md) — current status, completed milestones, and phased plan
+- [`SECURITY.md`](SECURITY.md) — cryptographic design, size-hiding invariants, and known gaps
 
 Building from source
 --------------------
-First, make sure you have the required system libraries and tools installed:
-* libsodium
-* libsqlite3
-* capnproto (at least version 0.5.3)
+Required system libraries and toolchain:
 
-0. Install rust (try nightly or check commit log for compatible version)
-   * Rust nighly is available from http://rust-lang.org
-1. Checkout the newest version of the source:
-   * `git clone https://github.com/google/hat-backup.git`
-   * `cd hat`
-2. Let Cargo build everything needed:
-   * `cargo build --release`
+- Rust toolchain (`rust-version = "1.99"`, edition 2021)
+- `libsodium`
+- `libsqlite3`
+- `libfuse` (optional, only when building with `--features fuse`)
 
-Try the hat executable using Cargo (the binary is in target/release/)
----------------------------------------------------------------------
-   * `cargo run --release snapshot my_snapshot /some/path/to/dir`
-   * `cargo run --release commit my_snapshot`
-   * `cargo run --release checkout my_snapshot output/dir`
+Build:
+
+```sh
+cargo build --release
+```
+
+Usage (`hatbin`)
+----------------
+The CLI supports a local directory backend (`--backend file --backend-path <DIR>`)
+and an external command backend (`--backend cmd`, default).
+
+```sh
+# Initialize a new repository state directory (0700 dir, 0600 universal key)
+hatbin init /path/to/hat-state
+
+# Commit a directory snapshot into family "docs"
+hatbin --hat_state_dir /path/to/hat-state \
+       --backend file --backend-path /path/to/blobs \
+       commit docs /path/to/source-dir
+
+# List families, snapshots, or directory contents inside snapshots
+hatbin --hat_state_dir /path/to/hat-state --backend file --backend-path /path/to/blobs \
+       ls /
+
+# Checkout latest snapshot (or pass --id <ID> for a specific snapshot)
+hatbin --hat_state_dir /path/to/hat-state --backend file --backend-path /path/to/blobs \
+       checkout docs /path/to/restore-dir
+hatbin --hat_state_dir /path/to/hat-state --backend file --backend-path /path/to/blobs \
+       checkout docs /path/to/restore-dir --id 1
+
+# Verify every indexed hash chunk against the backend
+hatbin --hat_state_dir /path/to/hat-state --backend file --backend-path /path/to/blobs \
+       check
+
+# Delete a snapshot and garbage-collect unreferenced blobs (--pretend for dry-run)
+hatbin --hat_state_dir /path/to/hat-state --backend file --backend-path /path/to/blobs \
+       delete docs 1
+hatbin --hat_state_dir /path/to/hat-state --backend file --backend-path /path/to/blobs \
+       gc --pretend
+hatbin --hat_state_dir /path/to/hat-state --backend file --backend-path /path/to/blobs \
+       gc
+
+# Rebuild local cache/index.sqlite3 from backend blobs (requires secret-universal-key)
+hatbin --hat_state_dir /path/to/hat-state --backend file --backend-path /path/to/blobs \
+       recover
+
+# Clean up incomplete local state and republish snapshot metadata
+hatbin --hat_state_dir /path/to/hat-state --backend file --backend-path /path/to/blobs \
+       resume
+```
+
+Environment variables `HAT_STATE_DIR`, `HAT_BACKEND`, and `HAT_BACKEND_PATH` may
+be used in place of `--hat_state_dir`, `--backend`, and `--backend-path`.
+
+Testing & Benchmarks
+--------------------
+```sh
+cargo test
+cargo bench --bench hat_ops
+```
 
 License and copyright
 ---------------------
-See the files LICENSE and AUTHORS.
+See the files `LICENSE` and `AUTHORS.txt`.
 
 Contributions
 -------------
-We gladly accept contributions/fixes/improvements etc. via GitHub pull requests
-or any other reasonable means, as long as the author has signed the Google
-Contributor License.
+We gladly accept contributions/fixes/improvements via pull requests, as long as
+the author has signed the Google Contributor License:
 
-The Contributor License exists in two versions, one for individuals and one for
-corporations:
-
-https://developers.google.com/open-source/cla/individual
-https://developers.google.com/open-source/cla/corporate
-
-
-Please read and sign one of the above versions of the Contributor License,
-before sending your contribution. Thanks!
+- https://developers.google.com/open-source/cla/individual
+- https://developers.google.com/open-source/cla/corporate
 
 Authors
 -------
-See the AUTHORS.txt file.
+See `AUTHORS.txt`.
 
 This project is inspired by a previous version of the system written in Haskell:
 https://github.com/mortenbp/hindsight
