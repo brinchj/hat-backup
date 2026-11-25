@@ -87,9 +87,9 @@ data; corrupt/missing blobs never look “healthy.”
 |------|--------|
 | First-class local file backend in CLI | `--backend file --backend-path` works; decide whether file backend should be default or co-equal with `CmdBackend` |
 | CmdBackend batching / long-lived helper | Cut process-per-put cost if external helpers stay |
-| Stable CLI + docs | `init` / `commit` / `checkout [--id]` / `delete` / `gc [--pretend]` / `resume` / `check` / `recover` / `ls` implemented and documented in `README.md`; polish UX and error messages |
-| `--pretend` where it matters | `gc --pretend` done; add `--pretend` to `delete` |
-| Progress without log spam | Structured progress, not unbounded prints (`InsertPathHandler` still prints periodically) |
+| Stable CLI + docs | `hat` binary with `init` (persists `config.json`), `commit`, `checkout`, `ls [-l]`, `delete [-n]`, `gc [-n]`, `resume`, `check`, `recover`, `mount`, `license`, global flags (`--state-dir`, `-q`, `-v`, `--json`), documented in `README.md` |
+| `--dry-run` where it matters | `-n`/`--dry-run` implemented on both `gc` and `delete` |
+| Progress without log spam | Library progress/warnings routed through `log` (`info!`/`warn!`) to `stderr`, controllable via `-q`/`-v`/`RUST_LOG`; `stdout` kept clean for data and `--json` |
 | Upgrade / migration story | Schema migrations exist (`migrations/`), but moving from pre-single-DB `hash_index.sqlite3` requires `recover`; document and formalize versioned upgrades |
 
 **Exit:** a new user can init → backup → kill → recover/resume → checkout → check

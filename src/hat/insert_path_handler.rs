@@ -113,7 +113,7 @@ impl<B: StoreBackend> PathHandler<ParentCtx> for InsertPathHandler<B> {
             let mut guarded_last_print = self.last_print.lock().unwrap();
             let now = Instant::now();
             if now.duration_since(*guarded_last_print) >= Duration::from_secs(1) {
-                println!("#{}: {}", count, path.display());
+                info!("#{}: {}", count, path.display());
                 *guarded_last_print = now;
             }
         }
@@ -122,7 +122,7 @@ impl<B: StoreBackend> PathHandler<ParentCtx> for InsertPathHandler<B> {
 
         match FileEntry::new(path.to_path_buf(), *parent_id) {
             Err(e) => {
-                println!("Skipping '{}': {}", path.display(), e);
+                warn!("Skipping '{}': {}", path.display(), e);
             }
             Ok(file_entry) => {
                 if self.is_excluded_dir(&file_entry.metadata) {
@@ -148,7 +148,7 @@ impl<B: StoreBackend> PathHandler<ParentCtx> for InsertPathHandler<B> {
                         file_entry.key_entry,
                         Some(move || match FileIterator::new(&full_path) {
                             Err(e) => {
-                                println!("Skipping '{}': {}", local_root.display(), e);
+                                warn!("Skipping '{}': {}", local_root.display(), e);
                                 None
                             }
                             Ok(it) => Some(it),

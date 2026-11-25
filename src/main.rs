@@ -14,18 +14,79 @@
 
 #![forbid(unsafe_code)]
 
-use clap::{Arg, ArgMatches, Command};
+use clap::{Arg, ArgAction, ArgMatches, Command};
 use hat::backend::{self, StoreBackend};
 use hat::hat::HatRc;
 use hat::Hat;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi;
 use std::fs;
-use std::path::PathBuf;
+use std::io::{IsTerminal, Write};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 static MAX_BLOB_SIZE: usize = 4 * 1024 * 1024;
+static CONFIG_FILE_NAME: &str = "config.json";
+
+#[derive(Clone, Copy)]
+struct OutputConfig {
+    quiet: bool,
+    json: bool,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct RepoConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backend_path: Option<PathBuf>,
+}
+
+enum BackendSpec {
+    File(PathBuf),
+    Cmd,
+}
+
+fn use_stderr_color() -> bool {
+    std::io::stderr().is_terminal() && env::var_os("NO_COLOR").is_none()
+}
+
+fn fail(msg: impl std::fmt::Display) -> ! {
+    if use_stderr_color() {
+        eprintln!("\x1b[1;31mError:\x1b[0m {}", msg);
+    } else {
+        eprintln!("Error: {}", msg);
+    }
+    std::process::exit(1);
+}
+
+fn print_json(value: &impl Serialize) {
+    match serde_json::to_string_pretty(value) {
+        Ok(s) => println!("{}", s),
+        Err(e) => fail(format!("failed to serialize JSON output: {}", e)),
+    }
+}
+
+fn init_logging(quiet: bool, verbose: u8) {
+    let mut builder = env_logger::Builder::new();
+    if let Ok(spec) = env::var("RUST_LOG") {
+        builder.parse_filters(&spec);
+    } else {
+        let level = if quiet {
+            log::LevelFilter::Error
+        } else {
+            match verbose {
+                0 => log::LevelFilter::Warn,
+                1 => log::LevelFilter::Info,
+                _ => log::LevelFilter::Debug,
+            }
+        };
+        builder.filter_level(level);
+    }
+    builder.init();
+}
 
 fn license() {
     println!(include_str!("../LICENSE"));
@@ -33,41 +94,202 @@ fn license() {
     println!(include_str!("../LICENSE-CLAP"));
 }
 
-fn backend_kind(matches: &ArgMatches) -> &str {
+fn load_repo_config(state_dir: &Path) -> RepoConfig {
+    let config_path = state_dir.join(CONFIG_FILE_NAME);
+    match fs::read_to_string(&config_path) {
+        Ok(raw) => serde_json::from_str(&raw).unwrap_or_else(|e| {
+            fail(format!(
+                "invalid repository config at {}: {}",
+                config_path.display(),
+                e
+            ))
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => RepoConfig::default(),
+        Err(e) => fail(format!(
+            "failed to read repository config {}: {}",
+            config_path.display(),
+            e
+        )),
+    }
+}
+
+fn write_repo_config(state_dir: &Path, cfg: &RepoConfig) {
+    let config_path = state_dir.join(CONFIG_FILE_NAME);
+    let data = serde_json::to_string_pretty(cfg)
+        .unwrap_or_else(|e| fail(format!("failed to serialize config: {}", e)));
+
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(&config_path).unwrap_or_else(|e| {
+        fail(format!(
+            "failed to write repository config {}: {}",
+            config_path.display(),
+            e
+        ))
+    });
+    file.write_all(data.as_bytes())
+        .and_then(|_| file.write_all(b"\n"))
+        .unwrap_or_else(|e| {
+            fail(format!(
+                "failed to write repository config {}: {}",
+                config_path.display(),
+                e
+            ))
+        });
+}
+
+fn require_state_dir(matches: &ArgMatches) -> PathBuf {
     matches
-        .get_one::<String>("backend")
-        .map(|s| s.as_str())
-        .unwrap_or("cmd")
-}
-
-fn fail(msg: impl std::fmt::Display) -> ! {
-    eprintln!("Error: {}", msg);
-    std::process::exit(1);
-}
-
-fn open_hat_cmd(cache_dir: PathBuf) -> HatRc<backend::CmdBackend> {
-    let backend = Arc::new(backend::CmdBackend::new());
-    Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap_or_else(|e| fail(e))
-}
-
-fn open_hat_file(cache_dir: PathBuf, matches: &ArgMatches) -> HatRc<backend::FileBackend> {
-    let path = matches
-        .get_one::<String>("backend_path")
+        .get_one::<PathBuf>("state_dir")
         .cloned()
-        .or_else(|| env::var("HAT_BACKEND_PATH").ok())
-        .unwrap_or_else(|| fail("--backend-path or HAT_BACKEND_PATH required for file backend"));
-    let backend = Arc::new(backend::FileBackend::new(PathBuf::from(path)));
-    Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap_or_else(|e| fail(e))
+        .unwrap_or_else(|| {
+            fail(
+                "repository state directory required. Pass --state-dir <DIR>, set HAT_STATE_DIR, \
+                 or create one with 'hat init <DIR>'",
+            )
+        })
 }
 
-fn do_commit<B: StoreBackend>(mut hat: HatRc<B>, name: String, path: PathBuf) {
+fn resolve_backend(state_dir: &Path, matches: &ArgMatches) -> BackendSpec {
+    let file_cfg = load_repo_config(state_dir);
+
+    let cli_or_env_backend = matches.get_one::<String>("backend").cloned();
+    let cli_or_env_path = matches.get_one::<PathBuf>("backend_path").cloned();
+
+    let backend_path = cli_or_env_path.or(file_cfg.backend_path);
+    let kind = cli_or_env_backend.or(file_cfg.backend).or_else(|| {
+        if backend_path.is_some() {
+            Some("file".to_string())
+        } else {
+            None
+        }
+    });
+
+    match kind.as_deref() {
+        Some("file") => {
+            let path = backend_path.unwrap_or_else(|| {
+                fail(
+                    "--backend-path <DIR> or HAT_BACKEND_PATH is required for the file backend",
+                )
+            });
+            BackendSpec::File(path)
+        }
+        Some("cmd") => BackendSpec::Cmd,
+        Some(other) => fail(format!(
+            "unsupported backend '{}' (expected 'file' or 'cmd')",
+            other
+        )),
+        None => fail(
+            "no storage backend configured. Pass --backend file --backend-path <DIR> \
+             (or --backend cmd), set HAT_BACKEND/HAT_BACKEND_PATH, or pass them to 'hat init'",
+        ),
+    }
+}
+
+fn open_hat_cmd(state_dir: PathBuf) -> HatRc<backend::CmdBackend> {
+    let backend = Arc::new(backend::CmdBackend::new());
+    Hat::open_repository(state_dir, backend, MAX_BLOB_SIZE).unwrap_or_else(|e| fail(e))
+}
+
+fn open_hat_file(state_dir: PathBuf, backend_path: PathBuf) -> HatRc<backend::FileBackend> {
+    let backend = Arc::new(backend::FileBackend::new(backend_path));
+    Hat::open_repository(state_dir, backend, MAX_BLOB_SIZE).unwrap_or_else(|e| fail(e))
+}
+
+fn do_init(dir: PathBuf, matches: &ArgMatches, out: &OutputConfig) {
+    let backend = matches.get_one::<String>("backend").cloned();
+    let backend_path = matches.get_one::<PathBuf>("backend_path").cloned();
+
+    let effective_backend = match (backend.as_deref(), backend_path.as_ref()) {
+        (Some("file"), None) => {
+            fail("--backend-path <DIR> is required when initializing with --backend file")
+        }
+        (Some("cmd"), Some(_)) => {
+            fail("--backend-path cannot be used with --backend cmd")
+        }
+        (None, Some(_)) => Some("file".to_string()),
+        (Some(k), _) => Some(k.to_string()),
+        (None, None) => None,
+    };
+
+    if let Some(parent) = dir.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).unwrap_or_else(|e| fail(e));
+        }
+    }
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    if let Err(e) = builder.create(&dir) {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            fail(format!("directory already exists: {}", dir.display()));
+        }
+        fail(format!("failed to create directory {}: {}", dir.display(), e));
+    }
+    builder
+        .create(dir.join("cache"))
+        .unwrap_or_else(|e| fail(e));
+    hat::crypto::keys::Keeper::write_new_universal_key(&dir).unwrap_or_else(|e| fail(e));
+
+    if effective_backend.is_some() || backend_path.is_some() {
+        let cfg = RepoConfig {
+            backend: effective_backend.clone(),
+            backend_path: backend_path.clone(),
+        };
+        write_repo_config(&dir, &cfg);
+    }
+
+    if out.json {
+        print_json(&serde_json::json!({
+            "state_dir": dir,
+            "backend": effective_backend,
+            "backend_path": backend_path,
+        }));
+    } else if !out.quiet {
+        eprintln!("Initialized repository at {}", dir.display());
+    }
+}
+
+fn do_commit<B: StoreBackend>(
+    mut hat: HatRc<B>,
+    family_name: String,
+    source_dir: PathBuf,
+    out: &OutputConfig,
+) {
     let mut family = hat
-        .open_family(name.clone())
-        .unwrap_or_else(|e| fail(format!("could not open family '{}': {}", name, e)));
-    family.snapshot_dir(path).unwrap_or_else(|e| fail(e));
+        .open_family(family_name.clone())
+        .unwrap_or_else(|e| fail(format!("could not open family '{}': {}", family_name, e)));
+    family.snapshot_dir(source_dir).unwrap_or_else(|e| fail(e));
     hat.commit(&mut family).unwrap_or_else(|e| fail(e));
     hat.meta_commit().unwrap_or_else(|e| fail(e));
     hat.data_flush().unwrap_or_else(|e| fail(e));
+
+    let snapshot_id = hat
+        .list_snapshots()
+        .into_iter()
+        .filter(|s| s.family_name == family_name)
+        .map(|s| s.info.snapshot_id)
+        .max();
+
+    if out.json {
+        print_json(&serde_json::json!({
+            "family": family_name,
+            "snapshot_id": snapshot_id,
+        }));
+    } else if !out.quiet {
+        match snapshot_id {
+            Some(id) => eprintln!("Committed {}/{}", family_name, id),
+            None => eprintln!("Committed {}", family_name),
+        }
+    }
 }
 
 fn do_checkout<B: StoreBackend>(
@@ -75,51 +297,203 @@ fn do_checkout<B: StoreBackend>(
     snapshot_path: PathBuf,
     id: Option<u64>,
     dest_dir: PathBuf,
+    out: &OutputConfig,
 ) {
-    hat.checkout_path_in_dir(&snapshot_path, id, dest_dir)
+    hat.checkout_path_in_dir(&snapshot_path, id, dest_dir.clone())
         .unwrap_or_else(|e| fail(e));
+
+    if out.json {
+        print_json(&serde_json::json!({
+            "snapshot_path": snapshot_path,
+            "id": id,
+            "dest_dir": dest_dir,
+        }));
+    } else if !out.quiet {
+        eprintln!(
+            "Checked out {} to {}",
+            snapshot_path.display(),
+            dest_dir.display()
+        );
+    }
 }
 
-fn do_recover<B: StoreBackend>(mut hat: HatRc<B>) {
+fn do_recover<B: StoreBackend>(mut hat: HatRc<B>, out: &OutputConfig) {
     hat.recover().unwrap_or_else(|e| fail(e));
+    let snapshots = hat.list_snapshots();
+    let family_count = snapshots
+        .iter()
+        .map(|s| s.family_name.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
+    let snapshot_count = snapshots.len();
+
+    if out.json {
+        print_json(&serde_json::json!({
+            "snapshots": snapshot_count,
+            "families": family_count,
+        }));
+    } else if !out.quiet {
+        eprintln!(
+            "Recovered {} snapshot(s) across {} family(ies).",
+            snapshot_count, family_count
+        );
+    }
 }
 
-fn do_delete<B: StoreBackend>(mut hat: HatRc<B>, name: String, id: u64) {
-    hat.deregister_by_name(name, id).unwrap_or_else(|e| fail(e));
+fn parse_delete_target(snapshot_arg: &str, id_arg: Option<&str>) -> (String, u64) {
+    let path = Path::new(snapshot_arg);
+    let mut parts = Vec::new();
+    for comp in path.components() {
+        match comp {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(os) => parts.push(os.to_string_lossy().into_owned()),
+            Component::ParentDir | Component::Prefix(_) => {
+                fail(format!("invalid snapshot target '{}'", snapshot_arg))
+            }
+        }
+    }
+
+    match (parts.as_slice(), id_arg) {
+        ([family, id_str], None) => {
+            let id = id_str.parse::<u64>().unwrap_or_else(|e| {
+                fail(format!(
+                    "invalid snapshot ID '{}' in '{}': {}",
+                    id_str, snapshot_arg, e
+                ))
+            });
+            (family.clone(), id)
+        }
+        ([family], Some(id_str)) => {
+            let id = id_str
+                .parse::<u64>()
+                .unwrap_or_else(|e| fail(format!("invalid snapshot ID '{}': {}", id_str, e)));
+            (family.clone(), id)
+        }
+        ([_, _], Some(_)) => fail(format!(
+            "snapshot ID specified twice (in '{}' and positional argument)",
+            snapshot_arg
+        )),
+        ([family], None) => fail(format!(
+            "missing snapshot ID. Use 'hat delete {}/<id>' (or 'hat delete {} <id>')",
+            family, family
+        )),
+        _ => fail(format!(
+            "invalid snapshot target '{}'. Expected '<family>/<id>' or '<family> <id>'",
+            snapshot_arg
+        )),
+    }
+}
+
+fn do_delete<B: StoreBackend>(
+    mut hat: HatRc<B>,
+    family: String,
+    id: u64,
+    dry_run: bool,
+    out: &OutputConfig,
+) {
+    if dry_run {
+        let exists = hat
+            .list_snapshots()
+            .into_iter()
+            .any(|s| s.family_name == family && s.info.snapshot_id == id);
+        if !exists {
+            fail(format!("snapshot '{}/{}' not found", family, id));
+        }
+        if out.json {
+            print_json(&serde_json::json!({
+                "dry_run": true,
+                "family": family,
+                "snapshot_id": id,
+            }));
+        } else if !out.quiet {
+            println!("Would delete {}/{}", family, id);
+        }
+        return;
+    }
+
+    hat.deregister_by_name(family.clone(), id)
+        .unwrap_or_else(|e| fail(e));
     hat.meta_commit().unwrap_or_else(|e| fail(e));
     hat.data_flush().unwrap_or_else(|e| fail(e));
+
+    if out.json {
+        print_json(&serde_json::json!({
+            "dry_run": false,
+            "family": family,
+            "snapshot_id": id,
+        }));
+    } else if !out.quiet {
+        eprintln!(
+            "Deleted {}/{}. Run 'hat gc' to reclaim unused blobs.",
+            family, id
+        );
+    }
 }
 
-fn do_gc<B: StoreBackend>(mut hat: HatRc<B>, pretend: bool) {
-    let (deleted_hashes, live_blobs) = if pretend {
+fn do_gc<B: StoreBackend>(mut hat: HatRc<B>, dry_run: bool, out: &OutputConfig) {
+    let (deleted_hashes, live_blobs) = if dry_run {
         hat.gc_pretend().unwrap_or_else(|e| fail(e))
     } else {
         hat.gc().unwrap_or_else(|e| fail(e))
     };
-    if pretend {
-        println!("Would delete hashes: {:?}", deleted_hashes);
-    } else {
-        println!("Deleted hashes: {:?}", deleted_hashes);
-    }
-    println!("Live data blobs after deletion: {:?}", live_blobs);
-}
 
-fn do_check<B: StoreBackend>(hat: HatRc<B>) {
-    match hat.check() {
-        Ok(()) => println!("check: ok"),
-        Err(e) => {
-            eprintln!("check: {}", e);
-            std::process::exit(1);
+    if out.json {
+        print_json(&serde_json::json!({
+            "dry_run": dry_run,
+            "deleted_hashes": deleted_hashes,
+            "live_data_blobs": live_blobs,
+        }));
+    } else if !out.quiet {
+        if dry_run {
+            println!(
+                "Would delete {} unused hash(es) ({} live data blob(s) remaining).",
+                deleted_hashes, live_blobs
+            );
+        } else {
+            println!(
+                "Deleted {} unused hash(es) ({} live data blob(s) remaining).",
+                deleted_hashes, live_blobs
+            );
         }
     }
 }
 
-fn do_resume<B: StoreBackend>(mut hat: HatRc<B>) {
+fn do_check<B: StoreBackend>(hat: HatRc<B>, out: &OutputConfig) {
+    match hat.check() {
+        Ok(()) => {
+            if out.json {
+                print_json(&serde_json::json!({ "ok": true }));
+            } else if !out.quiet {
+                println!("check: ok");
+            }
+        }
+        Err(e) => {
+            if out.json {
+                print_json(&serde_json::json!({
+                    "ok": false,
+                    "error": e.to_string(),
+                }));
+            }
+            fail(format!("check failed: {}", e));
+        }
+    }
+}
+
+fn do_resume<B: StoreBackend>(mut hat: HatRc<B>, out: &OutputConfig) {
     // open_repository() already ran hat.resume(). Publish an updated root listing
     // and flush pending blobs so resumed commits/deletes survive cache loss.
-    if !hat.list_snapshots().is_empty() {
+    let snapshot_count = hat.list_snapshots().len();
+    if snapshot_count > 0 {
         hat.meta_commit().unwrap_or_else(|e| fail(e));
         hat.data_flush().unwrap_or_else(|e| fail(e));
+    }
+
+    if out.json {
+        print_json(&serde_json::json!({
+            "snapshots": snapshot_count,
+        }));
+    } else if !out.quiet {
+        eprintln!("Resumed repository ({} snapshot(s)).", snapshot_count);
     }
 }
 
@@ -181,6 +555,10 @@ fn format_utc_datetime(dt: chrono::DateTime<chrono::Utc>) -> String {
     dt.format("%Y-%m-%d %H:%M:%SZ").to_string()
 }
 
+fn format_utc_rfc3339(dt: chrono::DateTime<chrono::Utc>) -> String {
+    dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
 fn format_unix_ts_utc(ts_secs: Option<i64>) -> String {
     ts_secs
         .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
@@ -188,44 +566,78 @@ fn format_unix_ts_utc(ts_secs: Option<i64>) -> String {
         .unwrap_or_else(|| format!("{:>20}", "-"))
 }
 
-fn do_ls<B: StoreBackend>(hat: HatRc<B>, path: PathBuf, long: bool) {
-    if let Some(f) = hat::vfs::Filesystem::new(hat)
+fn format_unix_ts_rfc3339(ts_secs: Option<i64>) -> Option<String> {
+    ts_secs
+        .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
+        .map(format_utc_rfc3339)
+}
+
+fn do_ls<B: StoreBackend>(hat: HatRc<B>, path: PathBuf, long: bool, out: &OutputConfig) {
+    let Some(listing) = hat::vfs::Filesystem::new(hat)
         .ls(&path)
         .unwrap_or_else(|e| fail(e))
-    {
-        match f {
-            hat::vfs::fs::List::Root(snapshots) => {
-                if long {
-                    let mut families: BTreeMap<String, chrono::DateTime<chrono::Utc>> =
-                        BTreeMap::new();
-                    for s in snapshots {
-                        families
-                            .entry(s.family_name)
-                            .and_modify(|latest| {
-                                if s.created > *latest {
-                                    *latest = s.created;
-                                }
-                            })
-                            .or_insert(s.created);
-                    }
-                    for (name, latest_created) in families {
-                        println!(
-                            "dr-xr-xr-x {:>10} {} {}",
-                            "-",
-                            format_utc_datetime(latest_created),
-                            name
-                        );
-                    }
-                } else {
-                    snapshots
-                        .into_iter()
-                        .map(|s| s.family_name)
-                        .collect::<BTreeSet<_>>()
-                        .into_iter()
-                        .for_each(|name| println!("{}", name));
+    else {
+        fail(format!("path not found: {}", path.display()));
+    };
+
+    match listing {
+        hat::vfs::fs::List::Root(snapshots) => {
+            let mut families: BTreeMap<String, chrono::DateTime<chrono::Utc>> = BTreeMap::new();
+            for s in snapshots {
+                families
+                    .entry(s.family_name)
+                    .and_modify(|latest| {
+                        if s.created > *latest {
+                            *latest = s.created;
+                        }
+                    })
+                    .or_insert(s.created);
+            }
+            if out.json {
+                let items: Vec<_> = families
+                    .into_iter()
+                    .map(|(name, latest_created)| {
+                        serde_json::json!({
+                            "kind": "family",
+                            "name": name,
+                            "path": name,
+                            "created": format_utc_rfc3339(latest_created),
+                        })
+                    })
+                    .collect();
+                print_json(&items);
+            } else if long {
+                for (name, latest_created) in families {
+                    println!(
+                        "dr-xr-xr-x {:>10} {} {}",
+                        "-",
+                        format_utc_datetime(latest_created),
+                        name
+                    );
+                }
+            } else {
+                for name in families.keys() {
+                    println!("{}", name);
                 }
             }
-            hat::vfs::fs::List::Snapshots(snapshots) => {
+        }
+        hat::vfs::fs::List::Snapshots(snapshots) => {
+            if out.json {
+                let items: Vec<_> = snapshots
+                    .into_iter()
+                    .map(|si| {
+                        let snap_path = format!("{}/{}", si.family_name, si.info.snapshot_id);
+                        serde_json::json!({
+                            "kind": "snapshot",
+                            "family": si.family_name,
+                            "snapshot_id": si.info.snapshot_id,
+                            "path": snap_path,
+                            "created": format_utc_rfc3339(si.created),
+                        })
+                    })
+                    .collect();
+                print_json(&items);
+            } else {
                 for si in snapshots {
                     let snap_path =
                         PathBuf::from(si.family_name).join(format!("{}", si.info.snapshot_id));
@@ -241,7 +653,43 @@ fn do_ls<B: StoreBackend>(hat: HatRc<B>, path: PathBuf, long: bool) {
                     }
                 }
             }
-            hat::vfs::fs::List::Dir(files) => {
+        }
+        hat::vfs::fs::List::Dir(files) => {
+            if out.json {
+                let items: Vec<_> = files
+                    .into_iter()
+                    .map(|(entry, content)| {
+                        let name_os_string: ffi::OsString = entry.info.name.into();
+                        let name_str = name_os_string.to_string_lossy().into_owned();
+                        let full_path = path.join(&name_os_string);
+                        let mode = format_entry_mode(&content, entry.info.permissions.as_ref());
+                        let kind = match &content {
+                            hat::hat::walker::Content::Dir(_) => "dir",
+                            hat::hat::walker::Content::Link(_) => "symlink",
+                            hat::hat::walker::Content::Data(_) => "file",
+                        };
+                        let symlink_target = match &content {
+                            hat::hat::walker::Content::Link(t) => {
+                                Some(t.to_string_lossy().into_owned())
+                            }
+                            _ => None,
+                        };
+                        let mut obj = serde_json::json!({
+                            "kind": kind,
+                            "name": name_str,
+                            "path": full_path.to_string_lossy(),
+                            "mode": mode,
+                            "size": entry.info.byte_length,
+                            "mtime": format_unix_ts_rfc3339(entry.info.modified_ts_secs),
+                        });
+                        if let Some(target) = symlink_target {
+                            obj["symlink_target"] = serde_json::Value::String(target);
+                        }
+                        obj
+                    })
+                    .collect();
+                print_json(&items);
+            } else {
                 for (entry, content) in files {
                     let name_os_string: ffi::OsString = entry.info.name.into();
                     let full_path = path.join(name_os_string);
@@ -283,260 +731,337 @@ fn do_ls<B: StoreBackend>(hat: HatRc<B>, path: PathBuf, long: bool) {
     }
 }
 
-fn main() {
-    hat::crypto::keys::init_sodium();
-    env_logger::init();
-
-    let matches = Command::new("hat")
+fn build_cli() -> Command {
+    Command::new("hat")
         .version(concat!("v", env!("CARGO_PKG_VERSION")))
-        .about("Create backup snapshots")
-        .arg(
-            Arg::new("license")
-                .short('l')
-                .long("license")
-                .action(clap::ArgAction::SetTrue)
-                .help("Display the license"),
+        .about("Encrypted, deduplicated backup snapshots")
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .after_help(
+            "Examples:\n  \
+             hat init ~/.hat --backend file --backend-path /mnt/backup/blobs\n  \
+             export HAT_STATE_DIR=~/.hat\n  \
+             hat commit docs ~/Documents\n  \
+             hat ls -l docs\n  \
+             hat checkout docs/1/notes ./restored-notes\n  \
+             hat delete docs/1 --dry-run\n  \
+             hat gc --dry-run",
         )
         .arg(
-            Arg::new("hat_state_dir")
-                .long("hat_state_dir")
+            Arg::new("state_dir")
+                .long("state-dir")
                 .value_name("DIR")
-                .help("Location of Hat's local state")
-                .env("HAT_STATE_DIR"),
+                .value_parser(clap::value_parser!(PathBuf))
+                .global(true)
+                .env("HAT_STATE_DIR")
+                .help("Path to Hat's local repository state directory"),
         )
         .arg(
             Arg::new("backend")
                 .long("backend")
                 .value_name("KIND")
-                .help("Storage backend: cmd (default) or file")
-                .env("HAT_BACKEND"),
+                .value_parser(["file", "cmd"])
+                .global(true)
+                .env("HAT_BACKEND")
+                .help("Storage backend kind"),
         )
         .arg(
             Arg::new("backend_path")
                 .long("backend-path")
                 .value_name("DIR")
-                .help("Directory for file backend blob storage")
-                .env("HAT_BACKEND_PATH"),
+                .value_parser(clap::value_parser!(PathBuf))
+                .global(true)
+                .env("HAT_BACKEND_PATH")
+                .help("Blob storage directory for the file backend"),
+        )
+        .arg(
+            Arg::new("quiet")
+                .short('q')
+                .long("quiet")
+                .action(ArgAction::SetTrue)
+                .global(true)
+                .help("Suppress non-essential status and warning output"),
+        )
+        .arg(
+            Arg::new("verbose")
+                .short('v')
+                .long("verbose")
+                .action(ArgAction::Count)
+                .global(true)
+                .help("Increase logging verbosity (-v for info, -vv for debug)"),
+        )
+        .arg(
+            Arg::new("json")
+                .long("json")
+                .action(ArgAction::SetTrue)
+                .global(true)
+                .help("Emit machine-readable JSON to stdout"),
         )
         .subcommand(
             Command::new("init")
-                .about("Init state directory with a new key and cache dir")
-                .arg(Arg::new("DIR").required(true).help("New state directory to initialize")),
+                .about("Initialize a new repository state directory and key")
+                .after_help(
+                    "Examples:\n  \
+                     hat init ~/.hat --backend file --backend-path /mnt/backup/blobs\n  \
+                     hat init ~/.hat",
+                )
+                .arg(
+                    Arg::new("DIR")
+                        .required(true)
+                        .value_parser(clap::value_parser!(PathBuf))
+                        .help("New state directory to initialize"),
+                ),
         )
         .subcommand(
             Command::new("commit")
-                .about("Commit a new snapshot")
-                .arg(Arg::new("NAME").required(true).help("Name of the snapshot"))
-                .arg(Arg::new("PATH").required(true).help("The path of the snapshot")),
+                .about("Create a new snapshot of a local directory")
+                .after_help("Example:\n  hat commit docs ~/Documents")
+                .arg(
+                    Arg::new("FAMILY")
+                        .required(true)
+                        .help("Snapshot family name"),
+                )
+                .arg(
+                    Arg::new("SOURCE_DIR")
+                        .required(true)
+                        .value_parser(clap::value_parser!(PathBuf))
+                        .help("Local directory to back up"),
+                ),
         )
         .subcommand(
             Command::new("checkout")
-                .about("Checkout a snapshot or subpath into a local destination directory")
+                .about("Restore a snapshot or subpath into a local destination directory")
+                .after_help(
+                    "Examples:\n  \
+                     hat checkout docs ./restore\n  \
+                     hat checkout docs/1 ./restore\n  \
+                     hat checkout docs/latest/subdir ./restore",
+                )
                 .arg(
                     Arg::new("SNAPSHOT_PATH")
                         .required(true)
-                        .help("Snapshot path: <family>, <family>/<id|latest>, or <family>/<id|latest>/<subpath>"),
+                        .value_parser(clap::value_parser!(PathBuf))
+                        .help(
+                            "Snapshot path: <family>, <family>/<id|latest>, or <family>/<id|latest>/<subpath>",
+                        ),
                 )
                 .arg(
                     Arg::new("DEST_DIR")
                         .required(true)
+                        .value_parser(clap::value_parser!(PathBuf))
                         .help("Local destination directory to restore into"),
                 )
                 .arg(
                     Arg::new("id")
                         .long("id")
                         .value_name("ID")
+                        .value_parser(clap::value_parser!(u64))
                         .help("Snapshot ID to checkout when SNAPSHOT_PATH is a family name"),
                 ),
         )
-        .subcommand(Command::new("recover").about("Recover list of commit'ed snapshots"))
+        .subcommand(
+            Command::new("ls")
+                .about("List snapshot families, snapshots, or files inside a snapshot")
+                .after_help(
+                    "Examples:\n  \
+                     hat ls\n  \
+                     hat ls -l docs\n  \
+                     hat ls -l docs/1/subdir",
+                )
+                .arg(
+                    Arg::new("long")
+                        .short('l')
+                        .long("long")
+                        .action(ArgAction::SetTrue)
+                        .help("Use a long listing format with mode, size, and timestamps"),
+                )
+                .arg(
+                    Arg::new("PATH")
+                        .default_value("/")
+                        .value_parser(clap::value_parser!(PathBuf))
+                        .help("Path inside Hat to list"),
+                ),
+        )
         .subcommand(
             Command::new("delete")
                 .about("Delete a snapshot")
-                .arg(Arg::new("NAME").required(true).help("Name of the snapshot family"))
-                .arg(Arg::new("ID").required(true).help("The snapshot id to delete")),
+                .after_help(
+                    "Examples:\n  \
+                     hat delete docs/1 --dry-run\n  \
+                     hat delete docs/1",
+                )
+                .arg(
+                    Arg::new("SNAPSHOT")
+                        .required(true)
+                        .help("Snapshot target as <family>/<id> (or <family> followed by <id>)"),
+                )
+                .arg(
+                    Arg::new("ID")
+                        .help("Snapshot ID when SNAPSHOT is a family name"),
+                )
+                .arg(
+                    Arg::new("dry_run")
+                        .short('n')
+                        .long("dry-run")
+                        .action(ArgAction::SetTrue)
+                        .help("Show what would be deleted without modifying the repository"),
+                ),
         )
         .subcommand(
             Command::new("gc")
-                .about("Garbage collect: identify and remove unused data blocks.")
+                .about("Garbage-collect unreferenced hashes and data blobs")
+                .after_help("Examples:\n  hat gc --dry-run\n  hat gc")
                 .arg(
-                    Arg::new("pretend")
-                        .short('p')
-                        .long("pretend")
-                        .action(clap::ArgAction::SetTrue)
-                        .help("Do not modify any data"),
+                    Arg::new("dry_run")
+                        .short('n')
+                        .long("dry-run")
+                        .action(ArgAction::SetTrue)
+                        .help("Report what would be deleted without modifying any data"),
                 ),
         )
-        .subcommand(Command::new("check").about("Verify live hash chunks against the backend"))
+        .subcommand(
+            Command::new("check").about("Verify all live hash chunks against the storage backend"),
+        )
+        .subcommand(
+            Command::new("recover")
+                .about("Rebuild local cache from committed snapshots on the storage backend"),
+        )
         .subcommand(
             Command::new("resume")
                 .about("Clean up incomplete local state and republish snapshot metadata"),
         )
         .subcommand(
             Command::new("mount")
-                .about("Mount Hat snapshots on a mountpoint path using FUSE")
-                .arg(Arg::new("PATH").required(true).help("Path of the mount point")),
-        )
-        .subcommand(
-            Command::new("ls")
-                .about("List Hat snapshot paths")
+                .about("Mount Hat snapshots as a read-only FUSE filesystem")
                 .arg(
-                    Arg::new("long")
-                        .short('l')
-                        .long("long")
-                        .action(clap::ArgAction::SetTrue)
-                        .help("Use a long listing format including mode, size, and mtime/created time"),
-                )
-                .arg(
-                    Arg::new("PATH")
-                        .default_value("/")
-                        .help("Path to list inside Hat"),
+                    Arg::new("MOUNTPOINT")
+                        .required(true)
+                        .value_parser(clap::value_parser!(PathBuf))
+                        .help("Local directory mountpoint"),
                 ),
         )
-        .get_matches();
+        .subcommand(Command::new("license").about("Display software license information"))
+}
 
-    if matches.get_flag("license") {
-        license();
-        std::process::exit(0);
-    }
+fn main() {
+    hat::crypto::keys::init_sodium();
 
-    let flag_or_env = |name: &str| {
-        matches
-            .get_one::<String>(name)
-            .cloned()
-            .or_else(|| env::var_os(name.to_uppercase()).map(|s| s.into_string().unwrap()))
-            .unwrap_or_else(|| {
-                eprintln!(
-                    "Error: {} required (pass --{} or set {})",
-                    name,
-                    name,
-                    name.to_uppercase()
-                );
-                std::process::exit(1);
-            })
+    let matches = build_cli().get_matches();
+    let out = OutputConfig {
+        quiet: matches.get_flag("quiet"),
+        json: matches.get_flag("json"),
     };
-
-    if let Some(("init", dir)) = matches.subcommand() {
-        let dir = PathBuf::from(dir.get_one::<String>("DIR").expect("missing DIR to initialize"));
-        if let Some(parent) = dir.parent() {
-            if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent).unwrap_or_else(|e| fail(e));
-            }
-        }
-        let mut builder = fs::DirBuilder::new();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        if let Err(e) = builder.create(&dir) {
-            if e.kind() == std::io::ErrorKind::AlreadyExists {
-                fail(format!("directory already exists ({})", dir.display()));
-            }
-            fail(format!("failed to create directory {}: {}", dir.display(), e));
-        }
-        builder
-            .create(dir.join("cache"))
-            .unwrap_or_else(|e| fail(e));
-        hat::crypto::keys::Keeper::write_new_universal_key(&dir).unwrap_or_else(|e| fail(e));
-
-        std::process::exit(0);
-    }
-
-    let cache_dir = PathBuf::from(flag_or_env("hat_state_dir"));
-    let kind = backend_kind(&matches);
+    init_logging(out.quiet, matches.get_count("verbose"));
 
     match matches.subcommand() {
-        Some(("resume", _)) => match kind {
-            "file" => do_resume(open_hat_file(cache_dir, &matches)),
-            _ => do_resume(open_hat_cmd(cache_dir)),
+        Some(("license", _)) => {
+            license();
+            return;
+        }
+        Some(("init", cmd)) => {
+            let dir = cmd
+                .get_one::<PathBuf>("DIR")
+                .expect("required DIR")
+                .clone();
+            do_init(dir, &matches, &out);
+            return;
+        }
+        _ => {}
+    }
+
+    let state_dir = require_state_dir(&matches);
+    let backend = resolve_backend(&state_dir, &matches);
+
+    match matches.subcommand() {
+        Some(("resume", _)) => match backend {
+            BackendSpec::File(p) => do_resume(open_hat_file(state_dir, p), &out),
+            BackendSpec::Cmd => do_resume(open_hat_cmd(state_dir), &out),
         },
         Some(("commit", cmd)) => {
-            let name = cmd.get_one::<String>("NAME").unwrap().to_owned();
-            let path = PathBuf::from(cmd.get_one::<String>("PATH").unwrap());
-            match kind {
-                "file" => do_commit(open_hat_file(cache_dir, &matches), name, path),
-                _ => do_commit(open_hat_cmd(cache_dir), name, path),
+            let family = cmd.get_one::<String>("FAMILY").unwrap().to_owned();
+            let source_dir = cmd.get_one::<PathBuf>("SOURCE_DIR").unwrap().clone();
+            match backend {
+                BackendSpec::File(p) => {
+                    do_commit(open_hat_file(state_dir, p), family, source_dir, &out)
+                }
+                BackendSpec::Cmd => do_commit(open_hat_cmd(state_dir), family, source_dir, &out),
             }
         }
         Some(("checkout", cmd)) => {
-            let snapshot_path = PathBuf::from(cmd.get_one::<String>("SNAPSHOT_PATH").unwrap());
-            let dest_dir = PathBuf::from(cmd.get_one::<String>("DEST_DIR").unwrap());
-            let id = cmd.get_one::<String>("id").map(|s| {
-                s.parse::<u64>()
-                    .unwrap_or_else(|e| fail(format!("invalid snapshot id '{}': {}", s, e)))
-            });
-            match kind {
-                "file" => do_checkout(open_hat_file(cache_dir, &matches), snapshot_path, id, dest_dir),
-                _ => do_checkout(open_hat_cmd(cache_dir), snapshot_path, id, dest_dir),
+            let snapshot_path = cmd.get_one::<PathBuf>("SNAPSHOT_PATH").unwrap().clone();
+            let dest_dir = cmd.get_one::<PathBuf>("DEST_DIR").unwrap().clone();
+            let id = cmd.get_one::<u64>("id").copied();
+            match backend {
+                BackendSpec::File(p) => {
+                    do_checkout(open_hat_file(state_dir, p), snapshot_path, id, dest_dir, &out)
+                }
+                BackendSpec::Cmd => {
+                    do_checkout(open_hat_cmd(state_dir), snapshot_path, id, dest_dir, &out)
+                }
             }
         }
-        Some(("recover", _)) => match kind {
-            "file" => do_recover(open_hat_file(cache_dir, &matches)),
-            _ => do_recover(open_hat_cmd(cache_dir)),
+        Some(("recover", _)) => match backend {
+            BackendSpec::File(p) => do_recover(open_hat_file(state_dir, p), &out),
+            BackendSpec::Cmd => do_recover(open_hat_cmd(state_dir), &out),
         },
         Some(("delete", cmd)) => {
-            let name = cmd.get_one::<String>("NAME").unwrap().to_owned();
-            let id_str = cmd.get_one::<String>("ID").unwrap();
-            let id = id_str
-                .parse::<u64>()
-                .unwrap_or_else(|e| fail(format!("invalid snapshot id '{}': {}", id_str, e)));
-            match kind {
-                "file" => do_delete(open_hat_file(cache_dir, &matches), name, id),
-                _ => do_delete(open_hat_cmd(cache_dir), name, id),
+            let snapshot_arg = cmd.get_one::<String>("SNAPSHOT").unwrap();
+            let id_arg = cmd.get_one::<String>("ID").map(|s| s.as_str());
+            let (family, id) = parse_delete_target(snapshot_arg, id_arg);
+            let dry_run = cmd.get_flag("dry_run");
+            match backend {
+                BackendSpec::File(p) => {
+                    do_delete(open_hat_file(state_dir, p), family, id, dry_run, &out)
+                }
+                BackendSpec::Cmd => do_delete(open_hat_cmd(state_dir), family, id, dry_run, &out),
             }
         }
         Some(("gc", cmd)) => {
-            let pretend = cmd.get_flag("pretend");
-            match kind {
-                "file" => do_gc(open_hat_file(cache_dir, &matches), pretend),
-                _ => do_gc(open_hat_cmd(cache_dir), pretend),
+            let dry_run = cmd.get_flag("dry_run");
+            match backend {
+                BackendSpec::File(p) => do_gc(open_hat_file(state_dir, p), dry_run, &out),
+                BackendSpec::Cmd => do_gc(open_hat_cmd(state_dir), dry_run, &out),
             }
         }
-        Some(("check", _)) => match kind {
-            "file" => do_check(open_hat_file(cache_dir, &matches)),
-            _ => do_check(open_hat_cmd(cache_dir)),
+        Some(("check", _)) => match backend {
+            BackendSpec::File(p) => do_check(open_hat_file(state_dir, p), &out),
+            BackendSpec::Cmd => do_check(open_hat_cmd(state_dir), &out),
         },
         Some(("mount", cmd)) => {
             #[cfg(feature = "fuse")]
             {
-                let path = cmd.get_one::<String>("PATH").unwrap();
-                match kind {
-                    "file" => {
-                        let hat = open_hat_file(cache_dir, &matches);
+                let mountpoint = cmd.get_one::<PathBuf>("MOUNTPOINT").unwrap();
+                match backend {
+                    BackendSpec::File(p) => {
+                        let hat = open_hat_file(state_dir, p);
                         hat::vfs::Fuse::new(hat)
-                            .mount(&path)
+                            .mount(mountpoint)
                             .unwrap_or_else(|e| fail(e));
                     }
-                    _ => {
-                        let hat = open_hat_cmd(cache_dir);
+                    BackendSpec::Cmd => {
+                        let hat = open_hat_cmd(state_dir);
                         hat::vfs::Fuse::new(hat)
-                            .mount(&path)
+                            .mount(mountpoint)
                             .unwrap_or_else(|e| fail(e));
                     }
                 }
             }
             #[cfg(not(feature = "fuse"))]
             {
-                let _ = cmd;
-                let _ = cache_dir;
-                eprintln!(
-                    "Error: FUSE support was not enabled at build time. Rebuild with `--features fuse`."
+                let _ = (cmd, state_dir, backend);
+                fail(
+                    "FUSE support was not enabled at build time. Rebuild with '--features fuse'",
                 );
-                std::process::exit(1);
             }
         }
         Some(("ls", cmd)) => {
-            let path: PathBuf = cmd.get_one::<String>("PATH").unwrap().into();
+            let path = cmd.get_one::<PathBuf>("PATH").unwrap().clone();
             let long = cmd.get_flag("long");
-            match kind {
-                "file" => do_ls(open_hat_file(cache_dir, &matches), path, long),
-                _ => do_ls(open_hat_cmd(cache_dir), path, long),
+            match backend {
+                BackendSpec::File(p) => do_ls(open_hat_file(state_dir, p), path, long, &out),
+                BackendSpec::Cmd => do_ls(open_hat_cmd(state_dir), path, long, &out),
             }
         }
-        _ => {
-            println!("No subcommand specified\nFor more information re-run with --help");
-            std::process::exit(1);
-        }
+        _ => unreachable!("clap enforces subcommand_required(true)"),
     }
 }

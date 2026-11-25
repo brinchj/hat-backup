@@ -56,55 +56,51 @@ Build:
 cargo build --release
 ```
 
-Usage (`hatbin`)
-----------------
+Usage (`hat`)
+-------------
 The CLI supports a local directory backend (`--backend file --backend-path <DIR>`)
-and an external command backend (`--backend cmd`, default).
+and an external command backend (`--backend cmd`). Backend settings passed to
+`hat init` are saved in `<state-dir>/config.json` (`0600`) so subsequent commands
+only need `--state-dir` or `HAT_STATE_DIR`.
 
 ```sh
-# Initialize a new repository state directory (0700 dir, 0600 universal key)
-hatbin init /path/to/hat-state
+# Initialize a new repository state directory (0700 dir, 0600 key & config)
+hat init /path/to/hat-state --backend file --backend-path /path/to/blobs
+export HAT_STATE_DIR=/path/to/hat-state
 
 # Commit a directory snapshot into family "docs"
-hatbin --hat_state_dir /path/to/hat-state \
-       --backend file --backend-path /path/to/blobs \
-       commit docs /path/to/source-dir
+hat commit docs /path/to/source-dir
 
-# List families, snapshots, or directory contents inside snapshots (defaults to `/`; `-l` for mode/size/mtime)
-hatbin --hat_state_dir /path/to/hat-state --backend file --backend-path /path/to/blobs \
-       ls -l
+# List families, snapshots, or directory contents (defaults to `/`; `-l` for mode/size/mtime)
+hat ls -l
+hat ls -l docs
+hat ls -l docs/1
 
 # Checkout latest snapshot, a specific snapshot, or a subpath into a local destination directory
-hatbin --hat_state_dir /path/to/hat-state --backend file --backend-path /path/to/blobs \
-       checkout docs /path/to/restore-dir
-hatbin --hat_state_dir /path/to/hat-state --backend file --backend-path /path/to/blobs \
-       checkout docs/1 /path/to/restore-dir
-hatbin --hat_state_dir /path/to/hat-state --backend file --backend-path /path/to/blobs \
-       checkout docs/1/subdir /path/to/restore-dir
+hat checkout docs /path/to/restore-dir
+hat checkout docs/1 /path/to/restore-dir
+hat checkout docs/1/subdir /path/to/restore-dir
 
 # Verify every indexed hash chunk against the backend
-hatbin --hat_state_dir /path/to/hat-state --backend file --backend-path /path/to/blobs \
-       check
+hat check
 
-# Delete a snapshot and garbage-collect unreferenced blobs (--pretend for dry-run)
-hatbin --hat_state_dir /path/to/hat-state --backend file --backend-path /path/to/blobs \
-       delete docs 1
-hatbin --hat_state_dir /path/to/hat-state --backend file --backend-path /path/to/blobs \
-       gc --pretend
-hatbin --hat_state_dir /path/to/hat-state --backend file --backend-path /path/to/blobs \
-       gc
+# Delete a snapshot and garbage-collect unreferenced blobs (`-n`/`--dry-run` to preview)
+hat delete docs/1 --dry-run
+hat delete docs/1
+hat gc --dry-run
+hat gc
 
 # Rebuild local cache/index.sqlite3 from backend blobs (requires secret-universal-key)
-hatbin --hat_state_dir /path/to/hat-state --backend file --backend-path /path/to/blobs \
-       recover
+hat recover
 
 # Clean up incomplete local state and republish snapshot metadata
-hatbin --hat_state_dir /path/to/hat-state --backend file --backend-path /path/to/blobs \
-       resume
+hat resume
 ```
 
-Environment variables `HAT_STATE_DIR`, `HAT_BACKEND`, and `HAT_BACKEND_PATH` may
-be used in place of `--hat_state_dir`, `--backend`, and `--backend-path`.
+Global options (`--state-dir`, `--backend`, `--backend-path`, `-q/--quiet`,
+`-v/--verbose`, `--json`) can be passed before or after any subcommand. Precedence
+is CLI flags > environment variables (`HAT_STATE_DIR`, `HAT_BACKEND`,
+`HAT_BACKEND_PATH`) > `<state-dir>/config.json`.
 
 Testing & Benchmarks
 --------------------

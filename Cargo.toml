@@ -6,7 +6,7 @@ edition = "2021"
 rust-version = "1.99"
 
 [[bin]]
-name = "hatbin"
+name = "hat"
 path = "src/main.rs"
 
 [dependencies]
@@ -26,6 +26,7 @@ lru = "0.19"
 scoped-thread-pool = "1"
 secstr = "0.5"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "2"
 
 [features]

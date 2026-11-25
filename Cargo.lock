@@ -723,6 +723,7 @@ dependencies = [
  "scoped-thread-pool",
  "secstr",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]

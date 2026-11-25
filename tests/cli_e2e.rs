@@ -5,7 +5,7 @@ use common::*;
 use std::fs;
 
 fn hatbin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_hatbin"))
+    Command::new(env!("CARGO_BIN_EXE_hat"))
 }
 
 fn with_file_backend<'a>(cmd: &'a mut Command, sb: &Sandbox) -> &'a mut Command {
@@ -380,16 +380,21 @@ fn cli_ls_lists_families_and_snapshots() {
         subdir_stdout
     );
 
-    // Invalid snapshot ID under a leading-slash path must NOT return root families.
+    // Invalid snapshot ID under a leading-slash path must fail non-zero and NOT return root families.
     let out_bad = with_file_backend(&mut hatbin(), &sb)
         .args(["ls", "/alpha/alpha/"])
         .output()
         .unwrap();
-    assert!(out_bad.status.success());
+    assert!(!out_bad.status.success());
     assert!(
         String::from_utf8_lossy(&out_bad.stdout).trim().is_empty(),
-        "ls /alpha/alpha/ must produce empty output, got: {:?}",
+        "ls /alpha/alpha/ must produce empty stdout, got: {:?}",
         String::from_utf8_lossy(&out_bad.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&out_bad.stderr).contains("path not found"),
+        "expected path not found error on stderr, got: {:?}",
+        String::from_utf8_lossy(&out_bad.stderr)
     );
 }
 
@@ -485,21 +490,21 @@ fn cli_gc_pretend_does_not_delete_blobs() {
     let bytes_before = backend_total_bytes(&sb.backend);
 
     // Dry-run gc must NOT remove any backend blobs or hashes.
-    let pretend_out = with_file_backend(&mut hatbin(), &sb)
-        .args(["gc", "--pretend"])
+    let dry_run_out = with_file_backend(&mut hatbin(), &sb)
+        .args(["gc", "--dry-run"])
         .output()
         .unwrap();
-    assert!(pretend_out.status.success());
-    let stdout = String::from_utf8_lossy(&pretend_out.stdout);
+    assert!(dry_run_out.status.success());
+    let stdout = String::from_utf8_lossy(&dry_run_out.stdout);
     assert!(
-        stdout.contains("Would delete hashes:") && !stdout.contains("Would delete hashes: 0"),
-        "expected non-zero pretend delete count, got: {:?}",
+        stdout.contains("Would delete ") && !stdout.contains("Would delete 0 "),
+        "expected non-zero dry-run delete count, got: {:?}",
         stdout
     );
     assert_eq!(
         backend_files(&sb.backend),
         blobs_before,
-        "gc --pretend must not modify backend blobs"
+        "gc --dry-run must not modify backend blobs"
     );
     assert_eq!(backend_total_bytes(&sb.backend), bytes_before);
 
@@ -510,7 +515,7 @@ fn cli_gc_pretend_does_not_delete_blobs() {
         .success();
     assert!(
         backend_files(&sb.backend).len() < blobs_before.len(),
-        "real gc must reclaim blobs left untouched by gc --pretend"
+        "real gc must reclaim blobs left untouched by gc --dry-run"
     );
 
     with_file_backend(&mut hatbin(), &sb)
@@ -898,9 +903,279 @@ fn cli_ls_long_shows_timestamps_and_metadata() {
         link_line
     );
 
-    // 4. Top-level `-l` still prints license text (no flag collision with `ls -l`).
-    let lic = hatbin().arg("-l").output().unwrap();
+    // 4. `license` subcommand prints license text cleanly.
+    let lic = hatbin().arg("license").output().unwrap();
     assert!(lic.status.success());
     let lic_stdout = String::from_utf8_lossy(&lic.stdout);
     assert!(lic_stdout.contains("Apache License") || lic_stdout.contains("clap"));
+}
+
+#[test]
+fn cli_ergonomics_help_global_flags_config_and_delete_dry_run() {
+    let sb = sandbox();
+    write_fixture(&sb.fixture, &basic_fixture());
+
+    // 1. Bare `hat` (no args) shows help + examples, not `HAT_STATE_DIR required`.
+    let no_args = hatbin()
+        .env_remove("HAT_STATE_DIR")
+        .env_remove("HAT_BACKEND")
+        .env_remove("HAT_BACKEND_PATH")
+        .output()
+        .unwrap();
+    assert!(!no_args.status.success());
+    let help_err = String::from_utf8_lossy(&no_args.stderr);
+    assert!(
+        help_err.contains("Usage: hat") && help_err.contains("Examples:"),
+        "expected help with usage and examples on bare `hat`, got: {:?}",
+        help_err
+    );
+
+    // 2. Invalid `--backend` value is rejected immediately by clap.
+    let bad_backend = hatbin()
+        .args(["check", "--backend", "not-a-backend"])
+        .output()
+        .unwrap();
+    assert!(!bad_backend.status.success());
+    let bad_backend_err = String::from_utf8_lossy(&bad_backend.stderr);
+    assert!(
+        bad_backend_err.contains("possible values") && bad_backend_err.contains("file"),
+        "expected clap possible-values error for bad backend, got: {:?}",
+        bad_backend_err
+    );
+
+    // 3. `init` with backend flags persists `0600` config.json so later commands only need `--state-dir`
+    //    and accept global flags *after* the subcommand.
+    hatbin()
+        .env_remove("HAT_STATE_DIR")
+        .env_remove("HAT_BACKEND")
+        .env_remove("HAT_BACKEND_PATH")
+        .args([
+            "init",
+            sb.repo.to_str().unwrap(),
+            "--backend",
+            "file",
+            "--backend-path",
+            sb.backend.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let cfg_mode = fs::metadata(sb.repo.join("config.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(cfg_mode, 0o600, "config.json must be 0600");
+    }
+
+    // Commit with global `--state-dir` placed *after* the subcommand; stdout stays completely empty.
+    let commit_out = hatbin()
+        .env_remove("HAT_STATE_DIR")
+        .env_remove("HAT_BACKEND")
+        .env_remove("HAT_BACKEND_PATH")
+        .args([
+            "commit",
+            "docs",
+            sb.fixture.to_str().unwrap(),
+            "--state-dir",
+            sb.repo.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(commit_out.status.success());
+    assert!(
+        commit_out.stdout.is_empty(),
+        "commit must not pollute stdout, got: {:?}",
+        String::from_utf8_lossy(&commit_out.stdout)
+    );
+    let commit_err = String::from_utf8_lossy(&commit_out.stderr);
+    assert!(
+        commit_err.contains("Committed docs/1"),
+        "expected confirmation on stderr, got: {:?}",
+        commit_err
+    );
+
+    // `-q` suppresses status confirmation on stderr.
+    let quiet_commit = hatbin()
+        .env_remove("HAT_STATE_DIR")
+        .env_remove("HAT_BACKEND")
+        .env_remove("HAT_BACKEND_PATH")
+        .args([
+            "commit",
+            "docs",
+            sb.fixture.to_str().unwrap(),
+            "--state-dir",
+            sb.repo.to_str().unwrap(),
+            "-q",
+        ])
+        .output()
+        .unwrap();
+    assert!(quiet_commit.status.success());
+    assert!(quiet_commit.stdout.is_empty());
+    assert!(quiet_commit.stderr.is_empty());
+
+    // `delete <family>/<id> --dry-run` checks existence and does not mutate.
+    let del_dry = hatbin()
+        .env_remove("HAT_BACKEND")
+        .env_remove("HAT_BACKEND_PATH")
+        .args([
+            "delete",
+            "docs/1",
+            "--dry-run",
+            "--state-dir",
+            sb.repo.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(del_dry.status.success());
+    assert!(String::from_utf8_lossy(&del_dry.stdout).contains("Would delete docs/1"));
+
+    // Snapshot 1 still exists after dry-run.
+    hatbin()
+        .env_remove("HAT_BACKEND")
+        .env_remove("HAT_BACKEND_PATH")
+        .args(["ls", "docs/1", "--state-dir", sb.repo.to_str().unwrap()])
+        .assert()
+        .success();
+
+    // Nonexistent snapshot fails on `--dry-run`.
+    hatbin()
+        .env_remove("HAT_BACKEND")
+        .env_remove("HAT_BACKEND_PATH")
+        .args([
+            "delete",
+            "docs/999",
+            "--dry-run",
+            "--state-dir",
+            sb.repo.to_str().unwrap(),
+        ])
+        .assert()
+        .failure();
+
+    // Real `delete docs/1` succeeds and hints `hat gc`.
+    let del_real = hatbin()
+        .env_remove("HAT_BACKEND")
+        .env_remove("HAT_BACKEND_PATH")
+        .args(["delete", "docs/1", "--state-dir", sb.repo.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(del_real.status.success());
+    let del_err = String::from_utf8_lossy(&del_real.stderr);
+    assert!(
+        del_err.contains("Deleted docs/1") && del_err.contains("hat gc"),
+        "expected delete confirmation and gc hint on stderr, got: {:?}",
+        del_err
+    );
+}
+
+#[test]
+fn cli_json_output_across_commands() {
+    let sb = sandbox();
+    write_fixture(&sb.fixture, &basic_fixture());
+
+    let init_out = hatbin()
+        .args([
+            "init",
+            sb.repo.to_str().unwrap(),
+            "--backend",
+            "file",
+            "--backend-path",
+            sb.backend.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(init_out.status.success());
+    let init_json: serde_json::Value = serde_json::from_slice(&init_out.stdout).unwrap();
+    assert_eq!(init_json["backend"], "file");
+
+    let commit_out = hatbin()
+        .args([
+            "commit",
+            "docs",
+            sb.fixture.to_str().unwrap(),
+            "--state-dir",
+            sb.repo.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(commit_out.status.success());
+    let commit_json: serde_json::Value = serde_json::from_slice(&commit_out.stdout).unwrap();
+    assert_eq!(commit_json["family"], "docs");
+    assert_eq!(commit_json["snapshot_id"], 1);
+
+    // `ls --json` at root, family, and snapshot dir.
+    let ls_root = hatbin()
+        .args(["ls", "--json", "--state-dir", sb.repo.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(ls_root.status.success());
+    let root_arr: serde_json::Value = serde_json::from_slice(&ls_root.stdout).unwrap();
+    assert!(root_arr
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v["kind"] == "family" && v["name"] == "docs"));
+
+    let ls_fam = hatbin()
+        .args([
+            "ls",
+            "docs",
+            "--json",
+            "--state-dir",
+            sb.repo.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(ls_fam.status.success());
+    let fam_arr: serde_json::Value = serde_json::from_slice(&ls_fam.stdout).unwrap();
+    assert_eq!(fam_arr[0]["kind"], "snapshot");
+    assert_eq!(fam_arr[0]["snapshot_id"], 1);
+
+    let ls_dir = hatbin()
+        .args([
+            "ls",
+            "docs/1",
+            "--json",
+            "--state-dir",
+            sb.repo.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(ls_dir.status.success());
+    let dir_arr: serde_json::Value = serde_json::from_slice(&ls_dir.stdout).unwrap();
+    assert!(dir_arr
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v["kind"] == "file" && v["name"] == "readme.txt"));
+
+    // `check --json`
+    let check_out = hatbin()
+        .args(["check", "--json", "--state-dir", sb.repo.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(check_out.status.success());
+    let check_json: serde_json::Value = serde_json::from_slice(&check_out.stdout).unwrap();
+    assert_eq!(check_json["ok"], true);
+
+    // `gc --dry-run --json`
+    let gc_out = hatbin()
+        .args([
+            "gc",
+            "-n",
+            "--json",
+            "--state-dir",
+            sb.repo.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(gc_out.status.success());
+    let gc_json: serde_json::Value = serde_json::from_slice(&gc_out.stdout).unwrap();
+    assert_eq!(gc_json["dry_run"], true);
+    assert!(gc_json["live_data_blobs"].as_u64().unwrap() > 0);
 }
