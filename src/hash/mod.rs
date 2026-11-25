@@ -316,16 +316,17 @@ impl HashIndex {
     }
 
     /// Permanently delete hash by its ID (and any cached tree edges).
+    #[cfg(test)]
     pub fn delete(&self, id: u64) {
         self.0.index.lock().hash_delete(id)
     }
 
-    /// List all hash IDs currently in the index.
-    pub fn all_ids(&self) -> Vec<u64> {
-        self.0.index.lock().hash_all_ids()
+    /// Permanently delete a batch of unreachable hash IDs (and their cached tree edges).
+    pub fn delete_batch(&self, ids: &[u64]) {
+        self.0.index.lock().hash_delete_batch(ids)
     }
 
-    /// Fetch full hash metadata by ID (used during mark-and-sweep GC).
+    /// Fetch full hash metadata by ID (used during GC self-healing fallback).
     pub fn locate_by_id(&self, id: u64) -> Option<db::Entry> {
         self.0.index.lock().hash_locate_by_id(id)
     }

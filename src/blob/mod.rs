@@ -255,14 +255,8 @@ impl<B: StoreBackend> StoreInner<B> {
         Ok(())
     }
 
-    fn tag(&mut self, chunk: ChunkRef, tag: tags::Tag) {
-        self.blob_index.tag(
-            &BlobDesc {
-                id: chunk.blob_id.unwrap_or(0),
-                name: chunk.blob_name,
-            },
-            tag,
-        );
+    fn tag_ids(&mut self, ids: &[i64], tag: tags::Tag) {
+        self.blob_index.tag_ids(ids, tag);
     }
 
     fn tag_all(&mut self, tag: tags::Tag) {
@@ -422,8 +416,8 @@ impl<B: StoreBackend> BlobStore<B> {
         self.lock().recover()
     }
 
-    pub fn tag(&self, chunk: ChunkRef, tag: tags::Tag) {
-        self.lock().tag(chunk, tag)
+    pub fn tag_ids(&self, ids: &[i64], tag: tags::Tag) {
+        self.lock().tag_ids(ids, tag)
     }
 
     pub fn tag_all(&self, tag: tags::Tag) {

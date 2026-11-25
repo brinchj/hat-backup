@@ -146,8 +146,8 @@ impl BlobIndex {
             })
     }
 
-    pub fn tag(&self, blob: &BlobDesc, tag: tags::Tag) {
-        self.0.index.lock().blob_set_tag(tag, Some(blob))
+    pub fn tag_ids(&self, ids: &[i64], tag: tags::Tag) {
+        self.0.index.lock().blob_set_tag_ids(tag, ids)
     }
 
     pub fn tag_all(&self, tag: tags::Tag) {

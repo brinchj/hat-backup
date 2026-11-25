@@ -27,7 +27,7 @@ use crate::snapshot;
 use crate::tags;
 use hex;
 use std::cmp;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi;
 use std::fs;
 use std::path::PathBuf;
@@ -1245,11 +1245,16 @@ impl<B: StoreBackend> Hat<B> {
         self.deregister_by_name(family.name.clone(), snapshot_id)
     }
 
-    /// Mark pass of mark-and-sweep GC: walk all live snapshots locally using `hashes.childs`
-    /// and the local `tree_edges` cache (0 remote downloads in the steady state; lazily
-    /// backfills `tree_edges` from the backend if a `TreeList` root is uncached).
-    fn mark_live_hashes(&mut self) -> Result<HashSet<u64>, HatError> {
-        let mut live_ids: HashSet<u64> = HashSet::new();
+    /// Mark pass of mark-and-sweep GC: bulk-load the hash graph and `tree_edges` into
+    /// memory (2 SQLite scans, 0 remote downloads in the steady state; lazily backfills
+    /// `tree_edges` from the backend if a `TreeList` root is uncached).
+    fn mark_live_hashes(&mut self) -> Result<(HashSet<u64>, HashMap<u64, db::HashGcNode>), HatError> {
+        let (graph, mut all_edges) = {
+            let mut db = self.db.lock();
+            (db.hash_load_gc_graph(), db.tree_edges_load_all())
+        };
+
+        let mut live_ids: HashSet<u64> = HashSet::with_capacity(graph.len());
         let mut expanded_trees: HashSet<u64> = HashSet::new();
         let mut worklist: Vec<(u64, bool)> = Vec::new();
 
@@ -1261,10 +1266,9 @@ impl<B: StoreBackend> Hat<B> {
                 .hash_index
                 .get_id(&hash)
                 .ok_or("Live snapshot root hash missing from hash index")?;
-            let is_tree_root = self
-                .hash_index
-                .locate_by_id(id)
-                .map(|e| e.leaf == blob::LeafType::TreeList)
+            let is_tree_root = graph
+                .get(&id)
+                .map(|n| n.leaf == blob::LeafType::TreeList)
                 .unwrap_or(false);
             worklist.push((id, is_tree_root));
         }
@@ -1275,7 +1279,7 @@ impl<B: StoreBackend> Hat<B> {
                 continue;
             }
 
-            let entry = self.hash_index.locate_by_id(id).ok_or_else(|| {
+            let node = graph.get(&id).ok_or_else(|| {
                 format!(
                     "Live hash id {} missing from hash index; run recover to rebuild cache",
                     id
@@ -1283,19 +1287,24 @@ impl<B: StoreBackend> Hat<B> {
             })?;
 
             if newly_marked {
-                if let Some(childs) = entry.childs {
-                    for cid in childs {
+                if let Some(ref childs) = node.childs {
+                    for &cid in childs {
                         worklist.push((cid, false));
                     }
                 }
             }
 
             if is_tree_root && expanded_trees.insert(id) {
-                let cached_edges = self.db.lock().tree_edges_get(id);
-                let edges = match cached_edges {
-                    Some(cached) => cached,
+                let edges = match all_edges.get(&id) {
+                    Some(cached) => cached.clone(),
                     None => {
                         // Self-healing fallback: fetch this TreeList once from backend and cache edges.
+                        let entry = self.hash_index.locate_by_id(id).ok_or_else(|| {
+                            format!(
+                                "Live hash id {} missing from hash index; run recover to rebuild cache",
+                                id
+                            )
+                        })?;
                         let pref = entry
                             .persistent_ref
                             .ok_or("TreeList root missing persistent_ref during GC")?;
@@ -1323,80 +1332,80 @@ impl<B: StoreBackend> Hat<B> {
                             child_ids.push(cid);
                         }
                         self.db.lock().tree_edges_set(id, &child_ids);
+                        all_edges.insert(id, child_ids.clone());
                         child_ids
                     }
                 };
 
                 for cid in edges {
-                    let child_is_tree = self
-                        .hash_index
-                        .locate_by_id(cid)
-                        .map(|e| e.leaf == blob::LeafType::TreeList)
+                    let child_is_tree = graph
+                        .get(&cid)
+                        .map(|n| n.leaf == blob::LeafType::TreeList)
                         .unwrap_or(false);
                     worklist.push((cid, child_is_tree));
                 }
             }
         }
 
-        Ok(live_ids)
+        Ok((live_ids, graph))
     }
 
-    /// Dry-run garbage collection: return `(unused_hashes, live_hashes)` without deleting
+    fn distinct_live_blob_ids(
+        live: &HashSet<u64>,
+        graph: &HashMap<u64, db::HashGcNode>,
+    ) -> Vec<i64> {
+        let unique: HashSet<i64> = live
+            .iter()
+            .filter_map(|id| graph.get(id))
+            .map(|n| n.blob_id)
+            .filter(|&bid| bid > 0)
+            .collect();
+        unique.into_iter().collect()
+    }
+
+    /// Dry-run garbage collection: return `(unused_hashes, live_data_blobs)` without deleting
     /// any hashes or backend blobs.
     pub fn gc_pretend(&mut self) -> Result<(u64, u64), HatError> {
-        let live = self.mark_live_hashes()?;
-        let all_ids = self.hash_index.all_ids();
-        let dead_count = all_ids.iter().filter(|id| !live.contains(id)).count() as u64;
-
-        let mut live_blobs = 0u64;
-        for entry in self.hash_index.list() {
-            if entry.persistent_ref.is_some() {
-                if let Some(id) = self.hash_index.get_id(&entry.hash) {
-                    if live.contains(&id) {
-                        live_blobs += 1;
-                    }
-                }
-            }
-        }
+        let (live, graph) = self.mark_live_hashes()?;
+        let dead_count = graph.keys().filter(|id| !live.contains(id)).count() as u64;
+        let live_blobs = Self::distinct_live_blob_ids(&live, &graph).len() as u64;
 
         Ok((dead_count, live_blobs))
     }
 
     /// Mark-and-sweep garbage collection:
     /// 1. Mark all hashes reachable from live snapshots via `hashes.childs` + `tree_edges`.
-    /// 2. Sweep unreachable hashes (and their cached `tree_edges`) from SQLite.
+    /// 2. Sweep unreachable hashes (and their cached `tree_edges`) from SQLite in batches.
     /// 3. Delete backend blobs that are no longer referenced by any surviving hash.
+    /// Returns `(deleted_hashes, live_data_blobs)`.
     pub fn gc(&mut self) -> Result<(u64, u64), HatError> {
-        let live = self.mark_live_hashes()?;
-        let all_ids = self.hash_index.all_ids();
+        let (live, graph) = self.mark_live_hashes()?;
+        let dead_ids: Vec<u64> = graph
+            .keys()
+            .copied()
+            .filter(|id| !live.contains(id))
+            .collect();
+        let deleted_hashes = dead_ids.len() as u64;
 
-        let mut deleted_hashes = 0u64;
-        for id in all_ids {
-            if !live.contains(&id) {
-                deleted_hashes += 1;
-                self.hash_index.delete(id);
-            }
+        if !dead_ids.is_empty() {
+            self.hash_index.delete_batch(&dead_ids);
         }
         self.db.lock().stat_cache_prune_orphans();
         self.hash_index.flush();
 
-        // Mark used blobs.
-        let entries = self.hash_index.list();
+        // Mark only distinct live blobs as Reserved; sweep everything else.
+        let live_blob_ids = Self::distinct_live_blob_ids(&live, &graph);
         self.blob_store.tag_all(tags::Tag::InProgress);
-
-        let mut live_blobs = 0u64;
-        for entry in entries {
-            if let Some(pref) = entry.persistent_ref {
-                live_blobs += 1;
-                self.blob_store.tag(pref, tags::Tag::Reserved);
-            }
+        if !live_blob_ids.is_empty() {
+            self.blob_store
+                .tag_ids(&live_blob_ids, tags::Tag::Reserved);
         }
         // Anything still marked "in progress" is not referenced by any surviving hash.
         self.blob_store.delete_by_tag(tags::Tag::InProgress)?;
         self.blob_store.tag_all(tags::Tag::Done);
         self.blob_store.flush();
 
-        Ok((deleted_hashes, live_blobs))
+        Ok((deleted_hashes, live_blob_ids.len() as u64))
     }
 
     pub fn hash_backend(&self) -> key::HashStoreBackend<B> {

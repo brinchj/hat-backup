@@ -26,6 +26,7 @@ use diesel_migrations::MigrationHarness;
 use crate::errors::DieselError;
 
 use crate::hash;
+use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
 use crate::tags;
 use std::time::Duration;
@@ -198,6 +199,16 @@ pub struct InternalIndex {
 }
 
 pub const MIGRATIONS: diesel_migrations::EmbeddedMigrations = embed_migrations!();
+
+/// Lightweight hash metadata needed by mark-and-sweep GC (avoids joining `blobs`
+/// or decoding `blob_ref` CBOR).
+pub struct HashGcNode {
+    pub leaf: blob::LeafType,
+    pub childs: Option<Vec<u64>>,
+    pub blob_id: i64,
+}
+
+const SQLITE_IN_BATCH_SIZE: usize = 500;
 
 impl InternalIndex {
     fn new(path: &str) -> Result<InternalIndex, DieselError> {
@@ -373,16 +384,28 @@ impl InternalIndex {
             .expect("Failed to set hash ready");
     }
 
-    pub fn hash_all_ids(&mut self) -> Vec<u64> {
+    /// Bulk-load all hash nodes for in-memory mark-and-sweep GC without joining
+    /// `blobs` or decoding `ChunkRef` CBOR.
+    pub fn hash_load_gc_graph(&mut self) -> HashMap<u64, HashGcNode> {
         use self::schema::hashes::dsl::*;
 
-        hashes
-            .select(id)
-            .load::<i64>(&mut self.conn)
-            .expect("Error listing hash ids")
-            .into_iter()
-            .map(|i| i as u64)
-            .collect()
+        let rows = hashes
+            .select((id, leaf_type, childs, blob_id))
+            .load::<(i64, i64, Option<Vec<u8>>, i64)>(&mut self.conn)
+            .expect("Error loading hash GC graph");
+
+        let mut graph = HashMap::with_capacity(rows.len());
+        for (id_, leaf_type_, childs_, blob_id_) in rows {
+            graph.insert(
+                id_ as u64,
+                HashGcNode {
+                    leaf: From::from(leaf_type_ as u64),
+                    childs: childs_.as_ref().map(|p| decode_childs(p).unwrap()),
+                    blob_id: blob_id_,
+                },
+            );
+        }
+        graph
     }
 
     pub fn hash_list(&mut self) -> Vec<Entry> {
@@ -405,21 +428,55 @@ impl InternalIndex {
             .collect()
     }
 
+    #[cfg(test)]
     pub fn hash_delete(&mut self, id_: u64) {
-        {
-            use self::schema::hashes::dsl::*;
-            let hash_count = diesel::delete(hashes.find(id_ as i64))
-                .execute(&mut self.conn)
-                .expect("Error deleting hash");
-            assert!(hash_count <= 1);
-        }
+        self.hash_delete_batch(&[id_]);
+    }
 
-        self.tree_edges_delete(id_);
+    /// Delete a batch of unreachable hash rows and their cached `tree_edges` in chunked
+    /// SQL `IN (...)` statements.
+    pub fn hash_delete_batch(&mut self, ids: &[u64]) {
+        for chunk in ids.chunks(SQLITE_IN_BATCH_SIZE) {
+            let i64_ids: Vec<i64> = chunk.iter().map(|&x| x as i64).collect();
+            {
+                use self::schema::hashes::dsl::*;
+                diesel::delete(hashes.filter(id.eq_any(&i64_ids)))
+                    .execute(&mut self.conn)
+                    .expect("Error deleting hash batch");
+            }
+            {
+                use self::schema::tree_edges::dsl::*;
+                diesel::delete(tree_edges.filter(tree_hash_id.eq_any(&i64_ids)))
+                    .execute(&mut self.conn)
+                    .expect("Error deleting tree_edges batch");
+            }
+        }
+    }
+
+    /// Bulk-load all cached `TreeList` directory edges (`tree_hash_id -> child_hash_ids`).
+    /// Empty directories (stored via the `-1` sentinel row) are represented by an empty `Vec`.
+    pub fn tree_edges_load_all(&mut self) -> HashMap<u64, Vec<u64>> {
+        use self::schema::tree_edges::dsl::*;
+
+        let rows = tree_edges
+            .select((tree_hash_id, child_hash_id))
+            .load::<(i64, i64)>(&mut self.conn)
+            .expect("Error loading tree_edges");
+
+        let mut map: HashMap<u64, Vec<u64>> = HashMap::new();
+        for (tid, cid) in rows {
+            let entry = map.entry(tid as u64).or_default();
+            if cid >= 0 {
+                entry.push(cid as u64);
+            }
+        }
+        map
     }
 
     /// Look up cached directory edges (`TreeList` root hash_id -> child file/subdir hash_ids).
     /// Returns `None` if no edge cache record exists for `tree_hash_id_`, or `Some(child_ids)`
     /// (empty Vec for an empty directory, stored via a `-1` sentinel row).
+    #[cfg(test)]
     pub fn tree_edges_get(&mut self, tree_hash_id_: u64) -> Option<Vec<u64>> {
         use self::schema::tree_edges::dsl::*;
 
@@ -470,6 +527,7 @@ impl InternalIndex {
             .expect("Error inserting tree_edges");
     }
 
+    #[cfg(test)]
     pub fn tree_edges_delete(&mut self, tree_hash_id_: u64) {
         use self::schema::tree_edges::dsl::*;
 
@@ -696,6 +754,16 @@ impl InternalIndex {
                 t.name.len()
             ),
         };
+    }
+
+    pub fn blob_set_tag_ids(&mut self, tag_: tags::Tag, ids: &[i64]) {
+        use self::schema::blobs::dsl::*;
+        for chunk in ids.chunks(SQLITE_IN_BATCH_SIZE) {
+            diesel::update(blobs.filter(id.eq_any(chunk)))
+                .set(tag.eq(tag_ as i32))
+                .execute(&mut self.conn)
+                .expect("Error updating blob tag batch");
+        }
     }
 
     pub fn blob_delete_by_tag(&mut self, tag_: tags::Tag) {
