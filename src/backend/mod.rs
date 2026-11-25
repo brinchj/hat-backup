@@ -35,4 +35,11 @@ pub trait StoreBackend: Sync + Send + 'static {
     fn delete(&self, name: &[u8]) -> Result<(), String>;
     fn list(&self) -> Result<Vec<Box<[u8]>>, String>;
     fn flush(&self) -> Result<(), String>;
+
+    /// Optional local filesystem root used by this backend (for example `FileBackend`'s
+    /// blob directory). Excluded automatically from `snapshot_dir` walks so a backup
+    /// cannot recursively ingest its own blob storage.
+    fn local_storage_dir(&self) -> Option<&std::path::Path> {
+        None
+    }
 }

@@ -198,6 +198,10 @@ impl StoreBackend for FileBackend {
     fn flush(&self) -> Result<(), String> {
         Ok(())
     }
+
+    fn local_storage_dir(&self) -> Option<&Path> {
+        Some(self.root.as_path())
+    }
 }
 
 #[cfg(test)]

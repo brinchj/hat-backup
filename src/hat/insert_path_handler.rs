@@ -15,10 +15,12 @@
 use crate::backend::StoreBackend;
 use crate::key;
 use crate::util::{FileIterator, PathHandler, SyncPool};
+use std::collections::HashSet;
 use std::error::Error;
 use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{atomic, Mutex};
 use std::time::{Duration, Instant};
@@ -71,15 +73,24 @@ pub struct InsertPathHandler<B: StoreBackend> {
     count: atomic::AtomicIsize,
     last_print: Mutex<Instant>,
     key_store: SyncPool<key::Store<B>>,
+    excluded_dirs: HashSet<(u64, u64)>,
 }
 
 impl<B: StoreBackend> InsertPathHandler<B> {
-    pub fn new(key_stores: Vec<key::Store<B>>) -> InsertPathHandler<B> {
+    pub fn new(
+        key_stores: Vec<key::Store<B>>,
+        excluded_dirs: HashSet<(u64, u64)>,
+    ) -> InsertPathHandler<B> {
         InsertPathHandler {
             count: atomic::AtomicIsize::new(0),
             last_print: Mutex::new(Instant::now()),
             key_store: SyncPool::new(key_stores),
+            excluded_dirs,
         }
+    }
+
+    fn is_excluded_dir(&self, meta: &fs::Metadata) -> bool {
+        meta.is_dir() && self.excluded_dirs.contains(&(meta.dev(), meta.ino()))
     }
 }
 
@@ -114,6 +125,10 @@ impl<B: StoreBackend> PathHandler<ParentCtx> for InsertPathHandler<B> {
                 println!("Skipping '{}': {}", path.display(), e);
             }
             Ok(file_entry) => {
+                if self.is_excluded_dir(&file_entry.metadata) {
+                    info!("Skipping excluded directory '{}'", path.display());
+                    return None;
+                }
                 let is_file = file_entry.is_file();
                 let is_directory = file_entry.is_directory();
                 let local_root = path.to_path_buf();

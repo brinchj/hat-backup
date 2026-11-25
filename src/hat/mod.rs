@@ -46,6 +46,9 @@ mod tests;
 pub struct Hat<B: StoreBackend> {
     keys: Arc<crypto::keys::Keeper>,
     _repo_lock: Option<fs::File>,
+    /// `(dev, ino)` identities of directories excluded from `snapshot_dir` walks
+    /// (state dir, cache dir, and local backend storage dir if any).
+    excluded_dirs: HashSet<(u64, u64)>,
     families: Vec<Family<B>>,
     db: Arc<db::Index>,
     snapshot_index: snapshot::SnapshotIndex,
@@ -80,6 +83,48 @@ impl CommitFault {
 fn concat_filename(mut a: PathBuf, b: &str) -> String {
     a.push(b);
     a.into_os_string().into_string().unwrap()
+}
+
+fn dir_dev_ino(path: &std::path::Path) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        fs::metadata(path)
+            .ok()
+            .filter(|m| m.is_dir())
+            .map(|m| (m.dev(), m.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+fn ensure_cachedir_tag(cache_dir: &std::path::Path) -> Result<(), HatError> {
+    const TAG_BODY: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55\n\
+# This file is a cache directory tag created by Hat Backup.\n\
+# For information about cache directory tags, see:\n\
+#   https://bford.info/cachedir/\n";
+    let tag_path = cache_dir.join("CACHEDIR.TAG");
+    if !tag_path.exists() {
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        match opts.open(&tag_path) {
+            Ok(mut f) => {
+                use std::io::Write;
+                f.write_all(TAG_BODY)?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
 }
 
 fn index_db_path(root: PathBuf) -> String {
@@ -174,6 +219,7 @@ impl<B: StoreBackend> Hat<B> {
             &repository_root,
         )?);
 
+        let state_dir = repository_root.clone();
         repository_root = repository_root.join("cache");
         #[cfg(unix)]
         {
@@ -191,6 +237,8 @@ impl<B: StoreBackend> Hat<B> {
         if !repository_root.exists() {
             fs::create_dir(&repository_root)?;
         }
+
+        ensure_cachedir_tag(&repository_root)?;
 
         // Acquire an exclusive, fail-fast cross-process lock for this repository state dir.
         // Held on `Hat` for its lifetime and automatically released on drop or process exit.
@@ -238,9 +286,24 @@ impl<B: StoreBackend> Hat<B> {
             max_blob_size,
         ));
 
+        let mut excluded_dirs = HashSet::new();
+        for dir in [
+            Some(state_dir.as_path()),
+            Some(repository_root.as_path()),
+            backend.local_storage_dir(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Some(id) = dir_dev_ino(dir) {
+                excluded_dirs.insert(id);
+            }
+        }
+
         let mut hat = Hat {
             keys,
             _repo_lock: Some(lock_file),
+            excluded_dirs,
             families: vec![],
             db: db_p,
             snapshot_index: si_p,
@@ -275,6 +338,7 @@ impl<B: StoreBackend> Hat<B> {
         let mut hat = Hat {
             keys,
             _repo_lock: None,
+            excluded_dirs: HashSet::new(),
             families: vec![],
             db: db_p,
             snapshot_index: si_p,
@@ -391,6 +455,7 @@ impl<B: StoreBackend> Hat<B> {
             name,
             key_store: ks,
             key_stores: kss,
+            excluded_dirs: self.excluded_dirs.clone(),
         };
         self.families.push(family.clone());
 

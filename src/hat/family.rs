@@ -22,10 +22,12 @@ use crate::hat::walker;
 use crate::key;
 use crate::models;
 use crate::util::{FileIterator, PathHandler};
+use std::collections::HashSet;
 use std::ffi;
 use std::fs;
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 
 pub(crate) fn parse_dir_data(chunk: &[u8], out: &mut Vec<walker::FileEntry>) -> Result<(), HatError> {
@@ -78,6 +80,9 @@ pub struct Family<B> {
     pub name: String,
     pub key_store: key::Store<B>,
     pub key_stores: Vec<key::Store<B>>,
+    /// `(dev, ino)` identities of directories automatically skipped during `snapshot_dir`
+    /// (Hat's own state/cache directories and any local backend storage directory).
+    pub excluded_dirs: HashSet<(u64, u64)>,
 }
 impl<B: StoreBackend> Clone for Family<B> {
     fn clone(&self) -> Family<B> {
@@ -85,14 +90,13 @@ impl<B: StoreBackend> Clone for Family<B> {
             name: self.name.clone(),
             key_store: self.key_store.clone(),
             key_stores: self.key_stores.clone(),
+            excluded_dirs: self.excluded_dirs.clone(),
         }
     }
 }
 
 impl<B: StoreBackend> Family<B> {
     pub fn snapshot_dir(&self, dir: PathBuf) -> Result<(), HatError> {
-        let handler = InsertPathHandler::new(self.key_stores.clone());
-
         let dir = fs::canonicalize(dir)?;
         info!("Committing: {}", dir.display());
         assert!(dir.is_absolute());
@@ -101,6 +105,16 @@ impl<B: StoreBackend> Family<B> {
         // cached HashRefs from the flat SQLite stat_cache.
         self.key_store.begin_stat_walk();
 
+        let root_meta = fs::symlink_metadata(&dir)?;
+        if root_meta.is_dir() && self.excluded_dirs.contains(&(root_meta.dev(), root_meta.ino())) {
+            warn!(
+                "Skipping excluded root directory '{}' (Hat state/cache or backend storage)",
+                dir.display()
+            );
+            return Ok(());
+        }
+
+        let handler = InsertPathHandler::new(self.key_stores.clone(), self.excluded_dirs.clone());
         let root_ctx = (None, Vec::new());
         if dir.is_dir() {
             handler.recurse(dir, root_ctx);

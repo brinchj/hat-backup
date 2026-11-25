@@ -806,3 +806,64 @@ fn replaced_file_with_identical_old_mtime_and_size_is_rehashed() {
     hat.checkout_in_dir("family".into(), r3.clone()).unwrap();
     assert_eq!(fs::read(r3.join("v.txt")).unwrap(), b"version-thr");
 }
+
+#[test]
+fn backup_automatically_excludes_own_state_cache_and_backend_dirs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let state_dir = home.join(".hat");
+    let backend_dir = home.join("blobs");
+    let restore = tmp.path().join("restore");
+    let restore_direct = tmp.path().join("restore_direct");
+    fs::create_dir_all(home.join("docs")).unwrap();
+    fs::create_dir_all(&backend_dir).unwrap();
+    fs::create_dir_all(&restore).unwrap();
+    fs::create_dir_all(&restore_direct).unwrap();
+
+    fs::write(home.join("keep.txt"), b"important-data").unwrap();
+    fs::write(home.join("docs/note.txt"), b"nested-data").unwrap();
+
+    init_repo(&state_dir);
+
+    let mut hat = open_hat(&state_dir, &backend_dir);
+
+    // Verify CACHEDIR.TAG was created inside cache/ with 0600 permissions.
+    let tag_path = state_dir.join("cache").join("CACHEDIR.TAG");
+    let tag_contents = fs::read_to_string(&tag_path).unwrap();
+    assert!(tag_contents.starts_with("Signature: 8a477f597d28d172789f06886806bc55\n"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(fs::metadata(&tag_path).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    // Commit twice with both .hat and blobs/ living inside the backed-up home directory.
+    commit_tree(&mut hat, "home", &home);
+    commit_tree(&mut hat, "home", &home);
+    hat.check().unwrap();
+
+    hat.checkout_in_dir("home".into(), restore.clone()).unwrap();
+    assert_eq!(fs::read(restore.join("keep.txt")).unwrap(), b"important-data");
+    assert_eq!(
+        fs::read(restore.join("docs/note.txt")).unwrap(),
+        b"nested-data"
+    );
+    assert!(
+        !restore.join(".hat").exists(),
+        "Hat state/cache dir must never be backed up"
+    );
+    assert!(
+        !restore.join("blobs").exists(),
+        "Local FileBackend storage dir must never be backed up"
+    );
+
+    // Passing state_dir directly as the backup root must also skip it cleanly.
+    commit_tree(&mut hat, "direct", &state_dir);
+    hat.checkout_in_dir("direct".into(), restore_direct.clone())
+        .unwrap();
+    assert_eq!(
+        fs::read_dir(&restore_direct).unwrap().count(),
+        0,
+        "Directly backing up Hat state_dir must skip it cleanly"
+    );
+}
