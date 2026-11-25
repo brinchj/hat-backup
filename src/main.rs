@@ -14,6 +14,8 @@
 
 #![forbid(unsafe_code)]
 
+mod browse;
+
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use hat::backend::{self, StoreBackend};
 use hat::hat::HatRc;
@@ -536,7 +538,7 @@ fn format_unix_perm_bits(mode: u32) -> String {
     s
 }
 
-fn format_entry_mode(
+pub(crate) fn format_entry_mode(
     content: &hat::hat::walker::Content,
     perms: Option<&fs::Permissions>,
 ) -> String {
@@ -560,7 +562,7 @@ fn format_entry_mode(
     format!("{}{}", kind, perm_str)
 }
 
-fn format_utc_datetime(dt: chrono::DateTime<chrono::Utc>) -> String {
+pub(crate) fn format_utc_datetime(dt: chrono::DateTime<chrono::Utc>) -> String {
     dt.format("%Y-%m-%d %H:%M:%SZ").to_string()
 }
 
@@ -568,7 +570,7 @@ fn format_utc_rfc3339(dt: chrono::DateTime<chrono::Utc>) -> String {
     dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
-fn format_unix_ts_utc(ts_secs: Option<i64>) -> String {
+pub(crate) fn format_unix_ts_utc(ts_secs: Option<i64>) -> String {
     ts_secs
         .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
         .map(format_utc_datetime)
@@ -581,7 +583,170 @@ fn format_unix_ts_rfc3339(ts_secs: Option<i64>) -> Option<String> {
         .map(format_utc_rfc3339)
 }
 
-fn do_ls<B: StoreBackend>(hat: HatRc<B>, path: PathBuf, long: bool, out: &OutputConfig) {
+fn entry_to_json(
+    full_path: &Path,
+    entry: &hat::KeyEntry,
+    content: &hat::hat::walker::Content,
+) -> serde_json::Value {
+    let name_os_string: ffi::OsString = entry.info.name.clone().into();
+    let name_str = name_os_string.to_string_lossy().into_owned();
+    let mode = format_entry_mode(content, entry.info.permissions.as_ref());
+    let kind = match content {
+        hat::hat::walker::Content::Dir(_) => "dir",
+        hat::hat::walker::Content::Link(_) => "symlink",
+        hat::hat::walker::Content::Data(_) => "file",
+    };
+    let symlink_target = match content {
+        hat::hat::walker::Content::Link(t) => Some(t.to_string_lossy().into_owned()),
+        _ => None,
+    };
+    let mut obj = serde_json::json!({
+        "kind": kind,
+        "name": name_str,
+        "path": full_path.to_string_lossy(),
+        "mode": mode,
+        "size": entry.info.byte_length,
+        "mtime": format_unix_ts_rfc3339(entry.info.modified_ts_secs),
+    });
+    if let Some(target) = symlink_target {
+        obj["symlink_target"] = serde_json::Value::String(target);
+    }
+    obj
+}
+
+fn print_entry_line(
+    full_path: &Path,
+    entry: &hat::KeyEntry,
+    content: &hat::hat::walker::Content,
+    long: bool,
+) {
+    if long {
+        let mode = format_entry_mode(content, entry.info.permissions.as_ref());
+        let size = entry
+            .info
+            .byte_length
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let mtime = format_unix_ts_utc(entry.info.modified_ts_secs);
+        match content {
+            hat::hat::walker::Content::Link(target) => {
+                println!(
+                    "{} {:>10} {} {} -> {}",
+                    mode,
+                    size,
+                    mtime,
+                    full_path.display(),
+                    target.display()
+                );
+            }
+            _ => {
+                println!(
+                    "{} {:>10} {} {}",
+                    mode,
+                    size,
+                    mtime,
+                    full_path.display()
+                );
+            }
+        }
+    } else {
+        println!("{}", full_path.display());
+    }
+}
+
+fn do_ls_recursive<B: StoreBackend>(
+    hat: HatRc<B>,
+    path: PathBuf,
+    long: bool,
+    out: &OutputConfig,
+) {
+    let Some(items) = hat::vfs::Filesystem::new(hat)
+        .walk(&path)
+        .unwrap_or_else(|e| fail(e))
+    else {
+        fail(format!("path not found: {}", path.display()));
+    };
+
+    if out.json {
+        let json_items: Vec<_> = items
+            .into_iter()
+            .map(|item| match item {
+                hat::vfs::fs::WalkItem::Family { name, created } => serde_json::json!({
+                    "kind": "family",
+                    "name": name,
+                    "path": name,
+                    "created": format_utc_rfc3339(created),
+                }),
+                hat::vfs::fs::WalkItem::Snapshot {
+                    family,
+                    snapshot_id,
+                    path,
+                    created,
+                } => serde_json::json!({
+                    "kind": "snapshot",
+                    "family": family,
+                    "snapshot_id": snapshot_id,
+                    "path": path.to_string_lossy(),
+                    "created": format_utc_rfc3339(created),
+                }),
+                hat::vfs::fs::WalkItem::Entry {
+                    path,
+                    entry,
+                    content,
+                } => entry_to_json(&path, &entry, &content),
+            })
+            .collect();
+        print_json(&json_items);
+        return;
+    }
+
+    for item in items {
+        match item {
+            hat::vfs::fs::WalkItem::Family { name, created } => {
+                if long {
+                    println!(
+                        "dr-xr-xr-x {:>10} {} {}",
+                        "-",
+                        format_utc_datetime(created),
+                        name
+                    );
+                } else {
+                    println!("{}", name);
+                }
+            }
+            hat::vfs::fs::WalkItem::Snapshot { path, created, .. } => {
+                if long {
+                    println!(
+                        "dr-xr-xr-x {:>10} {} {}",
+                        "-",
+                        format_utc_datetime(created),
+                        path.display()
+                    );
+                } else {
+                    println!("{}", path.display());
+                }
+            }
+            hat::vfs::fs::WalkItem::Entry {
+                path,
+                entry,
+                content,
+            } => print_entry_line(&path, &entry, &content, long),
+        }
+    }
+}
+
+fn do_ls<B: StoreBackend>(
+    hat: HatRc<B>,
+    path: PathBuf,
+    long: bool,
+    recursive: bool,
+    out: &OutputConfig,
+) {
+    if recursive {
+        do_ls_recursive(hat, path, long, out);
+        return;
+    }
+
     let Some(listing) = hat::vfs::Filesystem::new(hat)
         .ls(&path)
         .unwrap_or_else(|e| fail(e))
@@ -668,76 +833,25 @@ fn do_ls<B: StoreBackend>(hat: HatRc<B>, path: PathBuf, long: bool, out: &Output
                 let items: Vec<_> = files
                     .into_iter()
                     .map(|(entry, content)| {
-                        let name_os_string: ffi::OsString = entry.info.name.into();
-                        let name_str = name_os_string.to_string_lossy().into_owned();
+                        let name_os_string: ffi::OsString = entry.info.name.clone().into();
                         let full_path = path.join(&name_os_string);
-                        let mode = format_entry_mode(&content, entry.info.permissions.as_ref());
-                        let kind = match &content {
-                            hat::hat::walker::Content::Dir(_) => "dir",
-                            hat::hat::walker::Content::Link(_) => "symlink",
-                            hat::hat::walker::Content::Data(_) => "file",
-                        };
-                        let symlink_target = match &content {
-                            hat::hat::walker::Content::Link(t) => {
-                                Some(t.to_string_lossy().into_owned())
-                            }
-                            _ => None,
-                        };
-                        let mut obj = serde_json::json!({
-                            "kind": kind,
-                            "name": name_str,
-                            "path": full_path.to_string_lossy(),
-                            "mode": mode,
-                            "size": entry.info.byte_length,
-                            "mtime": format_unix_ts_rfc3339(entry.info.modified_ts_secs),
-                        });
-                        if let Some(target) = symlink_target {
-                            obj["symlink_target"] = serde_json::Value::String(target);
-                        }
-                        obj
+                        entry_to_json(&full_path, &entry, &content)
                     })
                     .collect();
                 print_json(&items);
             } else {
                 for (entry, content) in files {
-                    let name_os_string: ffi::OsString = entry.info.name.into();
+                    let name_os_string: ffi::OsString = entry.info.name.clone().into();
                     let full_path = path.join(name_os_string);
-                    if long {
-                        let mode = format_entry_mode(&content, entry.info.permissions.as_ref());
-                        let size = entry
-                            .info
-                            .byte_length
-                            .map(|n| n.to_string())
-                            .unwrap_or_else(|| "-".to_string());
-                        let mtime = format_unix_ts_utc(entry.info.modified_ts_secs);
-                        match content {
-                            hat::hat::walker::Content::Link(target) => {
-                                println!(
-                                    "{} {:>10} {} {} -> {}",
-                                    mode,
-                                    size,
-                                    mtime,
-                                    full_path.display(),
-                                    target.display()
-                                );
-                            }
-                            _ => {
-                                println!(
-                                    "{} {:>10} {} {}",
-                                    mode,
-                                    size,
-                                    mtime,
-                                    full_path.display()
-                                );
-                            }
-                        }
-                    } else {
-                        println!("{}", full_path.display());
-                    }
+                    print_entry_line(&full_path, &entry, &content, long);
                 }
             }
         }
     }
+}
+
+fn do_browse<B: StoreBackend>(hat: HatRc<B>, start_path: PathBuf, dest_dir: PathBuf) {
+    browse::run_browse(hat, &start_path, dest_dir).unwrap_or_else(|e| fail(e));
 }
 
 fn build_cli() -> Command {
@@ -751,7 +865,8 @@ fn build_cli() -> Command {
              hat init ~/.hat --backend file --backend-path /mnt/backup/blobs\n  \
              export HAT_STATE_DIR=~/.hat\n  \
              hat commit docs ~/Documents\n  \
-             hat ls -l docs\n  \
+             hat ls -lR docs/latest\n  \
+             hat browse docs/latest\n  \
              hat checkout docs/1/notes ./restored-notes\n  \
              hat delete docs/1 --dry-run\n  \
              hat gc --dry-run",
@@ -875,7 +990,7 @@ fn build_cli() -> Command {
                     "Examples:\n  \
                      hat ls\n  \
                      hat ls -l docs\n  \
-                     hat ls -l docs/1/subdir",
+                     hat ls -lR docs/latest",
                 )
                 .arg(
                     Arg::new("long")
@@ -885,10 +1000,45 @@ fn build_cli() -> Command {
                         .help("Use a long listing format with mode, size, and timestamps"),
                 )
                 .arg(
+                    Arg::new("recursive")
+                        .short('R')
+                        .long("recursive")
+                        .action(ArgAction::SetTrue)
+                        .help("List subdirectories and snapshots recursively"),
+                )
+                .arg(
                     Arg::new("PATH")
                         .default_value("/")
                         .value_parser(clap::value_parser!(PathBuf))
                         .help("Path inside Hat to list"),
+                ),
+        )
+        .subcommand(
+            Command::new("browse")
+                .about("Interactively navigate snapshots, find files, and checkout into local directory")
+                .after_help(
+                    "Examples:\n  \
+                     hat browse\n  \
+                     hat browse docs/latest\n  \
+                     hat browse docs/1 --dest ./restored\n\n\
+                     Keys inside browse:\n  \
+                     Arrows / j k : move   Enter / l : open   Bksp / h : up\n  \
+                     Space : mark item     f : recursive find  / : filter\n  \
+                     c : checkout marked   ? : help            q : quit",
+                )
+                .arg(
+                    Arg::new("PATH")
+                        .default_value("/")
+                        .value_parser(clap::value_parser!(PathBuf))
+                        .help("Starting path inside Hat (defaults to /)"),
+                )
+                .arg(
+                    Arg::new("dest")
+                        .short('d')
+                        .long("dest")
+                        .value_name("DIR")
+                        .value_parser(clap::value_parser!(PathBuf))
+                        .help("Local destination directory for checkouts (defaults to current directory)"),
                 ),
         )
         .subcommand(
@@ -1066,9 +1216,23 @@ fn main() {
         Some(("ls", cmd)) => {
             let path = cmd.get_one::<PathBuf>("PATH").unwrap().clone();
             let long = cmd.get_flag("long");
+            let recursive = cmd.get_flag("recursive");
             match backend {
-                BackendSpec::File(p) => do_ls(open_hat_file(state_dir, p), path, long, &out),
-                BackendSpec::Cmd => do_ls(open_hat_cmd(state_dir), path, long, &out),
+                BackendSpec::File(p) => {
+                    do_ls(open_hat_file(state_dir, p), path, long, recursive, &out)
+                }
+                BackendSpec::Cmd => do_ls(open_hat_cmd(state_dir), path, long, recursive, &out),
+            }
+        }
+        Some(("browse", cmd)) => {
+            let start_path = cmd.get_one::<PathBuf>("PATH").unwrap().clone();
+            let dest_dir = cmd
+                .get_one::<PathBuf>("dest")
+                .cloned()
+                .unwrap_or_else(|| env::current_dir().unwrap_or_else(|e| fail(e)));
+            match backend {
+                BackendSpec::File(p) => do_browse(open_hat_file(state_dir, p), start_path, dest_dir),
+                BackendSpec::Cmd => do_browse(open_hat_cmd(state_dir), start_path, dest_dir),
             }
         }
         _ => unreachable!("clap enforces subcommand_required(true)"),

@@ -1201,3 +1201,147 @@ fn cli_json_output_across_commands() {
     assert_eq!(gc_json["dry_run"], true);
     assert!(gc_json["live_data_blobs"].as_u64().unwrap() > 0);
 }
+
+#[test]
+fn cli_ls_recursive_and_latest_and_browse_non_tty() {
+    let sb = sandbox();
+    write_fixture(
+        &sb.fixture,
+        &[
+            ("top.txt", FileSpec::file(b"top")),
+            ("sub/a.txt", FileSpec::file(b"a")),
+            ("sub/deep/b.txt", FileSpec::file(b"b")),
+        ],
+    );
+
+    hatbin()
+        .args([
+            "init",
+            sb.repo.to_str().unwrap(),
+            "--backend",
+            "file",
+            "--backend-path",
+            sb.backend.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    hatbin()
+        .args([
+            "commit",
+            "docs",
+            sb.fixture.to_str().unwrap(),
+            "--state-dir",
+            sb.repo.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // `ls --recursive` from `/` walks family -> snapshot -> nested dirs & files without `__hat__roots__`.
+    let root_rec = hatbin()
+        .args(["ls", "--recursive", "--state-dir", sb.repo.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(root_rec.status.success());
+    let root_lines: Vec<&str> = std::str::from_utf8(&root_rec.stdout)
+        .unwrap()
+        .lines()
+        .collect();
+    assert_eq!(
+        root_lines,
+        vec![
+            "docs",
+            "docs/1",
+            "docs/1/sub",
+            "docs/1/sub/a.txt",
+            "docs/1/sub/deep",
+            "docs/1/sub/deep/b.txt",
+            "docs/1/top.txt",
+        ]
+    );
+
+    // `ls -lR docs/latest` resolves `latest`, shows modes & timestamps recursively.
+    let latest_rec = hatbin()
+        .args([
+            "ls",
+            "-lR",
+            "docs/latest",
+            "--state-dir",
+            sb.repo.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(latest_rec.status.success());
+    let latest_out = String::from_utf8_lossy(&latest_rec.stdout);
+    assert!(
+        latest_out.contains("Z docs/latest/sub/deep/b.txt"),
+        "expected deep file with timestamp in ls -lR docs/latest, got: {:?}",
+        latest_out
+    );
+
+    // `ls -R` on a single file does not double the filename.
+    let single_rec = hatbin()
+        .args([
+            "ls",
+            "-R",
+            "docs/1/sub/a.txt",
+            "--state-dir",
+            sb.repo.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(single_rec.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&single_rec.stdout).trim(),
+        "docs/1/sub/a.txt"
+    );
+
+    // `ls -R --json docs/1` emits valid JSON array containing deep entries.
+    let json_rec = hatbin()
+        .args([
+            "ls",
+            "-R",
+            "--json",
+            "docs/1",
+            "--state-dir",
+            sb.repo.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(json_rec.status.success());
+    let arr: serde_json::Value = serde_json::from_slice(&json_rec.stdout).unwrap();
+    assert!(arr
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v["path"] == "docs/1/sub/deep/b.txt" && v["kind"] == "file"));
+
+    // `ls -R` on nonexistent path fails non-zero.
+    hatbin()
+        .args([
+            "ls",
+            "-R",
+            "docs/1/no_such_dir",
+            "--state-dir",
+            sb.repo.to_str().unwrap(),
+        ])
+        .assert()
+        .failure();
+
+    // `browse --help` renders cleanly, and non-TTY `browse` exits non-zero with helpful error.
+    let help = hatbin().args(["browse", "--help"]).output().unwrap();
+    assert!(help.status.success());
+    assert!(String::from_utf8_lossy(&help.stdout).contains("recursive find"));
+
+    let non_tty = hatbin()
+        .args(["browse", "--state-dir", sb.repo.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!non_tty.status.success());
+    let non_tty_err = String::from_utf8_lossy(&non_tty.stderr);
+    assert!(
+        non_tty_err.contains("interactive terminal"),
+        "expected interactive terminal error in non-TTY browse, got: {:?}",
+        non_tty_err
+    );
+}

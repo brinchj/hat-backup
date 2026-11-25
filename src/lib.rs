@@ -45,6 +45,8 @@ mod tags;
 pub mod util;
 pub mod vfs;
 
-// Re-export the main type
+// Re-export the main types
 
+pub use crate::errors::HatError;
 pub use crate::hat::Hat;
+pub use crate::key::Entry as KeyEntry;

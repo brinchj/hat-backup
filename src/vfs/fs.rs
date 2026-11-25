@@ -8,8 +8,10 @@ use crate::key::Entry;
 use crate::models::FileName;
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::mem;
-use std::path::{self, Path};
+use std::path::{self, Path, PathBuf};
 
 pub struct FileReader {
     rest: Option<Box<dyn Iterator<Item = Result<Vec<u8>, String>>>>,
@@ -112,13 +114,52 @@ pub enum List {
     Dir(Vec<(Entry, Content)>),
 }
 
+#[derive(Debug)]
+pub enum WalkItem {
+    Family {
+        name: String,
+        created: chrono::DateTime<chrono::Utc>,
+    },
+    Snapshot {
+        family: String,
+        snapshot_id: u64,
+        path: PathBuf,
+        created: chrono::DateTime<chrono::Utc>,
+    },
+    Entry {
+        path: PathBuf,
+        entry: Entry,
+        content: Content,
+    },
+}
+
 pub struct Filesystem<B: StoreBackend> {
     hat: hat::HatRc<B>,
+}
+
+fn find_snapshot_by_selector<'a>(
+    snapshots: &'a [db::SnapshotStatus],
+    selector: &str,
+) -> Option<&'a db::SnapshotStatus> {
+    if selector == "latest" {
+        snapshots
+            .iter()
+            .filter(|s| s.hash_ref.is_some())
+            .max_by_key(|s| s.info.snapshot_id)
+    } else {
+        snapshots
+            .iter()
+            .find(|s| format!("{}", s.info.snapshot_id) == selector)
+    }
 }
 
 impl<B: StoreBackend> Filesystem<B> {
     pub fn new(hat: hat::HatRc<B>) -> Filesystem<B> {
         Filesystem { hat }
+    }
+
+    pub fn hat_mut(&mut self) -> &mut hat::HatRc<B> {
+        &mut self.hat
     }
 
     pub fn ls(&mut self, path: &Path) -> Result<Option<List>, HatError> {
@@ -144,9 +185,7 @@ impl<B: StoreBackend> Filesystem<B> {
 
         let snapshot_opt = match components.next() {
             None => return Ok(Some(List::Snapshots(snapshots))),
-            Some(n) => snapshots
-                .iter()
-                .find(|s| format!("{}", s.info.snapshot_id) == n.as_os_str().to_string_lossy()),
+            Some(n) => find_snapshot_by_selector(&snapshots, &n.as_os_str().to_string_lossy()),
         };
 
         if let Some(href_bytes) = snapshot_opt.and_then(|s| s.hash_ref.as_ref()) {
@@ -184,6 +223,205 @@ impl<B: StoreBackend> Filesystem<B> {
         } else {
             Ok(None)
         }
+    }
+
+    pub fn walk_with<F>(&mut self, path: &Path, visitor: &mut F) -> Result<Option<()>, HatError>
+    where
+        F: FnMut(WalkItem),
+    {
+        let snapshots = self.hat.list_user_snapshots();
+
+        let mut components = path
+            .components()
+            .skip_while(|c| matches!(c, path::Component::RootDir | path::Component::CurDir));
+
+        let Some(family_comp) = components.next() else {
+            // Walk all families -> snapshots -> directory trees in deterministic order.
+            let mut by_family: BTreeMap<String, Vec<db::SnapshotStatus>> = BTreeMap::new();
+            for s in snapshots {
+                by_family.entry(s.family_name.clone()).or_default().push(s);
+            }
+            for (family_name, mut fam_snaps) in by_family {
+                fam_snaps.sort_by_key(|s| s.info.snapshot_id);
+                if let Some(latest_created) = fam_snaps.iter().map(|s| s.created).max() {
+                    visitor(WalkItem::Family {
+                        name: family_name.clone(),
+                        created: latest_created,
+                    });
+                }
+                for si in fam_snaps {
+                    let snap_path =
+                        PathBuf::from(&si.family_name).join(si.info.snapshot_id.to_string());
+                    visitor(WalkItem::Snapshot {
+                        family: si.family_name.clone(),
+                        snapshot_id: si.info.snapshot_id,
+                        path: snap_path.clone(),
+                        created: si.created,
+                    });
+                    if let Some(href_bytes) = si.hash_ref.as_ref() {
+                        let href = HashRef::from_bytes(&href_bytes[..])?;
+                        self.walk_dir_ref(&snap_path, href, visitor)?;
+                    }
+                }
+            }
+            return Ok(Some(()));
+        };
+
+        let family_name = family_comp.as_os_str().to_string_lossy().into_owned();
+        let mut fam_snaps: Vec<_> = snapshots
+            .into_iter()
+            .filter(|s| s.family_name == family_name)
+            .collect();
+        if fam_snaps.is_empty() {
+            return Ok(None);
+        }
+        fam_snaps.sort_by_key(|s| s.info.snapshot_id);
+
+        let Some(snap_comp) = components.next() else {
+            for si in fam_snaps {
+                let snap_path =
+                    PathBuf::from(&si.family_name).join(si.info.snapshot_id.to_string());
+                visitor(WalkItem::Snapshot {
+                    family: si.family_name.clone(),
+                    snapshot_id: si.info.snapshot_id,
+                    path: snap_path.clone(),
+                    created: si.created,
+                });
+                if let Some(href_bytes) = si.hash_ref.as_ref() {
+                    let href = HashRef::from_bytes(&href_bytes[..])?;
+                    self.walk_dir_ref(&snap_path, href, visitor)?;
+                }
+            }
+            return Ok(Some(()));
+        };
+
+        let selector = snap_comp.as_os_str().to_string_lossy().into_owned();
+        let Some(href_bytes) = find_snapshot_by_selector(&fam_snaps, &selector)
+            .and_then(|s| s.hash_ref.as_ref())
+            .cloned()
+        else {
+            return Ok(None);
+        };
+
+        let mut current_dir = HashRef::from_bytes(&href_bytes[..])?;
+        let remaining: Vec<OsString> = components.map(|c| c.as_os_str().to_owned()).collect();
+        if remaining.is_empty() {
+            self.walk_dir_ref(path, current_dir, visitor)?;
+            return Ok(Some(()));
+        }
+
+        for (idx, name_os) in remaining.iter().enumerate() {
+            let is_last = idx + 1 == remaining.len();
+            let target_name: FileName = name_os.clone().into();
+            let entries = self.ls_ref(current_dir.clone())?;
+            let Some((entry, content)) =
+                entries.into_iter().find(|(e, _)| e.info.name == target_name)
+            else {
+                return Ok(None);
+            };
+            match content {
+                Content::Dir(dir_href) => {
+                    if is_last {
+                        self.walk_dir_ref(path, dir_href, visitor)?;
+                        return Ok(Some(()));
+                    }
+                    current_dir = dir_href;
+                }
+                Content::Data(..) | Content::Link(..) => {
+                    if !is_last {
+                        return Ok(None);
+                    }
+                    visitor(WalkItem::Entry {
+                        path: path.to_path_buf(),
+                        entry,
+                        content,
+                    });
+                    return Ok(Some(()));
+                }
+            }
+        }
+
+        Ok(Some(()))
+    }
+
+    fn walk_dir_ref<F>(
+        &mut self,
+        base_path: &Path,
+        dir_href: HashRef,
+        visitor: &mut F,
+    ) -> Result<(), HatError>
+    where
+        F: FnMut(WalkItem),
+    {
+        let mut entries = self.ls_ref(dir_href)?;
+        entries.sort_by(|(a, _), (b, _)| a.info.name.as_bytes().cmp(b.info.name.as_bytes()));
+        for (entry, content) in entries {
+            let name_os: OsString = entry.info.name.clone().into();
+            let child_path = base_path.join(name_os);
+            let subdir = match &content {
+                Content::Dir(h) => Some(h.clone()),
+                _ => None,
+            };
+            visitor(WalkItem::Entry {
+                path: child_path.clone(),
+                entry,
+                content,
+            });
+            if let Some(sub_href) = subdir {
+                self.walk_dir_ref(&child_path, sub_href, visitor)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn walk(&mut self, path: &Path) -> Result<Option<Vec<WalkItem>>, HatError> {
+        let mut items = Vec::new();
+        let found = self.walk_with(path, &mut |item| items.push(item))?;
+        Ok(found.map(|()| items))
+    }
+
+    /// Recursively search filenames (or full paths when `query` contains `/`) under `path`.
+    /// Matching is case-insensitive substring matching.
+    pub fn find(&mut self, path: &Path, query: &str) -> Result<Option<Vec<WalkItem>>, HatError> {
+        let needle = query.to_lowercase();
+        let match_full_path = needle.contains('/');
+        let mut matches = Vec::new();
+        let found = self.walk_with(path, &mut |item| {
+            let matched = if needle.is_empty() {
+                true
+            } else {
+                match &item {
+                    WalkItem::Family { name, .. } => name.to_lowercase().contains(&needle),
+                    WalkItem::Snapshot {
+                        family,
+                        snapshot_id,
+                        path: p,
+                        ..
+                    } => {
+                        if match_full_path {
+                            p.to_string_lossy().to_lowercase().contains(&needle)
+                        } else {
+                            snapshot_id.to_string().contains(&needle)
+                                || family.to_lowercase().contains(&needle)
+                        }
+                    }
+                    WalkItem::Entry {
+                        path: p, entry, ..
+                    } => {
+                        if match_full_path {
+                            p.to_string_lossy().to_lowercase().contains(&needle)
+                        } else {
+                            let name_os: OsString = entry.info.name.clone().into();
+                            name_os.to_string_lossy().to_lowercase().contains(&needle)
+                        }
+                    }
+                }
+            };
+            if matched {
+                matches.push(item);
+            }
+        })?;
+        Ok(found.map(|()| matches))
     }
 
     pub fn ls_ref(&mut self, hash_ref: HashRef) -> Result<Vec<(Entry, Content)>, HatError> {

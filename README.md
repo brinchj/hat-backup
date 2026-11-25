@@ -71,10 +71,14 @@ export HAT_STATE_DIR=/path/to/hat-state
 # Commit a directory snapshot into family "docs"
 hat commit docs /path/to/source-dir
 
-# List families, snapshots, or directory contents (defaults to `/`; `-l` for mode/size/mtime)
+# List families, snapshots, or directory contents (defaults to `/`; `-l` long, `-R` recursive)
 hat ls -l
 hat ls -l docs
-hat ls -l docs/1
+hat ls -lR docs/latest
+
+# Interactively browse snapshots, recursively find files (`f`), mark (`Space`), and checkout (`c`) into cwd
+hat browse
+hat browse docs/latest --dest ./restore-dir
 
 # Checkout latest snapshot, a specific snapshot, or a subpath into a local destination directory
 hat checkout docs /path/to/restore-dir
