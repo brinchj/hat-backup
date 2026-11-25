@@ -57,3 +57,26 @@ pub fn system_time_secs(t: std::time::SystemTime) -> i64 {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
 }
+
+/// Validate that a single snapshot directory entry name is a normal filename
+/// (non-empty, not `.` or `..`, no path separators or NUL bytes) to prevent path traversal.
+pub fn validate_entry_name(name: &std::ffi::OsStr) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let bytes = name.as_bytes();
+        if bytes.is_empty()
+            || bytes == b"."
+            || bytes == b".."
+            || bytes.contains(&b'/')
+            || bytes.contains(&0)
+        {
+            return Err(format!("unsafe checkout entry name: {:?}", name));
+        }
+    }
+    let mut comps = std::path::Path::new(name).components();
+    match (comps.next(), comps.next()) {
+        (Some(std::path::Component::Normal(_)), None) => Ok(()),
+        _ => Err(format!("unsafe checkout entry name: {:?}", name)),
+    }
+}

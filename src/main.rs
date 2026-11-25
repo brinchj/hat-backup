@@ -40,9 +40,14 @@ fn backend_kind(matches: &ArgMatches) -> &str {
         .unwrap_or("cmd")
 }
 
+fn fail(msg: impl std::fmt::Display) -> ! {
+    eprintln!("Error: {}", msg);
+    std::process::exit(1);
+}
+
 fn open_hat_cmd(cache_dir: PathBuf) -> HatRc<backend::CmdBackend> {
     let backend = Arc::new(backend::CmdBackend::new());
-    Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap()
+    Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap_or_else(|e| fail(e))
 }
 
 fn open_hat_file(cache_dir: PathBuf, matches: &ArgMatches) -> HatRc<backend::FileBackend> {
@@ -50,40 +55,53 @@ fn open_hat_file(cache_dir: PathBuf, matches: &ArgMatches) -> HatRc<backend::Fil
         .get_one::<String>("backend_path")
         .cloned()
         .or_else(|| env::var("HAT_BACKEND_PATH").ok())
-        .unwrap_or_else(|| {
-            eprintln!("Error: --backend-path or HAT_BACKEND_PATH required for file backend");
-            std::process::exit(1);
-        });
+        .unwrap_or_else(|| fail("--backend-path or HAT_BACKEND_PATH required for file backend"));
     let backend = Arc::new(backend::FileBackend::new(PathBuf::from(path)));
-    Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap()
+    Hat::open_repository(cache_dir, backend, MAX_BLOB_SIZE).unwrap_or_else(|e| fail(e))
 }
 
 fn do_commit<B: StoreBackend>(mut hat: HatRc<B>, name: String, path: PathBuf) {
-    let mut family = hat.open_family(name.clone()).unwrap_or_else(|e| {
-        eprintln!("Error: could not open family '{}': {}", name, e);
-        std::process::exit(1);
-    });
-    family.snapshot_dir(path).unwrap();
-    hat.commit(&mut family, None).unwrap();
-    hat.meta_commit().unwrap();
-    hat.data_flush().unwrap();
+    let mut family = hat
+        .open_family(name.clone())
+        .unwrap_or_else(|e| fail(format!("could not open family '{}': {}", name, e)));
+    family.snapshot_dir(path).unwrap_or_else(|e| fail(e));
+    hat.commit(&mut family, None).unwrap_or_else(|e| fail(e));
+    hat.meta_commit().unwrap_or_else(|e| fail(e));
+    hat.data_flush().unwrap_or_else(|e| fail(e));
 }
 
-fn do_checkout<B: StoreBackend>(mut hat: HatRc<B>, name: String, path: PathBuf) {
-    hat.checkout_in_dir(name, path).unwrap();
+fn do_checkout<B: StoreBackend>(mut hat: HatRc<B>, name: String, id: Option<u64>, path: PathBuf) {
+    match id {
+        Some(snapshot_id) => hat
+            .checkout_snapshot_in_dir(name, snapshot_id, path)
+            .unwrap_or_else(|e| fail(e)),
+        None => hat
+            .checkout_in_dir(name, path)
+            .unwrap_or_else(|e| fail(e)),
+    }
 }
 
 fn do_recover<B: StoreBackend>(mut hat: HatRc<B>) {
-    hat.recover().unwrap();
+    hat.recover().unwrap_or_else(|e| fail(e));
 }
 
 fn do_delete<B: StoreBackend>(mut hat: HatRc<B>, name: String, id: u64) {
-    hat.deregister_by_name(name, id).unwrap();
+    hat.deregister_by_name(name, id).unwrap_or_else(|e| fail(e));
+    hat.meta_commit().unwrap_or_else(|e| fail(e));
+    hat.data_flush().unwrap_or_else(|e| fail(e));
 }
 
-fn do_gc<B: StoreBackend>(mut hat: HatRc<B>) {
-    let (deleted_hashes, live_blobs) = hat.gc().unwrap();
-    println!("Deleted hashes: {:?}", deleted_hashes);
+fn do_gc<B: StoreBackend>(mut hat: HatRc<B>, pretend: bool) {
+    let (deleted_hashes, live_blobs) = if pretend {
+        hat.gc_pretend().unwrap_or_else(|e| fail(e))
+    } else {
+        hat.gc().unwrap_or_else(|e| fail(e))
+    };
+    if pretend {
+        println!("Would delete hashes: {:?}", deleted_hashes);
+    } else {
+        println!("Deleted hashes: {:?}", deleted_hashes);
+    }
     println!("Live data blobs after deletion: {:?}", live_blobs);
 }
 
@@ -101,13 +119,16 @@ fn do_resume<B: StoreBackend>(mut hat: HatRc<B>) {
     // open_repository() already ran hat.resume(). Publish an updated root listing
     // and flush pending blobs so resumed commits/deletes survive cache loss.
     if !hat.list_snapshots().is_empty() {
-        hat.meta_commit().unwrap();
-        hat.data_flush().unwrap();
+        hat.meta_commit().unwrap_or_else(|e| fail(e));
+        hat.data_flush().unwrap_or_else(|e| fail(e));
     }
 }
 
 fn do_ls<B: StoreBackend>(hat: HatRc<B>, path: PathBuf) {
-    if let Some(f) = hat::vfs::Filesystem::new(hat).ls(&path).unwrap() {
+    if let Some(f) = hat::vfs::Filesystem::new(hat)
+        .ls(&path)
+        .unwrap_or_else(|e| fail(e))
+    {
         match f {
             hat::vfs::fs::List::Root(snapshots) => {
                 snapshots
@@ -187,7 +208,13 @@ fn main() {
             Command::new("checkout")
                 .about("Checkout a snapshot")
                 .arg(Arg::new("NAME").required(true).help("Name of the snapshot"))
-                .arg(Arg::new("PATH").required(true).help("The path of the snapshot")),
+                .arg(Arg::new("PATH").required(true).help("The path of the snapshot"))
+                .arg(
+                    Arg::new("id")
+                        .long("id")
+                        .value_name("ID")
+                        .help("Snapshot ID to checkout (defaults to latest)"),
+                ),
         )
         .subcommand(Command::new("recover").about("Recover list of commit'ed snapshots"))
         .subcommand(
@@ -246,7 +273,7 @@ fn main() {
         let dir = PathBuf::from(dir.get_one::<String>("DIR").expect("missing DIR to initialize"));
         if let Some(parent) = dir.parent() {
             if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent).unwrap();
+                fs::create_dir_all(parent).unwrap_or_else(|e| fail(e));
             }
         }
         let mut builder = fs::DirBuilder::new();
@@ -257,13 +284,14 @@ fn main() {
         }
         if let Err(e) = builder.create(&dir) {
             if e.kind() == std::io::ErrorKind::AlreadyExists {
-                eprintln!("Error: directory already exists ({})", dir.display());
-                std::process::exit(1);
+                fail(format!("directory already exists ({})", dir.display()));
             }
-            panic!("failed to create directory {}: {}", dir.display(), e);
+            fail(format!("failed to create directory {}: {}", dir.display(), e));
         }
-        builder.create(dir.join("cache")).unwrap();
-        hat::crypto::keys::Keeper::write_new_universal_key(&dir).unwrap();
+        builder
+            .create(dir.join("cache"))
+            .unwrap_or_else(|e| fail(e));
+        hat::crypto::keys::Keeper::write_new_universal_key(&dir).unwrap_or_else(|e| fail(e));
 
         std::process::exit(0);
     }
@@ -287,9 +315,13 @@ fn main() {
         Some(("checkout", cmd)) => {
             let name = cmd.get_one::<String>("NAME").unwrap().to_owned();
             let path = PathBuf::from(cmd.get_one::<String>("PATH").unwrap());
+            let id = cmd.get_one::<String>("id").map(|s| {
+                s.parse::<u64>()
+                    .unwrap_or_else(|e| fail(format!("invalid snapshot id '{}': {}", s, e)))
+            });
             match kind {
-                "file" => do_checkout(open_hat_file(cache_dir, &matches), name, path),
-                _ => do_checkout(open_hat_cmd(cache_dir), name, path),
+                "file" => do_checkout(open_hat_file(cache_dir, &matches), name, id, path),
+                _ => do_checkout(open_hat_cmd(cache_dir), name, id, path),
             }
         }
         Some(("recover", _)) => match kind {
@@ -298,16 +330,22 @@ fn main() {
         },
         Some(("delete", cmd)) => {
             let name = cmd.get_one::<String>("NAME").unwrap().to_owned();
-            let id = cmd.get_one::<String>("ID").unwrap().parse::<u64>().unwrap();
+            let id_str = cmd.get_one::<String>("ID").unwrap();
+            let id = id_str
+                .parse::<u64>()
+                .unwrap_or_else(|e| fail(format!("invalid snapshot id '{}': {}", id_str, e)));
             match kind {
                 "file" => do_delete(open_hat_file(cache_dir, &matches), name, id),
                 _ => do_delete(open_hat_cmd(cache_dir), name, id),
             }
         }
-        Some(("gc", _)) => match kind {
-            "file" => do_gc(open_hat_file(cache_dir, &matches)),
-            _ => do_gc(open_hat_cmd(cache_dir)),
-        },
+        Some(("gc", cmd)) => {
+            let pretend = cmd.get_flag("pretend");
+            match kind {
+                "file" => do_gc(open_hat_file(cache_dir, &matches), pretend),
+                _ => do_gc(open_hat_cmd(cache_dir), pretend),
+            }
+        }
         Some(("check", _)) => match kind {
             "file" => do_check(open_hat_file(cache_dir, &matches)),
             _ => do_check(open_hat_cmd(cache_dir)),
@@ -319,11 +357,15 @@ fn main() {
                 match kind {
                     "file" => {
                         let hat = open_hat_file(cache_dir, &matches);
-                        hat::vfs::Fuse::new(hat).mount(&path).unwrap();
+                        hat::vfs::Fuse::new(hat)
+                            .mount(&path)
+                            .unwrap_or_else(|e| fail(e));
                     }
                     _ => {
                         let hat = open_hat_cmd(cache_dir);
-                        hat::vfs::Fuse::new(hat).mount(&path).unwrap();
+                        hat::vfs::Fuse::new(hat)
+                            .mount(&path)
+                            .unwrap_or_else(|e| fail(e));
                     }
                 }
             }

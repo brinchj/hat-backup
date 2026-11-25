@@ -634,3 +634,121 @@ fn non_utf8_symlink_target_ondisk_roundtrip() {
         );
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn unreadable_file_is_skipped_not_turned_into_directory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let sb = sandbox();
+    init_repo(&sb.repo);
+
+    write_fixture(
+        &sb.fixture,
+        &[
+            ("good.txt", FileSpec::file(b"readable".to_vec())),
+            ("unreadable.txt", FileSpec::file_mode(b"secret".to_vec(), 0o000)),
+        ],
+    );
+
+    let unreadable = sb.fixture.join("unreadable.txt");
+    // Running as root ignores 0o000; skip cleanly if open still succeeds.
+    if fs::File::open(&unreadable).is_ok() {
+        let _ = fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644));
+        return;
+    }
+
+    {
+        let mut hat = open_hat(&sb.repo, &sb.backend);
+        commit_tree(&mut hat, "family", &sb.fixture);
+        hat.check().unwrap();
+        let leaf = checkout_and_leaf(&mut hat, "family", &sb.fixture, &sb.restore);
+        assert_eq!(fs::read(leaf.join("good.txt")).unwrap(), b"readable");
+        assert!(
+            !leaf.join("unreadable.txt").exists(),
+            "unreadable file must be skipped, never forged as an empty directory"
+        );
+    }
+
+    // Restore permissions so tempdir cleanup succeeds cleanly.
+    let _ = fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644));
+}
+
+#[test]
+fn checkout_specific_snapshot_by_id() {
+    let sb = sandbox();
+    init_repo(&sb.repo);
+
+    let fix1 = sb.root.path().join("fix1");
+    let fix2 = sb.root.path().join("fix2");
+    fs::create_dir_all(&fix1).unwrap();
+    fs::create_dir_all(&fix2).unwrap();
+    write_fixture(
+        &fix1,
+        &[
+            ("shared.txt", FileSpec::file(b"v1-body".to_vec())),
+            ("only_v1.txt", FileSpec::file(b"gone-in-v2".to_vec())),
+        ],
+    );
+    write_fixture(
+        &fix2,
+        &[
+            ("shared.txt", FileSpec::file(b"v2-body".to_vec())),
+            ("only_v2.txt", FileSpec::file(b"added-in-v2".to_vec())),
+        ],
+    );
+
+    let mut hat = open_hat(&sb.repo, &sb.backend);
+    commit_tree(&mut hat, "family", &fix1);
+    let snap1 = hat.latest_snapshot_id("family").unwrap();
+    commit_tree(&mut hat, "family", &fix2);
+    let snap2 = hat.latest_snapshot_id("family").unwrap();
+    assert_ne!(snap1, snap2);
+
+    let restore_v1 = sb.root.path().join("restore_v1");
+    let restore_latest = sb.root.path().join("restore_latest");
+    fs::create_dir_all(&restore_v1).unwrap();
+    fs::create_dir_all(&restore_latest).unwrap();
+
+    hat.checkout_snapshot_in_dir("family".into(), snap1, restore_v1.clone())
+        .unwrap();
+    assert_tree_eq(&fix1, &restored_tree_path(&fix1, &restore_v1));
+
+    hat.checkout_in_dir("family".into(), restore_latest.clone())
+        .unwrap();
+    assert_tree_eq(&fix2, &restored_tree_path(&fix2, &restore_latest));
+
+    // Unknown snapshot id must return Err.
+    let restore_bad = sb.root.path().join("restore_bad");
+    assert!(hat
+        .checkout_snapshot_in_dir("family".into(), 999_999, restore_bad)
+        .is_err());
+}
+
+#[test]
+fn open_repository_acquires_fail_fast_exclusive_lock() {
+    use hat::backend::FileBackend;
+    use hat::Hat;
+    use std::sync::Arc;
+
+    let sb = sandbox();
+    init_repo(&sb.repo);
+
+    let first = open_hat(&sb.repo, &sb.backend);
+
+    // Second open while first handle is alive must fail fast with Err.
+    let backend2 = Arc::new(FileBackend::new(sb.backend.clone()));
+    let err = match Hat::open_repository(sb.repo.clone(), backend2, MAX_BLOB_SIZE) {
+        Ok(_) => panic!("second concurrent open_repository must fail while lock is held"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        err.to_lowercase().contains("locked"),
+        "expected lock error message, got: {}",
+        err
+    );
+
+    // Dropping the first handle releases the lock immediately.
+    drop(first);
+    let _reopened = open_hat(&sb.repo, &sb.backend);
+}

@@ -323,16 +323,28 @@ impl<IT: io::Read, B: StoreBackend> MsgHandler<Msg<IT>, Reply<B>> for Store<B> {
                     None => insert_entry,
                 };
 
-                // Check if we have an data source:
-                let it_opt = chunk_it_opt.and_then(|open| open());
-                if it_opt.is_none() {
-                    // No data is associated with this entry.
-                    debug!("Insert entry: {:?}", entry.info.name);
-                    let entry = self.index.insert(entry, None)?;
+                // Check if we have a data source:
+                let mut reader = match chunk_it_opt {
+                    None => {
+                        // No data is associated with this entry (directory or symlink).
+                        debug!("Insert entry: {:?}", entry.info.name);
+                        let entry = self.index.insert(entry, None)?;
 
-                    // Bail out before storing data that does not exist:
-                    return reply_ok!(Reply::Id(entry.node_id.unwrap()));
-                }
+                        // Bail out before storing data that does not exist:
+                        return reply_ok!(Reply::Id(entry.node_id.unwrap()));
+                    }
+                    Some(open) => match open() {
+                        Some(reader) => reader,
+                        None => {
+                            // Opening a file failed (e.g. EACCES / vanished). Do not insert a
+                            // NULL-hash row that would masquerade as an empty directory.
+                            return reply_err!(MsgError::from(format!(
+                                "could not open file {:?}",
+                                entry.info.name.utf8()
+                            )));
+                        }
+                    },
+                };
 
                 // Setup hash tree structure
                 let mut tree = self.hash_tree_writer(blob::LeafType::FileChunk);
@@ -341,14 +353,20 @@ impl<IT: io::Read, B: StoreBackend> MsgHandler<Msg<IT>, Reply<B>> for Store<B> {
                 // (see HashStoreBackend::insert_chunk above)
                 let max_chunk_len = 128 * 1024;
                 let mut chunk = vec![0; max_chunk_len];
-                let mut reader = it_opt.unwrap();
                 let mut file_len = 0u64;
                 loop {
                     let mut chunk_len = 0;
                     while chunk_len < max_chunk_len {
                         chunk_len += match reader.read(&mut chunk[chunk_len..]) {
                             Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                            Ok(0) | Err(_) => break,
+                            Err(e) => {
+                                return reply_err!(MsgError::from(format!(
+                                    "failed reading file {:?}: {}",
+                                    entry.info.name.utf8(),
+                                    e
+                                )));
+                            }
+                            Ok(0) => break,
                             Ok(size) => size,
                         }
                     }

@@ -58,7 +58,13 @@ impl Blob {
         let mut href_bytes = href.as_bytes();
         assert!(href_bytes.len() < 65535);
 
-        if self.upperbound_len() + 1 + href_bytes.len() + ct.len() >= self.max_len {
+        let new_len = self.chunks.len()
+            + ct.len()
+            + self.footer.len()
+            + 2
+            + href_bytes.len()
+            + self.overhead;
+        if new_len > self.max_len {
             if self.chunks.is_empty() {
                 panic!(
                     "Can never fit chunk of size {} in blob of size {}",

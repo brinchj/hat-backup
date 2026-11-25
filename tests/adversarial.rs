@@ -58,15 +58,11 @@ fn checkout_fails_if_blob_truncated() {
             "check must reject truncated blob {}",
             victim.display()
         );
-        // Checkout may return Err or panic on corrupt ciphertext; both are safe (not silent Ok).
-        let checkout = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            if sb.restore.exists() {
-                fs::remove_dir_all(&sb.restore).ok();
-            }
-            fs::create_dir_all(&sb.restore).ok();
-            hat.checkout_in_dir("family".into(), sb.restore.clone())
-        }));
-        if !matches!(checkout, Ok(Ok(()))) {
+        if sb.restore.exists() {
+            fs::remove_dir_all(&sb.restore).ok();
+        }
+        fs::create_dir_all(&sb.restore).unwrap();
+        if hat.checkout_in_dir("family".into(), sb.restore.clone()).is_err() {
             checkout_failures += 1;
         }
         drop(hat);
@@ -248,16 +244,10 @@ fn swapping_two_valid_blobs_is_rejected_by_check_and_checkout() {
         hat.check().is_err(),
         "check must reject swapped blobs because MAC binds blob_name"
     );
-    // LeafIterator::next currently unwraps walker errors; ensure checkout fails (Err or panic), never Ok.
-    let checkout = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        fs::create_dir_all(&sb.restore).ok();
-        hat.checkout_in_dir("family".into(), sb.restore.clone())
-    }));
-    let checkout_failed = !matches!(checkout, Ok(Ok(())));
+    fs::create_dir_all(&sb.restore).unwrap();
     assert!(
-        checkout_failed,
-        "checkout must fail on swapped blobs (got {:?})",
-        checkout
+        hat.checkout_in_dir("family".into(), sb.restore.clone()).is_err(),
+        "checkout must return Err on swapped blobs"
     );
 }
 
@@ -391,14 +381,11 @@ fn single_bit_flip_detected_by_check_and_checkout() {
                 flip_end,
                 victim.display()
             );
-            let checkout = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                if sb.restore.exists() {
-                    fs::remove_dir_all(&sb.restore).ok();
-                }
-                fs::create_dir_all(&sb.restore).ok();
-                hat.checkout_in_dir("family".into(), sb.restore.clone())
-            }));
-            if !matches!(checkout, Ok(Ok(()))) {
+            if sb.restore.exists() {
+                fs::remove_dir_all(&sb.restore).ok();
+            }
+            fs::create_dir_all(&sb.restore).unwrap();
+            if hat.checkout_in_dir("family".into(), sb.restore.clone()).is_err() {
                 checkout_failures += 1;
             }
             drop(hat);
@@ -432,14 +419,10 @@ fn wrong_key_fails_check_and_checkout() {
 
     let mut hat = open_hat(&sb.repo, &sb.backend);
     assert!(hat.check().is_err(), "check with wrong key must fail");
-    let checkout = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        fs::create_dir_all(&sb.restore).ok();
-        hat.checkout_in_dir("family".into(), sb.restore.clone())
-    }));
+    fs::create_dir_all(&sb.restore).unwrap();
     assert!(
-        !matches!(checkout, Ok(Ok(()))),
-        "checkout with wrong key must fail (got {:?})",
-        checkout
+        hat.checkout_in_dir("family".into(), sb.restore.clone()).is_err(),
+        "checkout with wrong key must return Err"
     );
 }
 

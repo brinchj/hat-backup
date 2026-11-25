@@ -212,7 +212,7 @@ fn verify_filesystem<B: StoreBackend>(fs: &FileSystem, ks_p: &StoreProcess<Entry
                         }
                         let mut recovered_all = vec![];
                         for chunk in it {
-                            recovered_all.extend_from_slice(&chunk[..]);
+                            recovered_all.extend_from_slice(&chunk.unwrap()[..]);
                         }
                         assert_eq!(original_all.len(), recovered_all.len());
                         assert_eq!(original_all, recovered_all);
@@ -324,5 +324,61 @@ fn data_looks_unchanged_checks_kind_metadata_and_racily_clean_window() {
             .data_looks_unchanged(&stored_raw));
         assert!(!make(Data::Symlink(raw_b), 1000, 1006, 9, 0o777)
             .data_looks_unchanged(&stored_raw));
+    }
+}
+
+#[test]
+fn mid_read_io_error_and_failed_open_do_not_commit_corrupt_entries() {
+    struct FailingReader {
+        yielded_once: bool,
+    }
+    impl io::Read for FailingReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if !self.yielded_once {
+                self.yielded_once = true;
+                let data = b"partial-prefix-before-eio";
+                let n = data.len().min(buf.len());
+                buf[..n].copy_from_slice(&data[..n]);
+                Ok(n)
+            } else {
+                Err(io::Error::new(io::ErrorKind::Other, "simulated EIO"))
+            }
+        }
+    }
+
+    let backend = Arc::new(MemoryBackend::new());
+    let ks_p: StoreProcess<FailingReader, MemoryBackend> =
+        Process::new(Store::new_for_testing(backend, 4096).unwrap());
+
+    // 1. Mid-read I/O error must return Err and NOT commit a truncated file.
+    let eio_entry = Entry::new(None, "eio.bin".to_string().into(), Data::FilePlaceholder, None);
+    let res = ks_p.send_reply(Msg::Insert(
+        eio_entry,
+        Some(Box::new(|| Some(FailingReader { yielded_once: false }))),
+    ));
+    assert!(res.is_err(), "mid-read I/O error must fail Msg::Insert");
+
+    // 2. Failed file open (Some closure returning None) must return Err, not forge a directory.
+    let open_fail_entry = Entry::new(
+        None,
+        "unreadable.bin".to_string().into(),
+        Data::FilePlaceholder,
+        None,
+    );
+    let res = ks_p.send_reply(Msg::Insert(open_fail_entry, Some(Box::new(|| None))));
+    assert!(res.is_err(), "failed file open must fail Msg::Insert");
+
+    ks_p.send_reply(Msg::CommitReservedNodes(None)).unwrap();
+    ks_p.send_reply(Msg::Flush).unwrap();
+
+    match ks_p.send_reply(Msg::ListDir(None)).unwrap() {
+        Reply::ListResult(entries) => {
+            assert!(
+                entries.is_empty(),
+                "failed inserts must not leave truncated files or fake dirs in index: {:?}",
+                entries.iter().map(|(e, _, _)| &e.info.name).collect::<Vec<_>>()
+            );
+        }
+        _ => panic!("unexpected reply from key store"),
     }
 }

@@ -129,7 +129,7 @@ fn identity_many_small_blocks() {
 
         if chunks_count == 0 {
             // An empty tree is a tree with a single empty chunk (as opposed to no chunks).
-            assert_eq!(Some(vec![]), tree_it.next());
+            assert_eq!(Some(vec![]), tree_it.next().map(|r| r.unwrap()));
             assert_eq!(0, tree_it.count());
             return true;
         }
@@ -137,7 +137,7 @@ fn identity_many_small_blocks() {
         // We have a tree, let's investigate!
         let mut actual_count = 0;
         for chunk in tree_it {
-            assert_eq!(chunk, b"a".to_vec());
+            assert_eq!(chunk.unwrap(), b"a".to_vec());
             actual_count += 1;
         }
         assert_eq!(chunks_count, actual_count);
@@ -162,7 +162,7 @@ fn identity_empty() {
         .unwrap()
         .expect("tree not found");
 
-    assert_eq!(Some(block), it.next());
+    assert_eq!(Some(block), it.next().map(|r| r.unwrap()));
     assert_eq!(0, it.count());
 }
 
@@ -180,7 +180,7 @@ fn identity_append1() {
     let mut it = LeafIterator::new(backend, hash_ref)
         .unwrap()
         .expect("tree not found");
-    assert_eq!(Some(block), it.next());
+    assert_eq!(Some(block), it.next().map(|r| r.unwrap()));
     assert_eq!(0, it.count());
 }
 
@@ -208,7 +208,7 @@ fn identity_append5() {
         .expect("tree not found");
 
     for block in blocks {
-        assert_eq!(Some(&block), it.next().as_ref());
+        assert_eq!(Some(block.clone()), it.next().map(|r| r.unwrap()));
         assert!(backend.saw_chunk(&block));
     }
     assert_eq!(0, it.count());
@@ -240,7 +240,7 @@ fn identity_implicit_flush() {
 
     for (i, chunk) in it.enumerate() {
         bytes[0] = (i + 1) as u8;
-        assert_eq!(bytes, chunk);
+        assert_eq!(bytes, chunk.unwrap());
     }
 }
 
@@ -268,6 +268,6 @@ fn identity_1_short_of_flush() {
 
     for (i, chunk) in it.enumerate() {
         bytes[0] = (i + 1) as u8;
-        assert_eq!(bytes, chunk);
+        assert_eq!(bytes, chunk.unwrap());
     }
 }

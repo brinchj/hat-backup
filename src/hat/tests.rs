@@ -133,7 +133,7 @@ fn read_dir_files(
                 let mut bytes = Vec::new();
                 if let Some(tree) = LeafIterator::new(hat.hash_backend(), file_ref)? {
                     for chunk in tree {
-                        bytes.extend_from_slice(&chunk);
+                        bytes.extend_from_slice(&chunk?);
                     }
                 }
                 out.insert(path, bytes);
@@ -710,4 +710,173 @@ fn non_utf8_filename_roundtrip_vfs_and_recover() {
     };
     let mut reader = FileReader::new(hash_backend, href).unwrap();
     assert_eq!(&*reader.read(0, 1024).unwrap(), b"nested-raw-bytes");
+}
+
+#[cfg(unix)]
+#[test]
+fn checkout_rejects_path_traversal_entry_names() {
+    use std::ffi::OsStr;
+
+    assert!(crate::util::validate_entry_name(OsStr::new("")).is_err());
+
+    let bad_names = [
+        "..",
+        "../escape.txt",
+        "/tmp/hat_checkout_escape_test_never_create",
+        ".",
+        "nested/escape.txt",
+    ];
+
+    for bad in bad_names {
+        let (_, mut hat, mut fam) = setup_family();
+        let e = key::Entry::new(
+            None,
+            bad.to_string().into(),
+            key::Data::FilePlaceholder,
+            None,
+        );
+        fam.snapshot_direct(
+            e,
+            false,
+            Some(FileIterator::from_bytes(b"pwned".to_vec())),
+        )
+        .unwrap();
+        fam.flush().unwrap();
+        hat.commit(&mut fam, None).unwrap();
+
+        let td = tempfile::tempdir().unwrap();
+        let restore = td.path().join("restore");
+        std::fs::create_dir_all(&restore).unwrap();
+
+        assert!(
+            hat.checkout_in_dir("familyname".into(), restore.clone())
+                .is_err(),
+            "Hat::checkout_in_dir must reject unsafe entry name {:?}",
+            bad
+        );
+        assert!(
+            fam.checkout_in_dir(restore.clone(), None).is_err(),
+            "Family::checkout_in_dir must reject unsafe entry name {:?}",
+            bad
+        );
+        assert!(!td.path().join("escape.txt").exists());
+        assert!(!std::path::Path::new("/tmp/hat_checkout_escape_test_never_create").exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn checkout_does_not_chmod_symlink_targets_or_fail_on_broken_symlink() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    let td = tempfile::tempdir().unwrap();
+    let outside = td.path().join("outside.txt");
+    fs::write(&outside, b"do not chmod me").unwrap();
+    fs::set_permissions(&outside, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let (_, mut hat, mut fam) = setup_family();
+
+    // Symlink pointing to outside 0o600 file, with stored symlink mode 0o777.
+    let mut link_entry = key::Entry::new(
+        None,
+        "link_outside".to_string().into(),
+        key::Data::Symlink(outside.clone()),
+        None,
+    );
+    link_entry.info.permissions = Some(fs::Permissions::from_mode(0o777));
+    fam.snapshot_direct(link_entry, false, None).unwrap();
+
+    // Broken symlink with stored symlink mode 0o700 (differs from default symlink mode).
+    let mut broken_entry = key::Entry::new(
+        None,
+        "broken_link".to_string().into(),
+        key::Data::Symlink(PathBuf::from("nonexistent_target_xyz")),
+        None,
+    );
+    broken_entry.info.permissions = Some(fs::Permissions::from_mode(0o700));
+    fam.snapshot_direct(broken_entry, false, None).unwrap();
+
+    fam.flush().unwrap();
+    hat.commit(&mut fam, None).unwrap();
+
+    // Test both Hat::checkout_in_dir and Family::checkout_in_dir.
+    for (label, use_family) in [("hat", false), ("family", true)] {
+        let restore = td.path().join(format!("restore_{}", label));
+        fs::create_dir_all(&restore).unwrap();
+        if use_family {
+            fam.checkout_in_dir(restore.clone(), None).unwrap();
+        } else {
+            hat.checkout_in_dir("familyname".into(), restore.clone())
+                .unwrap();
+        }
+
+        let outside_mode = fs::metadata(&outside).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            outside_mode, 0o600,
+            "{} checkout must not chmod symlink target (got {:o})",
+            label, outside_mode
+        );
+        assert_eq!(
+            fs::read_link(restore.join("link_outside")).unwrap(),
+            outside
+        );
+        assert_eq!(
+            fs::read_link(restore.join("broken_link")).unwrap(),
+            PathBuf::from("nonexistent_target_xyz")
+        );
+    }
+}
+
+#[test]
+fn meta_commit_chunks_large_snapshot_list_and_recovers() {
+    // Use a small max_blob_size (8 KiB) and 40 snapshots with a long family name so the
+    // full SnapshotList CBOR (~10+ KiB) exceeds max_blob_size and spans multiple leaves/branches,
+    // which previously panicked in Blob::try_append when serialized as a single chunk.
+    let backend = Arc::new(MemoryBackend::new());
+    let max_blob_size = 8192;
+    let mut hat = HatRc::new_for_testing(backend.clone(), max_blob_size).unwrap();
+    let family_name = format!("many_{}", "f".repeat(180));
+    let mut fam = hat.open_family(family_name.clone()).unwrap();
+
+    let count = 40u32;
+    for i in 0..count {
+        let entry = key::Entry::new(
+            None,
+            "file.txt".to_string().into(),
+            key::Data::FilePlaceholder,
+            None,
+        );
+        let payload = format!("payload-{}", i).into_bytes();
+        fam.snapshot_direct(entry, false, Some(FileIterator::from_bytes(payload)))
+            .unwrap();
+        fam.flush().unwrap();
+        hat.commit(&mut fam, None).unwrap();
+    }
+
+    hat.meta_commit().unwrap();
+    hat.data_flush().unwrap();
+
+    let expected_snaps: Vec<u64> = hat
+        .list_snapshots()
+        .into_iter()
+        .filter(|s| s.family_name == family_name)
+        .map(|s| s.info.snapshot_id)
+        .collect();
+    assert_eq!(expected_snaps.len(), count as usize);
+
+    // Recover into a completely fresh Hat instance sharing only the backend.
+    let mut hat2 = HatRc::new_for_testing(backend, max_blob_size).unwrap();
+    hat2.recover().unwrap();
+
+    let recovered_snaps: Vec<u64> = hat2
+        .list_snapshots()
+        .into_iter()
+        .filter(|s| s.family_name == family_name)
+        .map(|s| s.info.snapshot_id)
+        .collect();
+    assert_eq!(
+        recovered_snaps, expected_snaps,
+        "all chunked SnapshotList entries must survive recover()"
+    );
 }

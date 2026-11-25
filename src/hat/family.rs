@@ -277,7 +277,7 @@ impl<B: StoreBackend> Family<B> {
         let f = if is_directory {
             None
         } else {
-            Some(Box::new(move || contents) as Box<dyn FnOnce() -> Option<FileIterator> + Send>)
+            contents.map(|c| Box::new(move || Some(c)) as Box<dyn FnOnce() -> Option<FileIterator> + Send>)
         };
         let ks = self.key_store_process.iter().last().unwrap();
         let id = match ks.send_reply(key::Msg::Insert(file, f))? {
@@ -302,6 +302,7 @@ impl<B: StoreBackend> Family<B> {
         tree: hash::tree::LeafIterator<HTB>,
     ) -> Result<(), HatError> {
         for chunk in tree {
+            let chunk = chunk?;
             fd.write_all(&chunk[..])?;
         }
         fd.flush()?;
@@ -319,8 +320,10 @@ impl<B: StoreBackend> Family<B> {
         for (entry, _ref, read_fn_opt) in self.list_from_key_store(dir_id)? {
             // Extend directory with filename:
             let name_os_string: ffi::OsString = entry.info.name.clone().into();
+            crate::util::validate_entry_name(&name_os_string)?;
             path.push(&name_os_string);
 
+            let is_symlink = matches!(entry.data, key::Data::Symlink(_));
             match entry.data {
                 key::Data::DirPlaceholder => {
                     // This is a directory, recurse!
@@ -341,10 +344,12 @@ impl<B: StoreBackend> Family<B> {
                 _ => unreachable!("Unexpected data entry"),
             }
 
-            if let Some(perms) = entry.info.permissions {
-                let current = fs::symlink_metadata(&path)?.permissions();
-                if current != perms {
-                    fs::set_permissions(&path, perms)?;
+            if !is_symlink {
+                if let Some(perms) = entry.info.permissions {
+                    let current = fs::symlink_metadata(&path)?.permissions();
+                    if current != perms {
+                        fs::set_permissions(&path, perms)?;
+                    }
                 }
             }
 
@@ -383,6 +388,7 @@ impl<B: StoreBackend> Family<B> {
 
         let mut out = Vec::new();
         for chunk in it {
+            let chunk = chunk?;
             if !chunk.is_empty() {
                 parse_dir_data(&chunk[..], &mut out)?;
             }

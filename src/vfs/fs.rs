@@ -12,7 +12,7 @@ use std::mem;
 use std::path::{self, Path};
 
 pub struct FileReader {
-    rest: Option<Box<dyn Iterator<Item = Vec<u8>>>>,
+    rest: Option<Box<dyn Iterator<Item = Result<Vec<u8>, String>>>>,
     offset: u64,
     buf: Vec<u8>,
     eof: bool,
@@ -23,13 +23,23 @@ impl FileReader {
     where
         B: HashTreeBackend + 'static,
     {
-        let tree = tree::LeafIterator::new(backend, file)?
-            .map(|t| Box::new(t) as Box<dyn Iterator<Item = Vec<u8>>>);
+        let tree = tree::LeafIterator::new(backend, file)?.map(|t| {
+            Box::new(t.map(|res| res.map_err(|e| format!("{:?}", e))))
+                as Box<dyn Iterator<Item = Result<Vec<u8>, String>>>
+        });
 
-        Ok(FileReader::new_from_iter(tree))
+        Ok(FileReader {
+            eof: tree.is_none(),
+            rest: tree,
+            offset: 0,
+            buf: Vec::with_capacity(16 * 1024),
+        })
     }
 
     pub fn new_from_iter(rest: Option<Box<dyn Iterator<Item = Vec<u8>>>>) -> FileReader {
+        let rest = rest.map(|iter| {
+            Box::new(iter.map(Ok)) as Box<dyn Iterator<Item = Result<Vec<u8>, String>>>
+        });
         FileReader {
             eof: rest.is_none(),
             rest,
@@ -41,8 +51,12 @@ impl FileReader {
     fn next(&mut self) -> Vec<u8> {
         if let Some(ref mut rest) = self.rest {
             self.offset += self.buf.len() as u64;
-            if let Some(buf) = rest.next() {
-                return mem::replace(&mut self.buf, buf);
+            match rest.next() {
+                Some(Ok(buf)) => return mem::replace(&mut self.buf, buf),
+                Some(Err(e)) => {
+                    error!("failed reading file chunk: {}", e);
+                }
+                None => {}
             }
         }
         self.buf.clear();

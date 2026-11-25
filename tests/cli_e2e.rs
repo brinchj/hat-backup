@@ -367,3 +367,245 @@ fn cli_fails_nonzero_on_bad_usage_and_corrupt_backend() {
         .assert()
         .failure();
 }
+
+#[test]
+fn cli_gc_pretend_does_not_delete_blobs() {
+    let sb = sandbox();
+    init_repo(&sb.repo);
+
+    let fix1 = sb.root.path().join("fix1");
+    let fix2 = sb.root.path().join("fix2");
+    fs::create_dir_all(&fix1).unwrap();
+    fs::create_dir_all(&fix2).unwrap();
+    write_fixture(
+        &fix1,
+        &[("only1.bin", FileSpec::file(random_bytes_seeded(51, 1500 * 1024)))],
+    );
+    write_fixture(
+        &fix2,
+        &[("only2.bin", FileSpec::file(random_bytes_seeded(52, 1500 * 1024)))],
+    );
+
+    with_file_backend(&mut hatbin(), &sb)
+        .args(["commit", "family", fix1.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let snap1 = {
+        let mut hat = open_hat(&sb.repo, &sb.backend);
+        hat.latest_snapshot_id("family").unwrap()
+    };
+
+    with_file_backend(&mut hatbin(), &sb)
+        .args(["commit", "family", fix2.to_str().unwrap()])
+        .assert()
+        .success();
+
+    with_file_backend(&mut hatbin(), &sb)
+        .args(["delete", "family", &snap1.to_string()])
+        .assert()
+        .success();
+
+    let blobs_before = backend_files(&sb.backend);
+    let bytes_before = backend_total_bytes(&sb.backend);
+
+    // Dry-run gc must NOT remove any backend blobs or hashes.
+    let pretend_out = with_file_backend(&mut hatbin(), &sb)
+        .args(["gc", "--pretend"])
+        .output()
+        .unwrap();
+    assert!(pretend_out.status.success());
+    let stdout = String::from_utf8_lossy(&pretend_out.stdout);
+    assert!(
+        stdout.contains("Would delete hashes:") && !stdout.contains("Would delete hashes: 0"),
+        "expected non-zero pretend delete count, got: {:?}",
+        stdout
+    );
+    assert_eq!(
+        backend_files(&sb.backend),
+        blobs_before,
+        "gc --pretend must not modify backend blobs"
+    );
+    assert_eq!(backend_total_bytes(&sb.backend), bytes_before);
+
+    // Real gc afterwards actually reclaims the unused blobs.
+    with_file_backend(&mut hatbin(), &sb)
+        .arg("gc")
+        .assert()
+        .success();
+    assert!(
+        backend_files(&sb.backend).len() < blobs_before.len(),
+        "real gc must reclaim blobs left untouched by gc --pretend"
+    );
+
+    with_file_backend(&mut hatbin(), &sb)
+        .arg("check")
+        .assert()
+        .success();
+    with_file_backend(&mut hatbin(), &sb)
+        .args(["checkout", "family", sb.restore.to_str().unwrap()])
+        .assert()
+        .success();
+    assert_tree_eq(&fix2, &restored_tree_path(&fix2, &sb.restore));
+}
+
+#[test]
+fn cli_delete_gc_then_recover_after_cache_wipe() {
+    let sb = sandbox();
+    init_repo(&sb.repo);
+
+    let fix1 = sb.root.path().join("fix1");
+    let fix2 = sb.root.path().join("fix2");
+    fs::create_dir_all(&fix1).unwrap();
+    fs::create_dir_all(&fix2).unwrap();
+    write_fixture(&fix1, &[("a.txt", FileSpec::file(b"snap1-only".to_vec()))]);
+    write_fixture(&fix2, &[("b.txt", FileSpec::file(b"snap2-only".to_vec()))]);
+
+    with_file_backend(&mut hatbin(), &sb)
+        .args(["commit", "family", fix1.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let snap1 = {
+        let mut hat = open_hat(&sb.repo, &sb.backend);
+        hat.latest_snapshot_id("family").unwrap()
+    };
+
+    with_file_backend(&mut hatbin(), &sb)
+        .args(["commit", "family", fix2.to_str().unwrap()])
+        .assert()
+        .success();
+
+    with_file_backend(&mut hatbin(), &sb)
+        .args(["delete", "family", &snap1.to_string()])
+        .assert()
+        .success();
+
+    with_file_backend(&mut hatbin(), &sb)
+        .arg("gc")
+        .assert()
+        .success();
+
+    // Wipe local cache after delete+gc; recover must succeed using the updated root listing.
+    for entry in fs::read_dir(sb.repo.join("cache")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            fs::remove_dir_all(&path).unwrap();
+        } else {
+            fs::remove_file(&path).unwrap();
+        }
+    }
+
+    with_file_backend(&mut hatbin(), &sb)
+        .arg("recover")
+        .assert()
+        .success();
+    with_file_backend(&mut hatbin(), &sb)
+        .arg("check")
+        .assert()
+        .success();
+    with_file_backend(&mut hatbin(), &sb)
+        .args(["checkout", "family", sb.restore.to_str().unwrap()])
+        .assert()
+        .success();
+    assert_tree_eq(&fix2, &restored_tree_path(&fix2, &sb.restore));
+}
+
+#[test]
+fn cli_checkout_by_snapshot_id_and_clean_error_exits() {
+    let sb = sandbox();
+    init_repo(&sb.repo);
+
+    let fix1 = sb.root.path().join("fix1");
+    let fix2 = sb.root.path().join("fix2");
+    fs::create_dir_all(&fix1).unwrap();
+    fs::create_dir_all(&fix2).unwrap();
+    write_fixture(&fix1, &[("v.txt", FileSpec::file(b"version-one".to_vec()))]);
+    write_fixture(&fix2, &[("v.txt", FileSpec::file(b"version-two".to_vec()))]);
+
+    with_file_backend(&mut hatbin(), &sb)
+        .args(["commit", "family", fix1.to_str().unwrap()])
+        .assert()
+        .success();
+    let snap1 = {
+        let mut hat = open_hat(&sb.repo, &sb.backend);
+        hat.latest_snapshot_id("family").unwrap()
+    };
+
+    with_file_backend(&mut hatbin(), &sb)
+        .args(["commit", "family", fix2.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let restore_v1 = sb.root.path().join("restore_v1");
+    fs::create_dir_all(&restore_v1).unwrap();
+    with_file_backend(&mut hatbin(), &sb)
+        .args([
+            "checkout",
+            "family",
+            restore_v1.to_str().unwrap(),
+            "--id",
+            &snap1.to_string(),
+        ])
+        .assert()
+        .success();
+    assert_tree_eq(&fix1, &restored_tree_path(&fix1, &restore_v1));
+
+    // Default checkout (without --id) still restores latest (v2).
+    with_file_backend(&mut hatbin(), &sb)
+        .args(["checkout", "family", sb.restore.to_str().unwrap()])
+        .assert()
+        .success();
+    assert_tree_eq(&fix2, &restored_tree_path(&fix2, &sb.restore));
+
+    // Errors exit non-zero cleanly (no Rust panic backtrace).
+    let bad_checkout = with_file_backend(&mut hatbin(), &sb)
+        .args([
+            "checkout",
+            "family",
+            sb.root.path().join("restore_bad").to_str().unwrap(),
+            "--id",
+            "999999",
+        ])
+        .output()
+        .unwrap();
+    assert!(!bad_checkout.status.success());
+    let stderr = String::from_utf8_lossy(&bad_checkout.stderr);
+    assert!(
+        stderr.contains("Error:") && !stderr.contains("panicked at"),
+        "expected clean Error message without panic, got: {:?}",
+        stderr
+    );
+}
+
+#[test]
+fn cli_fails_fast_when_repository_is_locked() {
+    let sb = sandbox();
+    init_repo(&sb.repo);
+
+    // Hold the repository lock in this process while invoking hatbin in a child process.
+    let held = open_hat(&sb.repo, &sb.backend);
+
+    let out = with_file_backend(&mut hatbin(), &sb)
+        .arg("check")
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "child hatbin must fail fast when another process holds the repo lock"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.to_lowercase().contains("locked") && !stderr.contains("panicked at"),
+        "expected clean lock error without panic, got: {:?}",
+        stderr
+    );
+
+    drop(held);
+
+    // Once released, hatbin succeeds.
+    with_file_backend(&mut hatbin(), &sb)
+        .arg("check")
+        .assert()
+        .success();
+}

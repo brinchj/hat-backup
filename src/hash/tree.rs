@@ -106,7 +106,7 @@ fn hash_refs_from_bytes(bytes: &[u8]) -> Option<Vec<HashRef>> {
         return Some(vec![]);
     }
 
-    let hr: models::HashRefs = cbor_util::from_slice(bytes).unwrap();
+    let hr: models::HashRefs = cbor_util::from_slice(bytes).ok()?;
     Some(hr.refs.into_iter().map(From::from).collect())
 }
 
@@ -374,7 +374,10 @@ where
                 }
                 NodeType::Branch(..) => {
                     let data = fetch_chunk(&self.backend, &node)?;
-                    let mut new_childs = hash_refs_from_bytes(&data[..]).unwrap();
+                    let mut new_childs = match hash_refs_from_bytes(&data[..]) {
+                        Some(c) => c,
+                        None => return Err(From::from("Corrupt branch hash refs")),
+                    };
                     if visitor.branch_enter(&node, &new_childs) {
                         self.stack.push(StackItem::LeaveBranch(node));
                         new_childs.reverse();
@@ -393,6 +396,7 @@ where
 pub struct LeafIterator<B> {
     walker: Walker<B>,
     visitor: LeafVisitor,
+    errored: bool,
 }
 
 impl<B> LeafIterator<B>
@@ -405,6 +409,7 @@ where
             visitor: LeafVisitor {
                 leafs: VecDeque::new(),
             },
+            errored: false,
         }))
     }
 }
@@ -421,10 +426,22 @@ impl Visitor for LeafVisitor {
 }
 
 impl<B: HashTreeBackend> Iterator for LeafIterator<B> {
-    type Item = Vec<u8>;
+    type Item = Result<Vec<u8>, B::Err>;
 
-    fn next(&mut self) -> Option<Vec<u8>> {
-        while self.visitor.leafs.is_empty() && self.walker.resume(&mut self.visitor).unwrap() {}
-        self.visitor.leafs.pop_front()
+    fn next(&mut self) -> Option<Result<Vec<u8>, B::Err>> {
+        if self.errored {
+            return None;
+        }
+        while self.visitor.leafs.is_empty() {
+            match self.walker.resume(&mut self.visitor) {
+                Ok(true) => continue,
+                Ok(false) => break,
+                Err(e) => {
+                    self.errored = true;
+                    return Some(Err(e));
+                }
+            }
+        }
+        self.visitor.leafs.pop_front().map(Ok)
     }
 }

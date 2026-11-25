@@ -116,6 +116,7 @@ impl gc::GcBackend for GcBackend {
 pub struct Hat<B: StoreBackend, G: gc::Gc<GcBackend>> {
     keys: Arc<crypto::keys::Keeper>,
     repository_root: Option<PathBuf>,
+    _repo_lock: Option<fs::File>,
     families: Vec<Family<B>>,
     db: Arc<db::Index>,
     snapshot_index: snapshot::SnapshotIndex,
@@ -261,6 +262,39 @@ impl<B: StoreBackend> HatRc<B> {
             fs::create_dir(&repository_root)?;
         }
 
+        // Acquire an exclusive, fail-fast cross-process lock for this repository state dir.
+        // Held on `Hat` for its lifetime and automatically released on drop or process exit.
+        let lock_path = repository_root.join(".hat.lock");
+        let lock_file = {
+            let mut opts = fs::OpenOptions::new();
+            opts.read(true).write(true).create(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            let file = opts.open(&lock_path)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = file.metadata()?.permissions().mode();
+                if mode & 0o077 != 0 {
+                    fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600))?;
+                }
+            }
+            match file.try_lock() {
+                Ok(()) => file,
+                Err(fs::TryLockError::WouldBlock) => {
+                    return Err(format!(
+                        "Repository is locked by another process ({})",
+                        lock_path.display()
+                    )
+                    .into());
+                }
+                Err(fs::TryLockError::Error(e)) => return Err(e.into()),
+            }
+        };
+
         let hash_index_path = hash_index_name(repository_root.clone());
         let db_p = Arc::new(db::Index::new(&hash_index_path)?);
 
@@ -283,6 +317,7 @@ impl<B: StoreBackend> HatRc<B> {
         let mut hat = Hat {
             keys,
             repository_root: Some(repository_root),
+            _repo_lock: Some(lock_file),
             families: vec![],
             db: db_p,
             snapshot_index: si_p,
@@ -326,6 +361,7 @@ impl<B: StoreBackend> HatRc<B> {
         let mut hat = Hat {
             keys,
             repository_root: None,
+            _repo_lock: None,
             families: vec![],
             db: db_p,
             snapshot_index: si_p,
@@ -508,11 +544,40 @@ impl<B: StoreBackend> HatRc<B> {
             snapshots.snapshots.push(model);
         }
 
-        let listing = cbor_util::to_vec(&snapshots).unwrap();
-
-        // Snapshot lists can grow large; chunking across append()s is a future improvement.
+        // Chunk snapshot listings across multiple SnapshotList leaves so large histories
+        // never exceed `blob_max_size`. Each leaf is a self-contained CBOR `models::Snapshots`.
         let mut tree = self.hash_tree_writer(blob::LeafType::SnapshotList);
-        tree.append(&listing[..])?;
+        let max_leaf_bytes = cmp::min(64 * 1024, cmp::max(512, self.blob_max_size / 4));
+        const MAX_SNAPSHOTS_PER_LEAF: usize = 256;
+
+        if snapshots.snapshots.is_empty() {
+            let listing = cbor_util::to_vec(&snapshots)?;
+            tree.append(&listing[..])?;
+        } else {
+            let mut batch: Vec<models::Snapshot> = Vec::new();
+            let mut batch_bytes: usize = 0;
+
+            for snap in snapshots.snapshots {
+                let snap_bytes = cbor_util::to_vec(&snap)?.len();
+                if !batch.is_empty()
+                    && (batch_bytes + snap_bytes > max_leaf_bytes
+                        || batch.len() >= MAX_SNAPSHOTS_PER_LEAF)
+                {
+                    let listing = cbor_util::to_vec(&models::Snapshots {
+                        snapshots: std::mem::take(&mut batch),
+                    })?;
+                    tree.append(&listing[..])?;
+                    batch_bytes = 0;
+                }
+                batch_bytes += snap_bytes;
+                batch.push(snap);
+            }
+
+            if !batch.is_empty() {
+                let listing = cbor_util::to_vec(&models::Snapshots { snapshots: batch })?;
+                tree.append(&listing[..])?;
+            }
+        }
 
         let top_ref = tree.hash(None)?;
         let top_id = self
@@ -605,7 +670,10 @@ impl<B: StoreBackend> HatRc<B> {
         use chrono::TimeZone;
         let mut max_created = chrono::Utc.timestamp_opt(0, 0).single().unwrap();
 
-        for msg in hash::tree::LeafIterator::new(self.hash_backend(), root_href.clone())?.unwrap() {
+        for msg in hash::tree::LeafIterator::new(self.hash_backend(), root_href.clone())?
+            .ok_or("Failed to open root snapshot list")?
+        {
+            let msg = msg?;
             let snapshot_list: models::Snapshots = cbor_util::from_slice(&msg[..])?;
 
             for s in snapshot_list.snapshots {
@@ -993,6 +1061,32 @@ impl<B: StoreBackend> HatRc<B> {
         self.checkout_dir_ref(&family, &mut output_dir, dir_ref)
     }
 
+    pub fn checkout_snapshot_in_dir(
+        &mut self,
+        family_name: String,
+        snapshot_id: u64,
+        output_dir: PathBuf,
+    ) -> Result<(), HatError> {
+        let (_info, _dir_hash, dir_ref) =
+            match self.snapshot_index.lookup(&family_name, snapshot_id) {
+                Some((i, h, Some(r))) => (i, h, r),
+                _ => {
+                    return Err(format!(
+                        "No complete snapshot found for family '{}' with id {}",
+                        family_name, snapshot_id
+                    )
+                    .into())
+                }
+            };
+
+        let family = self
+            .open_family(family_name.clone())
+            .map_err(|e| format!("Could not open family '{}': {}", family_name, e))?;
+
+        let mut output_dir = output_dir;
+        self.checkout_dir_ref(&family, &mut output_dir, dir_ref)
+    }
+
     #[allow(clippy::only_used_in_recursion)]
     fn checkout_dir_ref(
         &self,
@@ -1003,11 +1097,11 @@ impl<B: StoreBackend> HatRc<B> {
         fs::create_dir_all(&output)?;
         for (entry, hash_ref) in family::Family::<B>::fetch_dir_data(dir_hash, self.hash_backend())?
         {
-            assert!(!entry.info.name.is_empty());
-
             let name_os_string: ffi::OsString = entry.info.name.into();
+            crate::util::validate_entry_name(&name_os_string)?;
             output.push(&name_os_string);
 
+            let is_symlink = matches!(hash_ref, walker::Content::Link(_));
             match hash_ref {
                 walker::Content::Data(hash_ref) => {
                     let mut fd = fs::File::create(&output)?;
@@ -1025,10 +1119,12 @@ impl<B: StoreBackend> HatRc<B> {
                 }
             }
 
-            if let Some(perms) = entry.info.permissions {
-                let current = fs::symlink_metadata(&output)?.permissions();
-                if current != perms {
-                    fs::set_permissions(&output, perms)?;
+            if !is_symlink {
+                if let Some(perms) = entry.info.permissions {
+                    let current = fs::symlink_metadata(&output)?.permissions();
+                    if current != perms {
+                        fs::set_permissions(&output, perms)?;
+                    }
                 }
             }
 
@@ -1161,6 +1257,33 @@ impl<B: StoreBackend> HatRc<B> {
 
         self.flush_snapshot_index();
         Ok(())
+    }
+
+    /// Dry-run garbage collection: return `(unused_hashes, live_hashes)` without deleting
+    /// any hashes or backend blobs.
+    pub fn gc_pretend(&mut self) -> Result<(u64, u64), HatError> {
+        use std::collections::HashSet;
+
+        let (sender, receiver) = mpsc::channel();
+        self.gc.list_unused_ids(sender)?;
+        let unused: HashSet<u64> = receiver.iter().collect();
+
+        // Restore tags without modifying hashes or blobs.
+        self.hash_index.set_all_tags(tags::Tag::Done);
+        self.hash_index.flush();
+
+        let mut live_blobs = 0u64;
+        for entry in self.hash_index.list() {
+            if entry.persistent_ref.is_some() {
+                if let Some(id) = self.hash_index.get_id(&entry.hash) {
+                    if !unused.contains(&id) {
+                        live_blobs += 1;
+                    }
+                }
+            }
+        }
+
+        Ok((unused.len() as u64, live_blobs))
     }
 
     pub fn gc(&mut self) -> Result<(u64, u64), HatError> {

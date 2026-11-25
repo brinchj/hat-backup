@@ -57,7 +57,8 @@ impl FileBackend {
         };
 
         match fs::File::open(&path) {
-            Err(_) => Ok(None),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.to_string()),
             Ok(mut fd) => {
                 let mut buf = Vec::new();
                 match fd.read_to_end(&mut buf) {
@@ -149,8 +150,11 @@ impl StoreBackend for FileBackend {
 
         let res = self.get(name);
 
-        // Update cache to contain key:
-        self.guarded_cache_put(name.to_vec(), res.clone());
+        // Cache only found blobs so transient I/O errors or not-yet-present blobs
+        // are not pinned in memory.
+        if matches!(res, Ok(Some(_))) {
+            self.guarded_cache_put(name.to_vec(), res.clone());
+        }
 
         res
     }
@@ -267,5 +271,43 @@ mod tests {
         let names = backend.list().unwrap();
         assert_eq!(names.len(), 1);
         assert_eq!(&names[0][..], b"real");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_blob_returns_err_and_is_not_cached() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let backend = FileBackend::new(dir.path().to_path_buf());
+
+        backend
+            .store(b"secret", CipherText::new(b"payload".to_vec()), Box::new(|| {}))
+            .unwrap();
+        let blob_path = backend.blob_path(b"secret");
+
+        fs::set_permissions(&blob_path, fs::Permissions::from_mode(0o000)).unwrap();
+        let can_still_read = fs::File::open(&blob_path).is_ok();
+        if can_still_read {
+            // Running as root/CAP_DAC_OVERRIDE bypasses 0000 permissions.
+            fs::set_permissions(&blob_path, fs::Permissions::from_mode(0o600)).unwrap();
+            return;
+        }
+
+        // Unreadable existing blob must return Err, not Ok(None) (missing).
+        assert!(
+            backend.retrieve(b"secret").is_err(),
+            "permission error on existing blob must return Err, not Ok(None)"
+        );
+
+        // Once permissions are restored, retrieve must succeed (error was not cached).
+        fs::set_permissions(&blob_path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            backend.retrieve(b"secret").unwrap(),
+            Some(b"payload".to_vec())
+        );
+
+        // Non-existent blob still returns Ok(None).
+        assert_eq!(backend.retrieve(b"does-not-exist").unwrap(), None);
     }
 }
