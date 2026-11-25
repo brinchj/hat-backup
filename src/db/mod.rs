@@ -79,16 +79,25 @@ fn decode_chunk_ref(
     })
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GcData {
-    pub num: i64,
-    pub bytes: Vec<u8>,
-}
-pub trait UpdateFn: FnOnce(GcData) -> Option<GcData> {}
-impl<T> UpdateFn for T
-where
-    T: FnOnce(GcData) -> Option<GcData>,
-{
+#[derive(Clone, Debug)]
+pub struct StatCacheEntry {
+    pub kind: i32,
+    pub created: Option<i64>,
+    pub modified: Option<i64>,
+    pub accessed: Option<i64>,
+    pub permissions: Option<i64>,
+    pub user_id: Option<i64>,
+    pub group_id: Option<i64>,
+    pub file_size: Option<i64>,
+    pub dev: Option<i64>,
+    pub ino: Option<i64>,
+    pub ctime: Option<i64>,
+    pub ctime_nsec: Option<i64>,
+    pub mtime_nsec: Option<i64>,
+    pub snapshot_ts_utc: i64,
+    pub hash: Option<Vec<u8>>,
+    pub hash_ref: Option<Vec<u8>>,
+    pub symlink_target: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug)]
@@ -304,26 +313,21 @@ impl InternalIndex {
             .expect("Error inserting new hash");
     }
 
-    pub fn hash_set_tag(&mut self, id_opt: Option<u64>, tag_: tags::Tag) {
-        use self::schema::hashes::dsl::*;
-
-        match id_opt {
-            None => diesel::update(hashes)
-                .set(tag.eq(tag_ as i64))
-                .execute(&mut self.conn)
-                .expect("Error updating hash tags"),
-            Some(id_) => diesel::update(hashes.find(id_ as i64))
-                .set(tag.eq(tag_ as i64))
-                .execute(&mut self.conn)
-                .expect("Error updating specific hash tag"),
-        };
-    }
-
     pub fn hash_delete_not_ready(&mut self) {
-        use self::schema::hashes::dsl::*;
-        diesel::delete(hashes.filter(ready.eq(false)))
-            .execute(&mut self.conn)
-            .expect("Failed to delete non-ready hashes");
+        {
+            use self::schema::hashes::dsl::*;
+            diesel::delete(hashes.filter(ready.eq(false)))
+                .execute(&mut self.conn)
+                .expect("Failed to delete non-ready hashes");
+        }
+        // Purge any orphaned tree_edges whose TreeList root no longer exists in hashes
+        // (e.g., after a crash left unready hashes behind) so reused hash IDs cannot
+        // inherit stale edges.
+        diesel::sql_query(
+            "DELETE FROM tree_edges WHERE tree_hash_id NOT IN (SELECT id FROM hashes)",
+        )
+        .execute(&mut self.conn)
+        .expect("Failed to purge orphaned tree_edges");
     }
 
     pub fn hash_set_ready(&mut self, id_: u64, entry: &QueueEntry) {
@@ -357,129 +361,16 @@ impl InternalIndex {
             .expect("Failed to set hash ready");
     }
 
-    pub fn hash_get_tag(&mut self, id_: u64) -> Option<tags::Tag> {
-        use self::schema::hashes::dsl::*;
-
-        let tag_opt = hashes
-            .find(id_ as i64)
-            .select(tag)
-            .first::<i64>(&mut self.conn)
-            .optional()
-            .expect("Error querying hash tag");
-
-        tag_opt.and_then(tags::tag_from_num)
-    }
-
-    /// List hash ids with `tag_`, highest tree height first (safe for top-down deletion).
-    pub fn hash_list_ids_by_tag(&mut self, tag_: u64) -> Vec<u64> {
+    pub fn hash_all_ids(&mut self) -> Vec<u64> {
         use self::schema::hashes::dsl::*;
 
         hashes
-            .filter(tag.eq(tag_ as i64))
-            .order(height.desc())
             .select(id)
             .load::<i64>(&mut self.conn)
-            .expect("Error listing hashes")
+            .expect("Error listing hash ids")
             .into_iter()
             .map(|i| i as u64)
             .collect()
-    }
-
-    pub fn hash_read_gc_data(&mut self, hash_id_: u64, family_id_: u64) -> GcData {
-        use self::schema::gc_metadata::dsl::*;
-
-        let result_opt = gc_metadata
-            .filter(hash_id.eq(hash_id_ as i64))
-            .filter(family_id.eq(family_id_ as i64))
-            .first::<schema::GcMetadata>(&mut self.conn)
-            .optional()
-            .expect("Error querying GC metadata");
-        match result_opt {
-            None => GcData {
-                num: 0,
-                bytes: vec![],
-            },
-            Some(row) => GcData {
-                num: row.gc_int,
-                bytes: row.gc_vec,
-            },
-        }
-    }
-
-    pub fn hash_set_gc_data(&mut self, hash_id_: u64, family_id_: u64, data: GcData) {
-        use self::schema::gc_metadata::dsl::*;
-
-        let count = diesel::update(
-            gc_metadata
-                .filter(hash_id.eq(hash_id_ as i64))
-                .filter(family_id.eq(family_id_ as i64)),
-        ).set((gc_int.eq(data.num), gc_vec.eq(&data.bytes)))
-            .execute(&mut self.conn)
-            .expect("Error updating GC metadata");
-        assert!(count <= 1);
-
-        if count == 0 {
-            let new = schema::NewGcMetadata {
-                hash_id: hash_id_ as i64,
-                family_id: family_id_ as i64,
-                gc_int: data.num,
-                gc_vec: &data.bytes,
-            };
-
-            diesel::insert_into(gc_metadata)
-                .values(&new)
-                .execute(&mut self.conn)
-                .expect("Error inserting GC metadata");
-        }
-    }
-
-    pub fn hash_update_gc_data<F: UpdateFn>(
-        &mut self,
-        hash_id: u64,
-        family_id: u64,
-        f: F,
-    ) -> GcData {
-        let data = self.hash_read_gc_data(hash_id, family_id);
-        match f(data.clone()) {
-            None => {
-                self.hash_delete_gc_data(hash_id, family_id);
-                data
-            }
-            Some(new) => {
-                self.hash_set_gc_data(hash_id, family_id, new.clone());
-                new
-            }
-        }
-    }
-
-    pub fn hash_update_family_gc_data<F: UpdateFn, I: Iterator<Item = F>>(
-        &mut self,
-        family_id_: u64,
-        mut fns: I,
-    ) {
-        use self::schema::gc_metadata::dsl::*;
-
-        let hash_ids_ = gc_metadata
-            .filter(family_id.eq(family_id_ as i64))
-            .select(hash_id)
-            .load::<i64>(&mut self.conn)
-            .expect("Error loading GC metadata");
-
-        for hash_id_ in hash_ids_ {
-            let f = fns.next().expect("Failed to recv update function");
-            self.hash_update_gc_data(hash_id_ as u64, family_id_, f);
-        }
-    }
-
-    pub fn hash_delete_gc_data(&mut self, hash_id_: u64, family_id_: u64) {
-        use self::schema::gc_metadata::dsl::*;
-
-        diesel::delete(
-            gc_metadata
-                .filter(hash_id.eq(hash_id_ as i64))
-                .filter(family_id.eq(family_id_ as i64)),
-        ).execute(&mut self.conn)
-            .expect("Error deleting GC metadata");
     }
 
     pub fn hash_list(&mut self) -> Vec<Entry> {
@@ -511,12 +402,193 @@ impl InternalIndex {
             assert!(hash_count <= 1);
         }
 
-        {
-            use self::schema::gc_metadata::dsl::*;
-            diesel::delete(gc_metadata.filter(hash_id.eq(id_ as i64)))
-                .execute(&mut self.conn)
-                .expect("Error deleting GC metadata");
+        self.tree_edges_delete(id_);
+    }
+
+    /// Look up cached directory edges (`TreeList` root hash_id -> child file/subdir hash_ids).
+    /// Returns `None` if no edge cache record exists for `tree_hash_id_`, or `Some(child_ids)`
+    /// (empty Vec for an empty directory, stored via a `-1` sentinel row).
+    pub fn tree_edges_get(&mut self, tree_hash_id_: u64) -> Option<Vec<u64>> {
+        use self::schema::tree_edges::dsl::*;
+
+        let rows = tree_edges
+            .filter(tree_hash_id.eq(tree_hash_id_ as i64))
+            .select(child_hash_id)
+            .load::<i64>(&mut self.conn)
+            .expect("Error querying tree_edges");
+
+        if rows.is_empty() {
+            return None;
         }
+        Some(rows.into_iter().filter(|&x| x >= 0).map(|x| x as u64).collect())
+    }
+
+    /// Record the complete child `hash_id` set for a `TreeList` root in the local edge cache.
+    pub fn tree_edges_set(&mut self, tree_hash_id_: u64, child_ids: &[u64]) {
+        use self::schema::tree_edges::dsl::*;
+        use std::collections::BTreeSet;
+
+        diesel::delete(tree_edges.filter(tree_hash_id.eq(tree_hash_id_ as i64)))
+            .execute(&mut self.conn)
+            .expect("Error clearing tree_edges");
+
+        if child_ids.is_empty() {
+            let sentinel = schema::NewTreeEdge {
+                tree_hash_id: tree_hash_id_ as i64,
+                child_hash_id: -1,
+            };
+            diesel::insert_into(tree_edges)
+                .values(&sentinel)
+                .execute(&mut self.conn)
+                .expect("Error inserting empty tree_edges sentinel");
+            return;
+        }
+
+        let unique: BTreeSet<u64> = child_ids.iter().copied().collect();
+        let rows: Vec<schema::NewTreeEdge> = unique
+            .into_iter()
+            .map(|cid| schema::NewTreeEdge {
+                tree_hash_id: tree_hash_id_ as i64,
+                child_hash_id: cid as i64,
+            })
+            .collect();
+        diesel::insert_into(tree_edges)
+            .values(&rows)
+            .execute(&mut self.conn)
+            .expect("Error inserting tree_edges");
+    }
+
+    pub fn tree_edges_delete(&mut self, tree_hash_id_: u64) {
+        use self::schema::tree_edges::dsl::*;
+
+        diesel::delete(tree_edges.filter(tree_hash_id.eq(tree_hash_id_ as i64)))
+            .execute(&mut self.conn)
+            .expect("Error deleting tree_edges");
+    }
+
+    pub fn stat_cache_lookup(
+        &mut self,
+        family_id_: i64,
+        rel_path_: &[u8],
+    ) -> Option<StatCacheEntry> {
+        use self::schema::stat_cache::dsl::*;
+
+        stat_cache
+            .filter(family_id.eq(family_id_))
+            .filter(rel_path.eq(rel_path_))
+            .first::<schema::StatCacheRow>(&mut self.conn)
+            .optional()
+            .expect("Error querying stat_cache")
+            .map(|r| StatCacheEntry {
+                kind: r.kind,
+                created: r.created,
+                modified: r.modified,
+                accessed: r.accessed,
+                permissions: r.permissions,
+                user_id: r.user_id,
+                group_id: r.group_id,
+                file_size: r.file_size,
+                dev: r.dev,
+                ino: r.ino,
+                ctime: r.ctime,
+                ctime_nsec: r.ctime_nsec,
+                mtime_nsec: r.mtime_nsec,
+                snapshot_ts_utc: r.snapshot_ts_utc,
+                hash: r.hash,
+                hash_ref: r.hash_ref,
+                symlink_target: r.symlink_target,
+            })
+    }
+
+    pub fn stat_cache_upsert(
+        &mut self,
+        family_id_: i64,
+        rel_path_: &[u8],
+        entry: &StatCacheEntry,
+    ) {
+        use self::schema::stat_cache::dsl::*;
+
+        let row = schema::NewStatCacheRow {
+            family_id: family_id_,
+            rel_path: rel_path_,
+            kind: entry.kind,
+            created: entry.created,
+            modified: entry.modified,
+            accessed: entry.accessed,
+            permissions: entry.permissions,
+            user_id: entry.user_id,
+            group_id: entry.group_id,
+            file_size: entry.file_size,
+            dev: entry.dev,
+            ino: entry.ino,
+            ctime: entry.ctime,
+            ctime_nsec: entry.ctime_nsec,
+            mtime_nsec: entry.mtime_nsec,
+            snapshot_ts_utc: entry.snapshot_ts_utc,
+            hash: entry.hash.as_deref(),
+            hash_ref: entry.hash_ref.as_deref(),
+            symlink_target: entry.symlink_target.as_deref(),
+        };
+
+        diesel::replace_into(stat_cache)
+            .values(&row)
+            .execute(&mut self.conn)
+            .expect("Error upserting stat_cache");
+        self.maybe_flush();
+    }
+
+    /// Prune `stat_cache` rows for `family_id_` whose `rel_path` was not seen in the
+    /// just-committed snapshot walk. Performs zero deletes if nothing was removed/renamed.
+    pub fn stat_cache_prune_family(
+        &mut self,
+        family_id_: i64,
+        live_rel_paths: &std::collections::HashSet<Vec<u8>>,
+    ) -> usize {
+        use self::schema::stat_cache::dsl::*;
+
+        let existing: Vec<Vec<u8>> = stat_cache
+            .filter(family_id.eq(family_id_))
+            .select(rel_path)
+            .load::<Vec<u8>>(&mut self.conn)
+            .expect("Error listing stat_cache paths for prune");
+
+        let mut deleted = 0usize;
+        for path in existing {
+            if !live_rel_paths.contains(&path) {
+                deleted += diesel::delete(
+                    stat_cache
+                        .filter(family_id.eq(family_id_))
+                        .filter(rel_path.eq(&path)),
+                )
+                .execute(&mut self.conn)
+                .expect("Error deleting stale stat_cache row");
+            }
+        }
+        deleted
+    }
+
+    /// Delete `stat_cache` rows belonging to families with no remaining snapshots, or
+    /// referencing content hashes that were already swept from `hashes`.
+    pub fn stat_cache_prune_orphans(&mut self) -> usize {
+        diesel::sql_query(
+            "DELETE FROM stat_cache \
+             WHERE family_id NOT IN (SELECT DISTINCT family_id FROM snapshots) \
+                OR (hash IS NOT NULL AND hash NOT IN (SELECT hash FROM hashes))",
+        )
+        .execute(&mut self.conn)
+        .expect("Error pruning orphan stat_cache rows")
+    }
+
+    #[cfg(test)]
+    pub fn stat_cache_count_for_family(&mut self, family_id_: i64) -> usize {
+        use self::schema::stat_cache::dsl::*;
+
+        stat_cache
+            .filter(family_id.eq(family_id_))
+            .select(rel_path)
+            .load::<Vec<u8>>(&mut self.conn)
+            .expect("Error counting stat_cache rows")
+            .len()
     }
 
     pub fn maybe_flush(&mut self) {
@@ -524,10 +596,6 @@ impl InternalIndex {
             debug!("SQL: hash db maybe_flush commit");
             self.flush();
         }
-    }
-
-    pub fn set_auto_flush(&mut self, enabled: bool) {
-        self.flush_periodically = enabled;
     }
 
     #[cfg_attr(feature = "flame_it", flame)]
@@ -749,20 +817,28 @@ impl InternalIndex {
         })
     }
 
-    pub fn snapshot_reserve(&mut self, family_: String) -> SnapshotInfo {
+    /// Atomically insert a completed (`Tag::Done`) snapshot row.
+    pub fn snapshot_insert_done(
+        &mut self,
+        family_: String,
+        msg_: &str,
+        hash_: &hash::Hash,
+        hash_ref_: &hash::tree::HashRef,
+    ) -> SnapshotInfo {
         use self::schema::snapshots::dsl::*;
 
         let family_id_ = self.get_or_create_family_id(&family_);
         let snapshot_id_ = 1 + self.snapshot_latest_id(family_id_).unwrap_or(0);
+        let hash_ref_bytes = hash_ref_.as_bytes();
 
         let new = self::schema::NewSnapshot {
             family_id: family_id_,
             snapshot_id: snapshot_id_,
-            tag: tags::Tag::Reserved as i32,
+            tag: tags::Tag::Done as i32,
             utc_datetime: chrono::Utc::now().naive_utc(),
-            msg: None,
-            hash: None,
-            hash_ref: None,
+            msg: Some(msg_),
+            hash: Some(&hash_.bytes[..]),
+            hash_ref: Some(&hash_ref_bytes[..]),
         };
 
         diesel::insert_into(snapshots)
@@ -779,32 +855,13 @@ impl InternalIndex {
         }
     }
 
-    pub fn snapshot_update(
-        &mut self,
-        snapshot_: &SnapshotInfo,
-        msg_: &str,
-        hash_: &hash::Hash,
-        hash_ref_: &hash::tree::HashRef,
-    ) {
+    /// Delete any legacy incomplete (`tag != Done`) snapshot rows.
+    pub fn snapshot_delete_incomplete(&mut self) -> usize {
         use self::schema::snapshots::dsl::*;
 
-        diesel::update(snapshots.find(snapshot_.unique_id as i64))
-            .set((
-                msg.eq(Some(msg_)),
-                hash.eq(Some(&hash_.bytes)),
-                hash_ref.eq(Some(hash_ref_.as_bytes())),
-            ))
+        diesel::delete(snapshots.filter(tag.ne(tags::Tag::Done as i32)))
             .execute(&mut self.conn)
-            .expect("Error updating snapshot");
-    }
-
-    pub fn snapshot_set_tag(&mut self, snapshot_: &SnapshotInfo, tag_: tags::Tag) {
-        use self::schema::snapshots::dsl::*;
-
-        diesel::update(snapshots.find(snapshot_.unique_id as i64))
-            .set(tag.eq(tag_ as i32))
-            .execute(&mut self.conn)
-            .expect("Error updating snapshot");
+            .expect("Error deleting incomplete snapshots")
     }
 
     /// Extract latest snapshot data for family.
@@ -922,5 +979,80 @@ impl InternalIndex {
                 .execute(&mut self.conn)
                 .expect("Error inserting new snapshot");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use diesel::sql_types::Text;
+
+    #[derive(QueryableByName)]
+    struct TableName {
+        #[diesel(sql_type = Text)]
+        name: String,
+    }
+
+    #[test]
+    fn migrations_drop_legacy_tables_and_create_stat_cache_and_tree_edges() {
+        let idx = Index::new_for_testing();
+        let mut guard = idx.lock();
+        let tables: Vec<String> = diesel::sql_query(
+            "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
+        )
+        .load::<TableName>(&mut guard.conn)
+        .unwrap()
+        .into_iter()
+        .map(|r| r.name)
+        .collect();
+
+        for legacy in ["gc_metadata", "key_data", "key_tree"] {
+            assert!(
+                !tables.iter().any(|t| t == legacy),
+                "legacy table {} should have been dropped by migration (tables: {:?})",
+                legacy,
+                tables
+            );
+        }
+        for current in ["blobs", "family", "hashes", "snapshots", "stat_cache", "tree_edges"] {
+            assert!(
+                tables.iter().any(|t| t == current),
+                "expected table {} missing (tables: {:?})",
+                current,
+                tables
+            );
+        }
+    }
+
+    #[test]
+    fn hash_delete_not_ready_purges_orphaned_tree_edges() {
+        let idx = Index::new_for_testing();
+        let mut guard = idx.lock();
+
+        // Insert a non-ready hash and attach tree_edges to it, plus an edge whose
+        // tree_hash_id has no hash row at all.
+        let unready_id = guard.hash_next_id();
+        guard.hash_insert_new(
+            unready_id,
+            vec![1, 2, 3, 4],
+            QueueEntry {
+                id: unready_id,
+                node: blob::NodeType::Leaf,
+                leaf: blob::LeafType::TreeList,
+                tag: None,
+                childs: None,
+                persistent_ref: None,
+            },
+        );
+        guard.tree_edges_set(unready_id, &[42, 43]);
+        guard.tree_edges_set(999_999, &[77]);
+
+        assert_eq!(guard.tree_edges_get(unready_id), Some(vec![42, 43]));
+        assert_eq!(guard.tree_edges_get(999_999), Some(vec![77]));
+
+        guard.hash_delete_not_ready();
+
+        assert_eq!(guard.tree_edges_get(unready_id), None);
+        assert_eq!(guard.tree_edges_get(999_999), None);
     }
 }

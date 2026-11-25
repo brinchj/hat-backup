@@ -120,7 +120,7 @@ pub fn open_hat(repo_dir: &Path, backend_dir: &Path) -> HatRc<FileBackend> {
 pub fn commit_tree(hat: &mut HatRc<FileBackend>, family: &str, fixture_path: &Path) {
     let mut fam = hat.open_family(family.to_string()).unwrap();
     fam.snapshot_dir(fixture_path.to_path_buf()).unwrap();
-    hat.commit(&mut fam, None).unwrap();
+    hat.commit(&mut fam).unwrap();
     hat.meta_commit().unwrap();
     hat.data_flush().unwrap();
 }

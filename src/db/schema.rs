@@ -31,16 +31,6 @@ table! {
 }
 
 table! {
-    gc_metadata {
-        id -> BigInt,
-        hash_id -> BigInt,
-        family_id -> BigInt,
-        gc_int -> BigInt,
-        gc_vec -> Binary,
-    }
-}
-
-table! {
     blobs {
         id -> BigInt,
         name -> Binary,
@@ -68,10 +58,41 @@ table! {
     }
 }
 
+table! {
+    stat_cache (family_id, rel_path) {
+        family_id -> BigInt,
+        rel_path -> Binary,
+        kind -> Integer,
+        created -> Nullable<BigInt>,
+        modified -> Nullable<BigInt>,
+        accessed -> Nullable<BigInt>,
+        permissions -> Nullable<BigInt>,
+        user_id -> Nullable<BigInt>,
+        group_id -> Nullable<BigInt>,
+        file_size -> Nullable<BigInt>,
+        dev -> Nullable<BigInt>,
+        ino -> Nullable<BigInt>,
+        ctime -> Nullable<BigInt>,
+        ctime_nsec -> Nullable<BigInt>,
+        mtime_nsec -> Nullable<BigInt>,
+        snapshot_ts_utc -> BigInt,
+        hash -> Nullable<Binary>,
+        hash_ref -> Nullable<Binary>,
+        symlink_target -> Nullable<Binary>,
+    }
+}
+
+table! {
+    tree_edges (tree_hash_id, child_hash_id) {
+        tree_hash_id -> BigInt,
+        child_hash_id -> BigInt,
+    }
+}
+
 joinable!(snapshots -> family (family_id));
 joinable!(hashes -> blobs (blob_id));
 
-allow_tables_to_appear_in_same_query!(blobs, family, gc_metadata, hashes, snapshots,);
+allow_tables_to_appear_in_same_query!(blobs, family, hashes, snapshots, stat_cache, tree_edges,);
 
 // Rust models.
 
@@ -107,25 +128,6 @@ pub struct NewHash<'a> {
     pub blob_id: i64,
     pub blob_ref: Option<&'a [u8]>,
     pub ready: bool,
-}
-
-#[derive(Queryable)]
-#[allow(dead_code)]
-pub struct GcMetadata {
-    pub id: i64,
-    pub hash_id: i64,
-    pub family_id: i64,
-    pub gc_int: i64,
-    pub gc_vec: Vec<u8>,
-}
-
-#[derive(Insertable)]
-#[diesel(table_name = gc_metadata)]
-pub struct NewGcMetadata<'a> {
-    pub hash_id: i64,
-    pub family_id: i64,
-    pub gc_int: i64,
-    pub gc_vec: &'a [u8],
 }
 
 #[derive(Queryable)]
@@ -178,4 +180,59 @@ pub struct NewSnapshot<'a> {
     pub msg: Option<&'a str>,
     pub hash: Option<&'a [u8]>,
     pub hash_ref: Option<&'a [u8]>,
+}
+
+#[derive(Queryable)]
+#[allow(dead_code)]
+pub struct StatCacheRow {
+    pub family_id: i64,
+    pub rel_path: Vec<u8>,
+    pub kind: i32,
+    pub created: Option<i64>,
+    pub modified: Option<i64>,
+    pub accessed: Option<i64>,
+    pub permissions: Option<i64>,
+    pub user_id: Option<i64>,
+    pub group_id: Option<i64>,
+    pub file_size: Option<i64>,
+    pub dev: Option<i64>,
+    pub ino: Option<i64>,
+    pub ctime: Option<i64>,
+    pub ctime_nsec: Option<i64>,
+    pub mtime_nsec: Option<i64>,
+    pub snapshot_ts_utc: i64,
+    pub hash: Option<Vec<u8>>,
+    pub hash_ref: Option<Vec<u8>>,
+    pub symlink_target: Option<Vec<u8>>,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = stat_cache)]
+pub struct NewStatCacheRow<'a> {
+    pub family_id: i64,
+    pub rel_path: &'a [u8],
+    pub kind: i32,
+    pub created: Option<i64>,
+    pub modified: Option<i64>,
+    pub accessed: Option<i64>,
+    pub permissions: Option<i64>,
+    pub user_id: Option<i64>,
+    pub group_id: Option<i64>,
+    pub file_size: Option<i64>,
+    pub dev: Option<i64>,
+    pub ino: Option<i64>,
+    pub ctime: Option<i64>,
+    pub ctime_nsec: Option<i64>,
+    pub mtime_nsec: Option<i64>,
+    pub snapshot_ts_utc: i64,
+    pub hash: Option<&'a [u8]>,
+    pub hash_ref: Option<&'a [u8]>,
+    pub symlink_target: Option<&'a [u8]>,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = tree_edges)]
+pub struct NewTreeEdge {
+    pub tree_hash_id: i64,
+    pub child_hash_id: i64,
 }

@@ -205,6 +205,12 @@ impl FileName {
             FileName::RawAndLossyUtf8(_, ref s) => s,
         }
     }
+    pub fn as_bytes(&self) -> &[u8] {
+        match self {
+            FileName::Utf8(ref s) => s.as_bytes(),
+            FileName::RawAndLossyUtf8(ref raw, _) => raw.as_slice(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]

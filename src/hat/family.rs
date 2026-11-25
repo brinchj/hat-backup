@@ -14,148 +14,21 @@
 
 use crate::backend::StoreBackend;
 use crate::blob;
+use crate::cbor_util;
 use crate::errors::HatError;
 use crate::hash;
 use crate::hat::insert_path_handler::InsertPathHandler;
 use crate::hat::walker;
 use crate::key;
 use crate::models;
-use crate::cbor_util;
+use crate::util::{FileIterator, PathHandler};
 use std::ffi;
 use std::fs;
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
-use crate::util::{FileIterator, PathHandler};
 
-pub mod recover {
-    use super::parse_dir_data;
-    use crate::blob;
-    use crate::hash;
-    use crate::hash::tree;
-    use crate::hat::walker;
-    use std::collections::VecDeque;
-    use std::mem;
-
-    #[derive(Clone)]
-    pub struct Node {
-        pub href: tree::HashRef,
-        pub childs: Option<Vec<tree::HashRef>>,
-    }
-
-    pub struct FileVisitor {
-        tops: Vec<hash::Hash>,
-        nodes: VecDeque<Node>,
-    }
-
-    impl FileVisitor {
-        pub fn new() -> FileVisitor {
-            FileVisitor {
-                tops: vec![],
-                nodes: VecDeque::new(),
-            }
-        }
-        pub fn tops(&mut self) -> Vec<hash::Hash> {
-            mem::take(&mut self.tops)
-        }
-        pub fn nodes(&mut self) -> VecDeque<Node> {
-            mem::take(&mut self.nodes)
-        }
-    }
-
-    impl tree::Visitor for FileVisitor {
-        fn branch_enter(&mut self, href: &tree::HashRef, childs: &Vec<tree::HashRef>) -> bool {
-            self.nodes.push_back(Node {
-                href: href.clone(),
-                childs: Some(childs.clone()),
-            });
-            true
-        }
-        fn leaf_enter(&mut self, href: &tree::HashRef) -> bool {
-            self.nodes.push_back(Node {
-                href: href.clone(),
-                childs: None,
-            });
-
-            // Do not proceed to read the actual file data.
-            false
-        }
-        fn leaf_leave(&mut self, _chunk: Vec<u8>, _href: &tree::HashRef) -> bool {
-            unreachable!();
-        }
-    }
-
-    impl walker::LikesFiles for FileVisitor {
-        fn include_file(&mut self, file: &walker::FileEntry) -> bool {
-            if let walker::Content::Data(ref hash_ref) = file.hash_ref {
-                self.tops.push(hash_ref.hash.clone());
-                true
-            } else {
-                false
-            }
-        }
-
-        fn include_dir(&mut self, file: &walker::FileEntry) -> bool {
-            if let walker::Content::Dir(ref hash_ref) = file.hash_ref {
-                self.tops.push(hash_ref.hash.clone());
-                true
-            } else {
-                false
-            }
-        }
-    }
-
-    pub struct DirVisitor {
-        nodes: VecDeque<Node>,
-        files: Vec<walker::FileEntry>,
-    }
-
-    impl DirVisitor {
-        pub fn new() -> DirVisitor {
-            DirVisitor {
-                nodes: VecDeque::new(),
-                files: vec![],
-            }
-        }
-        pub fn nodes(&mut self) -> VecDeque<Node> {
-            mem::take(&mut self.nodes)
-        }
-    }
-
-    impl walker::HasFiles for DirVisitor {
-        fn files(&mut self) -> Vec<walker::FileEntry> {
-            mem::take(&mut self.files)
-        }
-    }
-
-    impl tree::Visitor for DirVisitor {
-        fn branch_enter(&mut self, href: &tree::HashRef, childs: &Vec<tree::HashRef>) -> bool {
-            self.nodes.push_back(Node {
-                href: href.clone(),
-                childs: Some(childs.clone()),
-            });
-            true
-        }
-        fn leaf_enter(&mut self, href: &tree::HashRef) -> bool {
-            self.nodes.push_back(Node {
-                href: href.clone(),
-                childs: None,
-            });
-            // Only proceed to the leaf if it contains a tree list.
-            match href.leaf {
-                blob::LeafType::TreeList => true,
-                blob::LeafType::SnapshotList => false,
-                blob::LeafType::FileChunk => unreachable!("Opened a file with DirVisitor"),
-            }
-        }
-        fn leaf_leave(&mut self, chunk: Vec<u8>, _href: &tree::HashRef) -> bool {
-            parse_dir_data(&chunk[..], &mut self.files).unwrap();
-            true
-        }
-    }
-}
-
-fn parse_dir_data(chunk: &[u8], out: &mut Vec<walker::FileEntry>) -> Result<(), HatError> {
+pub(crate) fn parse_dir_data(chunk: &[u8], out: &mut Vec<walker::FileEntry>) -> Result<(), HatError> {
     if chunk.is_empty() {
         return Ok(());
     }
@@ -224,19 +97,17 @@ impl<B: StoreBackend> Family<B> {
         info!("Committing: {}", dir.display());
         assert!(dir.is_absolute());
 
-        // Snapshot the directory *contents* at the family key-tree root.
-        // Do not insert absolute path prefixes (/private/var/folders/...), which
-        // inflated every commit/checkout with junk parent directories.
-        self.key_store.reset_entry_tags()?;
+        // Start a fresh in-memory staged tree for this scan; unchanged files reuse
+        // cached HashRefs from the flat SQLite stat_cache.
+        self.key_store.begin_stat_walk();
 
+        let root_ctx = (None, Vec::new());
         if dir.is_dir() {
-            handler.recurse(dir, None);
+            handler.recurse(dir, root_ctx);
         } else {
-            // Single file: insert under the key-tree root (returns None = non-dir).
-            let _ = handler.handle_path(&None, &dir);
+            let _ = handler.handle_path(&root_ctx, &dir);
         }
 
-        self.key_store.commit_reserved_nodes(Some(None))?;
         Ok(())
     }
 
@@ -246,18 +117,17 @@ impl<B: StoreBackend> Family<B> {
         is_directory: bool,
         contents: Option<FileIterator>,
     ) -> Result<u64, HatError> {
-        let id = self.snapshot_direct_no_commit(file, is_directory, contents)?;
-        self.key_store.commit_reserved_nodes(None)?;
-        Ok(id)
+        self.snapshot_direct_no_commit(file, is_directory, contents)
     }
 
     pub fn snapshot_direct_no_commit(
         &self,
-        file: key::Entry,
+        mut file: key::Entry,
         is_directory: bool,
         contents: Option<FileIterator>,
     ) -> Result<u64, HatError> {
         let id = if is_directory {
+            file.data = key::Data::DirPlaceholder;
             self.key_store.insert_entry(file)?
         } else {
             self.key_store
@@ -285,61 +155,6 @@ impl<B: StoreBackend> Family<B> {
         Ok(())
     }
 
-    // Checks out the family key-index. Hat::checkout_in_dir checks out a committed snapshot;
-    // sharing more of the write path is a future cleanup.
-    pub fn checkout_in_dir(
-        &self,
-        output_dir: PathBuf,
-        dir_id: Option<u64>,
-    ) -> Result<(), HatError> {
-        let mut path = output_dir;
-        for (entry, _ref, read_fn_opt) in self.list_from_key_store(dir_id)? {
-            // Extend directory with filename:
-            let name_os_string: ffi::OsString = entry.info.name.clone().into();
-            crate::util::validate_entry_name(&name_os_string)?;
-            path.push(&name_os_string);
-
-            let is_symlink = matches!(entry.data, key::Data::Symlink(_));
-            match entry.data {
-                key::Data::DirPlaceholder => {
-                    // This is a directory, recurse!
-                    fs::create_dir_all(&path)?;
-                    self.checkout_in_dir(path.clone(), entry.node_id)?;
-                }
-                key::Data::FilePlaceholder => {
-                    // This is a file, write it
-                    let mut fd = fs::File::create(&path)?;
-                    if let Some(tree) = read_fn_opt.ok_or("File has data")?.init()? {
-                        Self::write_file_chunks(&mut fd, tree)?;
-                    }
-                }
-                key::Data::Symlink(link_path) => {
-                    use std::os::unix::fs::symlink;
-                    symlink(link_path, &path)?
-                }
-                _ => unreachable!("Unexpected data entry"),
-            }
-
-            if !is_symlink {
-                if let Some(perms) = entry.info.permissions {
-                    let current = fs::symlink_metadata(&path)?.permissions();
-                    if current != perms {
-                        fs::set_permissions(&path, perms)?;
-                    }
-                }
-            }
-
-            if let (Some(m), Some(a)) = (entry.info.modified_ts_secs, entry.info.accessed_ts_secs) {
-                crate::util::set_times_nofollow(&path, a, m)?;
-            }
-
-            // Prepare for next filename:
-            path.pop();
-        }
-
-        Ok(())
-    }
-
     pub fn list_from_key_store(
         &self,
         dir_id: Option<u64>,
@@ -364,26 +179,22 @@ impl<B: StoreBackend> Family<B> {
         Ok(out.into_iter().map(|f| (f.meta, f.hash_ref)).collect())
     }
 
-    pub fn commit<F>(&mut self, top_hash_fn: &F) -> Result<hash::tree::HashRef, HatError>
-    where
-        F: Fn(&hash::Hash) -> Result<(), HatError>,
-    {
-        let mut top_tree = self.key_store.hash_tree_writer(blob::LeafType::TreeList);
-        self.commit_to_tree(&mut top_tree, None, top_hash_fn)?;
-
+    /// Serialize the staged directory tree bottom-up into immutable `TreeList` chunks and
+    /// populate the local `tree_edges` cache for every written directory node.
+    pub fn commit(&mut self) -> Result<hash::tree::HashRef, HatError> {
         let info = key::Info::new(self.name.clone().into(), None);
-        Ok(top_tree.hash(Some(&info))?)
+        let root = self.commit_dir(None, &info)?;
+        self.key_store.clear_staged_entries();
+        Ok(root)
     }
 
-    pub fn commit_to_tree<F>(
+    fn commit_dir(
         &mut self,
-        tree: &mut hash::tree::SimpleHashTreeWriter<key::HashStoreBackend<B>>,
         dir_id: Option<u64>,
-        top_hash_fn: &F,
-    ) -> Result<(), HatError>
-    where
-        F: Fn(&hash::Hash) -> Result<(), HatError>,
-    {
+        dir_info: &key::Info,
+    ) -> Result<hash::tree::HashRef, HatError> {
+        let mut tree = self.key_store.hash_tree_writer(blob::LeafType::TreeList);
+        let mut child_hash_ids = Vec::new();
         let files_at_a_time = 1024;
         let mut it = self.list_from_key_store(dir_id)?.into_iter();
 
@@ -397,27 +208,33 @@ impl<B: StoreBackend> Family<B> {
 
                 let content = match entry.data {
                     key::Data::FilePlaceholder => {
-                        // This is a file, store its data hash.
                         let href = data_ref.ok_or("File entry has no data reference")?;
-                        top_hash_fn(&hash::Hash {
-                            bytes: href.hash.bytes.clone(),
-                        })?;
+                        let child_id = self
+                            .key_store
+                            .hash_index()
+                            .get_id(&href.hash)
+                            .ok_or_else(|| {
+                                format!("File hash not found in hash index: {:?}", href.hash.bytes)
+                            })?;
+                        child_hash_ids.push(child_id);
                         models::Content::Data(href.to_model())
                     }
                     key::Data::DirPlaceholder => {
-                        // This is a directory, recurse!
-                        let mut inner_tree =
-                            self.key_store.hash_tree_writer(blob::LeafType::TreeList);
-                        self.commit_to_tree(&mut inner_tree, entry.node_id, top_hash_fn)?;
-
-                        // Store a reference for the sub-tree in our tree:
-                        let dir_hash_ref = inner_tree.hash(Some(&entry.info))?;
-                        top_hash_fn(&dir_hash_ref.hash)?;
-
+                        let dir_hash_ref = self.commit_dir(entry.node_id, &entry.info)?;
+                        let child_id = self
+                            .key_store
+                            .hash_index()
+                            .get_id(&dir_hash_ref.hash)
+                            .ok_or_else(|| {
+                                format!(
+                                    "Directory hash not found in hash index: {:?}",
+                                    dir_hash_ref.hash.bytes
+                                )
+                            })?;
+                        child_hash_ids.push(child_id);
                         models::Content::Directory(dir_hash_ref.to_model())
                     }
                     key::Data::Symlink(path) => {
-                        // Set symbolic link content.
                         models::Content::SymbolicLink(path.as_os_str().as_bytes().to_vec())
                     }
                     _ => unreachable!("Unexpected key::Data"),
@@ -430,15 +247,24 @@ impl<B: StoreBackend> Family<B> {
                 });
             }
 
-            // Flush to our own tree when we have a decent amount.
-            // The tree prevents large directories from clogging ram.
             if files.is_empty() {
                 break;
             } else {
-                tree.append(&cbor_util::to_vec(&models::Files { files }).unwrap()[..])?;
+                tree.append(&cbor_util::to_vec(&models::Files { files })?[..])?;
             }
         }
 
-        Ok(())
+        let dir_hash_ref = tree.hash(Some(dir_info))?;
+        let dir_hash_id = self
+            .key_store
+            .hash_index()
+            .get_id(&dir_hash_ref.hash)
+            .ok_or("Committed directory hash missing from hash index")?;
+        self.key_store
+            .db()
+            .lock()
+            .tree_edges_set(dir_hash_id, &child_hash_ids);
+
+        Ok(dir_hash_ref)
     }
 }

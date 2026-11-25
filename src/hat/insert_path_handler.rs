@@ -14,18 +14,20 @@
 
 use crate::backend::StoreBackend;
 use crate::key;
+use crate::util::{FileIterator, PathHandler, SyncPool};
 use std::error::Error;
 use std::fs;
 use std::io;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::{atomic, Mutex};
 use std::time::{Duration, Instant};
-use crate::util::{FileIterator, PathHandler, SyncPool};
 
 struct FileEntry {
     key_entry: key::Entry,
     metadata: fs::Metadata,
     full_path: PathBuf,
+    raw_name: Vec<u8>,
 }
 
 impl FileEntry {
@@ -45,13 +47,15 @@ impl FileEntry {
                 // Unsupported file type. Skipping.
                 return Err(From::from("unknown file kind".to_string()));
             };
+            let raw_name = filename.as_bytes().to_vec();
             Ok(FileEntry {
-                key_entry: key::Entry::new(parent, filename.to_owned().into(), data, Some(&meta)),
+                key_entry: key::Entry::new(parent, filename.into(), data, Some(&meta)),
                 metadata: meta,
                 full_path,
+                raw_name,
             })
         } else {
-            Err(From::from("Could not parse filename."[..].to_owned()))
+            Err(From::from("Could not parse filename.".to_owned()))
         }
     }
 
@@ -79,7 +83,10 @@ impl<B: StoreBackend> InsertPathHandler<B> {
     }
 }
 
-impl<B: StoreBackend> PathHandler<Option<u64>> for InsertPathHandler<B> {
+/// Parent payload carried down `listdir` traversal: `(staged_parent_id, parent_rel_path_bytes)`.
+pub type ParentCtx = (Option<u64>, Vec<u8>);
+
+impl<B: StoreBackend> PathHandler<ParentCtx> for InsertPathHandler<B> {
     type DirItem = fs::DirEntry;
     type DirIter = fs::ReadDir;
 
@@ -87,7 +94,7 @@ impl<B: StoreBackend> PathHandler<Option<u64>> for InsertPathHandler<B> {
         fs::read_dir(path)
     }
 
-    fn handle_path(&self, parent: &Option<u64>, path: &Path) -> Option<Option<u64>> {
+    fn handle_path(&self, parent: &ParentCtx, path: &Path) -> Option<ParentCtx> {
         let count = self.count.fetch_add(1, atomic::Ordering::SeqCst) + 1;
 
         if count % 16 == 0 {
@@ -100,7 +107,9 @@ impl<B: StoreBackend> PathHandler<Option<u64>> for InsertPathHandler<B> {
             }
         }
 
-        match FileEntry::new(path.to_path_buf(), *parent) {
+        let (parent_id, parent_rel) = parent;
+
+        match FileEntry::new(path.to_path_buf(), *parent_id) {
             Err(e) => {
                 println!("Skipping '{}': {}", path.display(), e);
             }
@@ -110,9 +119,17 @@ impl<B: StoreBackend> PathHandler<Option<u64>> for InsertPathHandler<B> {
                 let local_root = path.to_path_buf();
                 let full_path = file_entry.full_path.clone();
 
+                let mut rel_path = Vec::with_capacity(parent_rel.len() + 1 + file_entry.raw_name.len());
+                if !parent_rel.is_empty() {
+                    rel_path.extend_from_slice(parent_rel);
+                    rel_path.push(b'/');
+                }
+                rel_path.extend_from_slice(&file_entry.raw_name);
+
                 let ks = self.key_store.lock().unwrap();
                 let res = if is_file {
-                    ks.insert(
+                    ks.insert_path(
+                        Some(&rel_path),
                         file_entry.key_entry,
                         Some(move || match FileIterator::new(&full_path) {
                             Err(e) => {
@@ -128,7 +145,7 @@ impl<B: StoreBackend> PathHandler<Option<u64>> for InsertPathHandler<B> {
                 match res {
                     Ok(id) => {
                         if is_directory {
-                            return Some(Some(id));
+                            return Some((Some(id), rel_path));
                         }
                     }
                     Err(e) => {

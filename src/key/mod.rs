@@ -12,21 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! External API for creating and manipulating snapshots.
+//! External API for staging entries and checking the flat local stat cache.
 
 use crate::backend::StoreBackend;
 use crate::blob;
 use crate::crypto;
+use crate::db;
 use crate::errors::{DieselError, RetryError};
 use crate::hash;
 use crate::hash::tree::{LeafIterator, SimpleHashTreeWriter};
 use std::borrow::Cow;
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 mod hash_store_backend;
 mod index;
-mod schema;
 
 #[cfg(all(test, feature = "benchmarks"))]
 mod benchmarks;
@@ -34,7 +34,7 @@ mod benchmarks;
 mod tests;
 
 pub use self::hash_store_backend::HashStoreBackend;
-pub use self::index::{Data, Entry, Info, KeyIndex};
+pub use self::index::{Data, Entry, Info, StagedTree};
 
 #[derive(Debug, thiserror::Error)]
 pub enum MsgError {
@@ -81,7 +81,9 @@ impl<B: StoreBackend> HashTreeReaderInitializer<B> {
 }
 
 pub struct Store<B> {
-    index: Arc<index::KeyIndex>,
+    family_id: i64,
+    db: Arc<db::Index>,
+    staged: Arc<Mutex<StagedTree>>,
     hash_index: Arc<hash::HashIndex>,
     blob_store: Arc<blob::BlobStore<B>>,
     keys: Arc<crypto::keys::Keeper>,
@@ -89,7 +91,9 @@ pub struct Store<B> {
 impl<B> Clone for Store<B> {
     fn clone(&self) -> Store<B> {
         Store {
-            index: self.index.clone(),
+            family_id: self.family_id,
+            db: self.db.clone(),
+            staged: self.staged.clone(),
             hash_index: self.hash_index.clone(),
             blob_store: self.blob_store.clone(),
             keys: self.keys.clone(),
@@ -97,16 +101,19 @@ impl<B> Clone for Store<B> {
     }
 }
 
-// Implementations
 impl<B: StoreBackend> Store<B> {
     pub fn new(
-        index: Arc<index::KeyIndex>,
+        family_id: i64,
+        db: Arc<db::Index>,
+        staged: Arc<Mutex<StagedTree>>,
         hash_index: Arc<hash::HashIndex>,
         blob_store: Arc<blob::BlobStore<B>>,
         keys: Arc<crypto::keys::Keeper>,
     ) -> Store<B> {
         Store {
-            index,
+            family_id,
+            db,
+            staged,
             hash_index,
             blob_store,
             keys,
@@ -115,33 +122,50 @@ impl<B: StoreBackend> Store<B> {
 
     #[cfg(test)]
     pub fn new_for_testing(backend: Arc<B>, max_blob_size: usize) -> Result<Store<B>, DieselError> {
-        use crate::crypto;
-        use crate::db;
-
         let keys = Arc::new(crypto::keys::Keeper::new_for_testing());
         let db_p = Arc::new(db::Index::new_for_testing());
-        let ki_p = Arc::new(index::KeyIndex::new_for_testing()?);
+        let family_id = db_p.lock().get_or_create_family_id("test");
         let hi_p = Arc::new(hash::HashIndex::new(db_p.clone())?);
-        let blob_index = Arc::new(blob::BlobIndex::new(keys.clone(), db_p)?);
+        let blob_index = Arc::new(blob::BlobIndex::new(keys.clone(), db_p.clone())?);
         let bs_p = Arc::new(blob::BlobStore::new(
-            keys,
+            keys.clone(),
             blob_index,
             backend,
             max_blob_size,
         ));
         Ok(Store {
-            index: ki_p,
+            family_id,
+            db: db_p,
+            staged: Arc::new(Mutex::new(StagedTree::default())),
             hash_index: hi_p,
             blob_store: bs_p,
-            keys: Arc::new(crypto::keys::Keeper::new_for_testing()),
+            keys,
         })
+    }
+
+    pub fn family_id(&self) -> i64 {
+        self.family_id
+    }
+
+    pub fn clear_staged(&self) {
+        self.staged.lock().unwrap().clear();
+    }
+
+    pub fn begin_stat_walk(&self) {
+        self.staged.lock().unwrap().begin_stat_walk();
+    }
+
+    pub fn clear_staged_entries(&self) {
+        self.staged.lock().unwrap().clear_entries();
+    }
+
+    pub fn take_seen_stat_paths(&self) -> Option<std::collections::HashSet<Vec<u8>>> {
+        self.staged.lock().unwrap().take_seen_stat_paths()
     }
 
     pub fn flush(&self) -> Result<(), MsgError> {
         self.blob_store.flush();
         self.hash_index.flush();
-        self.index.flush()?;
-
         Ok(())
     }
 
@@ -157,57 +181,36 @@ impl<B: StoreBackend> Store<B> {
         SimpleHashTreeWriter::new(leaf, 8, backend)
     }
 
-    /// List a "directory" (aka. a `level`) in the index.
+    pub fn db(&self) -> &Arc<db::Index> {
+        &self.db
+    }
+
+    pub fn hash_index(&self) -> &Arc<hash::HashIndex> {
+        &self.hash_index
+    }
+
+    /// List staged children of `parent`.
     pub fn list_dir(&self, parent: Option<u64>) -> Result<Vec<DirElem<B>>, MsgError> {
-        let entries = self.index.list_dir(parent)?;
+        let entries = self.staged.lock().unwrap().list_dir(parent);
         let mut my_entries: Vec<DirElem<B>> = Vec::with_capacity(entries.len());
-        for (entry, hash_ref_opt) in entries {
-            let hash_ref = hash_ref_opt.or_else(|| match entry.data {
-                Data::FileHash(ref hash_bytes) => {
-                    let h = hash::Hash {
-                        bytes: hash_bytes.clone(),
-                    };
-                    self.hash_index.fetch_hash_ref(&h).expect("Unknown hash")
-                }
-                _ => None,
-            });
+        for (entry, hash_ref) in entries {
             let open_fn = hash_ref.as_ref().map(|r| HashTreeReaderInitializer {
                 hash_ref: r.clone(),
                 hash_index: self.hash_index.clone(),
                 blob_store: self.blob_store.clone(),
                 keys: self.keys.clone(),
             });
-
             my_entries.push((entry, hash_ref, open_fn));
         }
         Ok(my_entries)
     }
 
-    /// Commit all reserved nodes and optionally execute recursive cleanup of part of the tree.
-    pub fn commit_reserved_nodes(
-        &self,
-        clean_parent_opt: Option<Option<u64>>,
-    ) -> Result<(), MsgError> {
-        self.index.commit_reserved_nodes()?;
-        if let Some(parent) = clean_parent_opt {
-            self.index.cleanup_unused(parent)?;
-        }
-        Ok(())
-    }
-
-    /// Clear entry reservation tags before a new directory snapshot walk.
-    pub fn reset_entry_tags(&self) -> Result<(), MsgError> {
-        self.index.reset_entry_tags()?;
-        Ok(())
-    }
-
-    /// Insert an entry with no associated file payload (directory or symlink).
+    /// Stage an entry with no associated file payload (directory or symlink).
     pub fn insert_entry(&self, entry: Entry) -> Result<u64, MsgError> {
-        self.insert::<io::Empty, fn() -> Option<io::Empty>>(entry, None)
+        self.insert_path::<io::Empty, fn() -> Option<io::Empty>>(None, entry, None)
     }
 
-    /// Insert a key into the index. If this key has associated data, `chunk_it_opt` opens a
-    /// reader for it; returning `None` signals that opening failed and returns `Err`.
+    /// Stage an entry directly (without a flat stat-cache path).
     pub fn insert<IT, F>(
         &self,
         insert_entry: Entry,
@@ -217,82 +220,67 @@ impl<B: StoreBackend> Store<B> {
         IT: io::Read,
         F: FnOnce() -> Option<IT>,
     {
-        let entry = match self
-            .index
-            .lookup(insert_entry.parent_id, insert_entry.info.name.clone())?
-        {
-            Some(ref stored_entry) if insert_entry.data_looks_unchanged(stored_entry) => {
-                match (&stored_entry.data, &insert_entry.data) {
-                    (Data::FileHash(ref hash_bytes), Data::FilePlaceholder)
-                        if chunk_it_opt.is_some() =>
-                    {
-                        let hash = hash::Hash {
-                            bytes: hash_bytes.to_vec(),
-                        };
-                        if self.hash_index.hash_exists(&hash) {
-                            // Short-circuit: We have the data.
-                            debug!("Skip entry: {:?}", stored_entry.info.name);
-                            self.index.mark_reserved(stored_entry)?;
-                            return Ok(stored_entry.node_id.unwrap());
+        self.insert_path(None, insert_entry, chunk_it_opt)
+    }
+
+    /// Stage an entry under `rel_path`, consulting the flat `stat_cache` for unchanged files.
+    /// If `chunk_it_opt` is `Some` and opening/reading fails, returns `Err` without staging.
+    pub fn insert_path<IT, F>(
+        &self,
+        rel_path: Option<&[u8]>,
+        insert_entry: Entry,
+        chunk_it_opt: Option<F>,
+    ) -> Result<u64, MsgError>
+    where
+        IT: io::Read,
+        F: FnOnce() -> Option<IT>,
+    {
+        // Fast path: check flat local stat cache for unchanged regular files.
+        if let (Some(rp), Some(_)) = (rel_path, &chunk_it_opt) {
+            let cached_row = self.db.lock().stat_cache_lookup(self.family_id, rp);
+            if let Some(cached_row) = cached_row {
+                let (cached_entry, cached_href) = Entry::from_stat_cache_entry(
+                    insert_entry.parent_id,
+                    insert_entry.info.name.clone(),
+                    cached_row,
+                );
+                if insert_entry.data_looks_unchanged(&cached_entry) {
+                    if let Some(href) = cached_href {
+                        if self.hash_index.hash_exists(&href.hash) {
+                            debug!("Stat-cache hit: {:?}", insert_entry.info.name);
+                            let mut staged = self.staged.lock().unwrap();
+                            staged.record_stat_path(rp);
+                            let id = staged.insert(insert_entry, Some(href));
+                            return Ok(id);
                         }
                     }
-                    (Data::DirPlaceholder, Data::DirPlaceholder) if chunk_it_opt.is_none() => {
-                        // Short-circuit: No data needed.
-                        debug!("Skip unchanged dir: {:?}", stored_entry.info.name);
-                        self.index.mark_reserved(stored_entry)?;
-                        return Ok(stored_entry.node_id.unwrap());
-                    }
-                    (Data::Symlink(a), Data::Symlink(b))
-                        if a == b && chunk_it_opt.is_none() =>
-                    {
-                        // Short-circuit: Unchanged symlink.
-                        debug!("Skip unchanged symlink: {:?}", stored_entry.info.name);
-                        self.index.mark_reserved(stored_entry)?;
-                        return Ok(stored_entry.node_id.unwrap());
-                    }
-                    _ => (),
-                }
-                // Our stored entry is incomplete.
-                Entry {
-                    node_id: stored_entry.node_id,
-                    ..insert_entry
                 }
             }
-            Some(entry) => Entry {
-                node_id: entry.node_id,
-                ..insert_entry
-            },
-            None => insert_entry,
-        };
+        }
 
         // Check if we have a data source:
         let mut reader = match chunk_it_opt {
             None => {
-                // No data is associated with this entry (directory or symlink).
-                debug!("Insert entry: {:?}", entry.info.name);
-                let entry = self.index.insert(entry, None)?;
-
-                // Bail out before storing data that does not exist:
-                return Ok(entry.node_id.unwrap());
+                // Directory or symlink: no payload chunks to read.
+                debug!("Stage entry: {:?}", insert_entry.info.name);
+                let id = self.staged.lock().unwrap().insert(insert_entry, None);
+                return Ok(id);
             }
             Some(open) => match open() {
                 Some(reader) => reader,
                 None => {
-                    // Opening a file failed (e.g. EACCES / vanished). Do not insert a
-                    // NULL-hash row that would masquerade as an empty directory.
+                    // Opening a file failed (e.g. EACCES / vanished). Do not stage a
+                    // NULL-hash entry that would masquerade as an empty directory.
                     return Err(MsgError::from(format!(
                         "could not open file {:?}",
-                        entry.info.name.utf8()
+                        insert_entry.info.name.utf8()
                     )));
                 }
             },
         };
 
-        // Setup hash tree structure
+        // Stream file chunks into a content-addressed FileChunk hash tree.
         let mut tree = self.hash_tree_writer(blob::LeafType::FileChunk);
-
-        // Read and insert all file chunks:
-        // (see HashStoreBackend::insert_chunk above)
         let max_chunk_len = 128 * 1024;
         let mut chunk = vec![0; max_chunk_len];
         let mut file_len = 0u64;
@@ -304,7 +292,7 @@ impl<B: StoreBackend> Store<B> {
                     Err(e) => {
                         return Err(MsgError::from(format!(
                             "failed reading file {:?}: {}",
-                            entry.info.name.utf8(),
+                            insert_entry.info.name.utf8(),
                             e
                         )));
                     }
@@ -319,22 +307,29 @@ impl<B: StoreBackend> Store<B> {
             tree.append(&chunk[..chunk_len])?
         }
 
-        // Warn the user if we did not read the expected size:
-        if let Some(s) = entry.info.byte_length {
-            file_size_warning(entry.info.name.utf8(), s, file_len);
+        if let Some(s) = insert_entry.info.byte_length {
+            file_size_warning(insert_entry.info.name.utf8(), s, file_len);
         }
 
-        let mut entry = entry;
+        let mut entry = insert_entry;
         entry.info.byte_length = Some(file_len);
 
-        // Get top tree hash:
         let hash_ref = tree.hash(Some(&entry.info))?;
 
-        // It is OK that this hash is not yet valid, as we check hashes at snapshot time.
-        debug!("Insert entry: {:?}", entry.info.name);
-        let entry = self.index.insert(entry, Some(&hash_ref))?;
+        if let Some(rp) = rel_path {
+            let cache_entry = entry.to_stat_cache_entry(Some(&hash_ref));
+            self.db
+                .lock()
+                .stat_cache_upsert(self.family_id, rp, &cache_entry);
+        }
 
-        Ok(entry.node_id.unwrap())
+        debug!("Stage file: {:?}", entry.info.name);
+        let mut staged = self.staged.lock().unwrap();
+        if let Some(rp) = rel_path {
+            staged.record_stat_path(rp);
+        }
+        let id = staged.insert(entry, Some(hash_ref));
+        Ok(id)
     }
 }
 

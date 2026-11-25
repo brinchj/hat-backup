@@ -13,12 +13,11 @@
 // limitations under the License.
 
 use crate::backend::{MemoryBackend, StoreBackend};
-use crate::db;
 use crate::errors::HatError;
 use crate::hash::tree::{HashRef, LeafIterator};
 use crate::hat::family::Family;
 use crate::hat::walker::Content;
-use crate::hat::{CommitFault, DeleteFault, HatRc};
+use crate::hat::{CommitFault, HatRc};
 use crate::key;
 use crate::util::FileIterator;
 use std::collections::{BTreeMap, HashMap};
@@ -103,8 +102,8 @@ fn assert_files_eq(expected: &BTreeMap<PathBuf, Vec<u8>>, actual: &BTreeMap<Path
     }
 }
 
-fn snapshot_root_ref(
-    hat: &mut HatRc<MemoryBackend>,
+fn snapshot_root_ref<B: StoreBackend>(
+    hat: &mut HatRc<B>,
     family: &str,
     snapshot_id: u64,
 ) -> HashRef {
@@ -117,13 +116,13 @@ fn snapshot_root_ref(
     HashRef::from_bytes(&bytes[..]).expect("invalid hash_ref")
 }
 
-fn read_dir_files(
-    hat: &HatRc<MemoryBackend>,
+fn read_dir_files<B: StoreBackend>(
+    hat: &HatRc<B>,
     dir_ref: HashRef,
     prefix: PathBuf,
     out: &mut BTreeMap<PathBuf, Vec<u8>>,
 ) -> Result<(), HatError> {
-    for (entry, content) in Family::<MemoryBackend>::fetch_dir_data(dir_ref, hat.hash_backend())? {
+    for (entry, content) in Family::<B>::fetch_dir_data(dir_ref, hat.hash_backend())? {
         let mut path = prefix.clone();
         let name: std::ffi::OsString = entry.info.name.clone().into();
         path.push(name);
@@ -149,8 +148,8 @@ fn read_dir_files(
     Ok(())
 }
 
-fn read_snapshot_files(
-    hat: &mut HatRc<MemoryBackend>,
+fn read_snapshot_files<B: StoreBackend>(
+    hat: &mut HatRc<B>,
     family: &str,
     snapshot_id: u64,
 ) -> Result<BTreeMap<PathBuf, Vec<u8>>, HatError> {
@@ -160,8 +159,8 @@ fn read_snapshot_files(
     Ok(out)
 }
 
-fn unfinished_snapshots(hat: &mut HatRc<MemoryBackend>) -> Vec<db::SnapshotStatus> {
-    hat.list_not_done_snapshots()
+fn unfinished_snapshots<B: StoreBackend>(hat: &mut HatRc<B>) -> usize {
+    hat.unfinished_snapshot_count()
 }
 
 fn basic_fixture() -> Vec<(&'static str, Vec<u8>)> {
@@ -205,7 +204,7 @@ fn snapshot_commit() {
     basic_snapshot(&fam);
 
     fam.flush().unwrap();
-    hat.commit(&mut fam, None).unwrap();
+    hat.commit(&mut fam).unwrap();
     hat.meta_commit().unwrap();
 
     let (deleted, live) = hat.gc().unwrap();
@@ -221,7 +220,7 @@ fn snapshot_commit_many_empty_files() {
     snapshot_files(&fam, names.iter().map(|n| (n.as_str(), vec![])).collect()).unwrap();
 
     fam.flush().unwrap();
-    hat.commit(&mut fam, None).unwrap();
+    hat.commit(&mut fam).unwrap();
     hat.meta_commit().unwrap();
 
     let (deleted, live) = hat.gc().unwrap();
@@ -250,7 +249,7 @@ fn snapshot_commit_many_empty_directories() {
     }
 
     fam.flush().unwrap();
-    hat.commit(&mut fam, None).unwrap();
+    hat.commit(&mut fam).unwrap();
     hat.meta_commit().unwrap();
 
     let (deleted, live) = hat.gc().unwrap();
@@ -292,7 +291,7 @@ fn snapshot_reuse_index() {
     fam.flush().unwrap();
 
     // Commit.
-    hat.commit(&mut fam, None).unwrap();
+    hat.commit(&mut fam).unwrap();
     hat.data_flush().unwrap();
     let (deleted, live) = hat.gc().unwrap();
     assert_eq!(deleted, 0);
@@ -332,7 +331,7 @@ fn recover() {
     basic_snapshot(&fam);
     fam.flush().unwrap();
 
-    hat.commit(&mut fam, None).unwrap();
+    hat.commit(&mut fam).unwrap();
     hat.meta_commit().unwrap();
     hat.data_flush().unwrap();
 
@@ -372,7 +371,7 @@ fn snapshot_checkout_roundtrip() {
 
     basic_snapshot(&fam);
     fam.flush().unwrap();
-    hat.commit(&mut fam, None).unwrap();
+    hat.commit(&mut fam).unwrap();
     hat.meta_commit().unwrap();
     hat.data_flush().unwrap();
 
@@ -396,7 +395,7 @@ fn gc_preserves_shared_data() {
     )
     .unwrap();
     fam1.flush().unwrap();
-    hat.commit(&mut fam1, None).unwrap();
+    hat.commit(&mut fam1).unwrap();
     hat.data_flush().unwrap();
 
     let mut fam2 = hat.open_family("fam2".into()).unwrap();
@@ -406,7 +405,7 @@ fn gc_preserves_shared_data() {
     )
     .unwrap();
     fam2.flush().unwrap();
-    hat.commit(&mut fam2, None).unwrap();
+    hat.commit(&mut fam2).unwrap();
     hat.meta_commit().unwrap();
     hat.data_flush().unwrap();
 
@@ -436,108 +435,235 @@ fn gc_preserves_shared_data() {
     assert_eq!(live, 0);
 }
 
-fn resume_commit_after_fault_at(fault: CommitFault) {
+#[test]
+fn commit_fault_before_publish_is_atomic_and_gc_reclaims_orphans() {
     let (_, mut hat, mut fam) = setup_family();
-    let expected = expected_file_map(&basic_fixture());
 
-    basic_snapshot(&fam);
+    // Publish snapshot 1 cleanly.
+    snapshot_files(&fam, vec![("keep.txt", b"keep-v1".to_vec())]).unwrap();
     fam.flush().unwrap();
+    hat.commit(&mut fam).unwrap();
+    hat.meta_commit().unwrap();
+    hat.data_flush().unwrap();
 
-    hat.inject_commit_fault(fault);
-    let err = hat.commit(&mut fam, None).expect_err("fault should fire");
+    // Stage snapshot 2 and abort atomically right before publishing the snapshot row.
+    snapshot_files(&fam, vec![("orphan.txt", b"orphan-v2".to_vec())]).unwrap();
+    fam.flush().unwrap();
+    hat.inject_commit_fault(CommitFault::BeforePublish);
+    let err = hat.commit(&mut fam).expect_err("fault should fire");
     assert!(
         format!("{}", err).contains("injected commit fault"),
         "unexpected error: {}",
         err
     );
-    assert!(
-        !unfinished_snapshots(&mut hat).is_empty(),
-        "expected unfinished snapshot work after fault {:?}",
-        fault
-    );
+    assert_eq!(unfinished_snapshots(&mut hat), 0);
 
-    hat.resume().unwrap();
-    assert!(
-        unfinished_snapshots(&mut hat).is_empty(),
-        "resume left unfinished work for {:?}",
-        fault
-    );
-
-    hat.meta_commit().unwrap();
-    hat.data_flush().unwrap();
-
-    let (deleted, live) = hat.gc().unwrap();
-    assert_eq!(deleted, 0);
-    assert!(live > 0);
-
+    // Snapshot 1 is untouched; snapshot 2 was never published.
+    assert_eq!(hat.latest_snapshot_id("familyname"), Some(1));
     let actual = read_snapshot_files(&mut hat, "familyname", 1).unwrap();
-    assert_files_eq(&expected, &actual);
+    assert_eq!(
+        actual.get(&PathBuf::from("keep.txt")).map(|v| &v[..]),
+        Some(&b"keep-v1"[..])
+    );
+
+    // Mark-and-sweep GC reclaims the orphaned chunks from the aborted snapshot 2.
+    let (deleted, live) = hat.gc().unwrap();
+    assert!(deleted > 0, "expected gc to reclaim orphaned chunks");
+    assert!(live > 0);
+    hat.check().unwrap();
+}
+
+struct CountingBackend {
+    inner: MemoryBackend,
+    retrieves: std::sync::atomic::AtomicUsize,
+}
+
+impl CountingBackend {
+    fn new() -> Self {
+        CountingBackend {
+            inner: MemoryBackend::new(),
+            retrieves: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn reset_retrieves(&self) {
+        self.retrieves.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn retrieve_count(&self) -> usize {
+        self.retrieves.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl StoreBackend for CountingBackend {
+    fn store(
+        &self,
+        name: &[u8],
+        data: crate::crypto::CipherText,
+        done_callback: Box<dyn FnOnce() + Send>,
+    ) -> Result<(), String> {
+        self.inner.store(name, data, done_callback)
+    }
+
+    fn retrieve(&self, name: &[u8]) -> Result<Option<Vec<u8>>, String> {
+        self.retrieves
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.retrieve(name)
+    }
+
+    fn delete(&self, name: &[u8]) -> Result<(), String> {
+        self.inner.delete(name)
+    }
+
+    fn list(&self) -> Result<Vec<Box<[u8]>>, String> {
+        self.inner.list()
+    }
+
+    fn flush(&self) -> Result<(), String> {
+        self.inner.flush()
+    }
 }
 
 #[test]
-fn resume_commit_after_hash_update() {
-    resume_commit_after_fault_at(CommitFault::AfterHashUpdate);
-}
+fn deregister_and_gc_make_zero_remote_reads_including_after_recover() {
+    let backend = Arc::new(CountingBackend::new());
+    let mut hat = setup_hat(backend.clone());
+    let mut fam = hat.open_family("familyname".into()).unwrap();
 
-#[test]
-fn resume_commit_after_register_final() {
-    resume_commit_after_fault_at(CommitFault::AfterRegisterFinal);
-}
+    // Commit two snapshots with nested directories and shared + unique files.
+    snapshot_files(
+        &fam,
+        vec![
+            ("shared.txt", b"shared-content".to_vec()),
+            ("dir1/only1.txt", b"only-in-snap-1".to_vec()),
+        ],
+    )
+    .unwrap();
+    hat.commit(&mut fam).unwrap();
 
-#[test]
-fn resume_commit_after_ready_commit() {
-    resume_commit_after_fault_at(CommitFault::AfterReadyCommit);
-}
-
-#[test]
-fn resume_delete_after_fault() {
-    let (_, mut hat, mut fam) = setup_family();
-    let expected = expected_file_map(&basic_fixture());
-
-    basic_snapshot(&fam);
-    fam.flush().unwrap();
-    hat.commit(&mut fam, None).unwrap();
+    snapshot_files(
+        &fam,
+        vec![
+            ("shared.txt", b"shared-content".to_vec()),
+            ("dir2/only2.txt", b"only-in-snap-2".to_vec()),
+        ],
+    )
+    .unwrap();
+    hat.commit(&mut fam).unwrap();
     hat.meta_commit().unwrap();
     hat.data_flush().unwrap();
 
-    // Keep a second live snapshot so GC has something to preserve.
-    let mut fam2 = hat.open_family("other".into()).unwrap();
-    snapshot_files(&fam2, vec![("keep", b"keep-me".to_vec())]).unwrap();
-    fam2.flush().unwrap();
-    hat.commit(&mut fam2, None).unwrap();
-    hat.data_flush().unwrap();
-
-    hat.inject_delete_fault(DeleteFault::AfterGcDeregister);
-    let err = hat
-        .deregister(&fam, 1)
-        .expect_err("delete fault should fire");
-    assert!(format!("{}", err).contains("injected delete fault"));
-    assert!(!unfinished_snapshots(&mut hat).is_empty());
-
-    hat.resume().unwrap();
-    assert!(unfinished_snapshots(&mut hat).is_empty());
-
+    // Deregistering snapshot 1 + running mark-and-sweep GC must make ZERO remote retrieve() calls.
+    backend.reset_retrieves();
+    hat.deregister(&fam, 1).unwrap();
+    assert_eq!(
+        backend.retrieve_count(),
+        0,
+        "deregister must be O(1) local with 0 remote reads"
+    );
     let (deleted, live) = hat.gc().unwrap();
+    assert_eq!(
+        backend.retrieve_count(),
+        0,
+        "mark-and-sweep gc with local tree_edges cache must make 0 remote reads"
+    );
     assert!(deleted > 0);
     assert!(live > 0);
 
-    let keep = read_snapshot_files(&mut hat, "other", 1).unwrap();
-    assert_eq!(keep.get(&PathBuf::from("keep")).map(|v| &v[..]), Some(&b"keep-me"[..]));
+    // Publish updated snapshot list and add snapshot 3 so we can test zero-remote-read GC after recover().
+    snapshot_files(&fam, vec![("dir3/only3.txt", b"only-in-snap-3".to_vec())]).unwrap();
+    hat.commit(&mut fam).unwrap();
+    hat.meta_commit().unwrap();
+    hat.data_flush().unwrap();
 
-    // Original family snap should be gone.
-    assert!(
-        hat.list_snapshots()
-            .iter()
-            .filter(|s| s.family_name == "familyname"
-                && matches!(s.status, db::SnapshotWorkStatus::CommitComplete))
-            .count()
-            == 0
-            || read_snapshot_files(&mut hat, "familyname", 1).is_err()
-            || {
-                // If a completed entry remains somehow, contents must not be required.
-                let _ = expected;
-                true
-            }
+    // Simulate a fresh cache rebuild via recover().
+    let mut recovered = setup_hat(backend.clone());
+    recovered.recover().unwrap();
+
+    // After recover() populates tree_edges, deregister + gc must ALSO make ZERO remote reads.
+    backend.reset_retrieves();
+    recovered.deregister_by_name("familyname".into(), 2).unwrap();
+    assert_eq!(backend.retrieve_count(), 0);
+    let (deleted2, live2) = recovered.gc().unwrap();
+    assert_eq!(
+        backend.retrieve_count(),
+        0,
+        "gc after recover() must use cached tree_edges with 0 remote reads"
+    );
+    assert!(deleted2 > 0);
+    assert!(live2 > 0);
+
+    let files = read_snapshot_files(&mut recovered, "familyname", 3).unwrap();
+    assert_eq!(
+        files.get(&PathBuf::from("dir3/only3.txt")).map(|v| &v[..]),
+        Some(&b"only-in-snap-3"[..])
+    );
+}
+
+#[test]
+fn flat_stat_cache_avoids_rehash_for_unchanged_files() {
+    use std::fs;
+    let td = tempfile::tempdir().unwrap();
+    let root = td.path().join("src");
+    fs::create_dir_all(root.join("sub")).unwrap();
+    let file_path = root.join("sub/a.txt");
+    fs::write(&file_path, b"hello-cache").unwrap();
+
+    // Wait past the 1-second racily-clean window for both mtime and ctime so the
+    // second pass genuinely exercises the stat_cache hit fast path.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+
+    let (_, mut hat, mut fam) = setup_family();
+    fam.snapshot_dir(root.clone()).unwrap();
+    hat.commit(&mut fam).unwrap();
+
+    // Prove directly that an unchanged entry hits stat_cache without calling the reader closure
+    // (and without deadlocking on the shared SQLite mutex).
+    let meta = fs::symlink_metadata(&file_path).unwrap();
+    let probe_entry = key::Entry::new(
+        None,
+        "a.txt".to_string().into(),
+        key::Data::FilePlaceholder,
+        Some(&meta),
+    );
+    fam.key_store.clear_staged();
+    fam.key_store
+        .insert_path(
+            Some(b"sub/a.txt"),
+            probe_entry,
+            Some(|| -> Option<std::io::Empty> {
+                panic!("stat_cache hit must not invoke reader closure");
+            }),
+        )
+        .unwrap();
+
+    // Second full snapshot_dir of identical on-disk tree must hit flat stat_cache and keep
+    // identical file content (note: TreeList root hash may differ across seconds because
+    // FileInfo records snapshot_ts_utc / accessed_ts).
+    fam.snapshot_dir(root.clone()).unwrap();
+    hat.commit(&mut fam).unwrap();
+
+    let snaps = hat.list_snapshots();
+    assert_eq!(snaps.len(), 2);
+    let files1 = read_snapshot_files(&mut hat, "familyname", 1).unwrap();
+    let files2 = read_snapshot_files(&mut hat, "familyname", 2).unwrap();
+    assert_files_eq(&files1, &files2);
+    assert_eq!(
+        files2.get(&PathBuf::from("sub/a.txt")).map(|v| &v[..]),
+        Some(&b"hello-cache"[..])
+    );
+
+    // Modifying the file must miss stat_cache and store the updated payload.
+    fs::write(&file_path, b"hello-cache-updated!").unwrap();
+    fam.snapshot_dir(root.clone()).unwrap();
+    hat.commit(&mut fam).unwrap();
+
+    let snaps = hat.list_snapshots();
+    assert_eq!(snaps.len(), 3);
+    let files3 = read_snapshot_files(&mut hat, "familyname", 3).unwrap();
+    assert_eq!(
+        files3.get(&PathBuf::from("sub/a.txt")).map(|v| &v[..]),
+        Some(&b"hello-cache-updated!"[..])
     );
 }
 
@@ -546,7 +672,7 @@ fn recover_fails_or_stays_safe_if_blobs_missing() {
     let (backend, mut hat, mut fam) = setup_family();
     basic_snapshot(&fam);
     fam.flush().unwrap();
-    hat.commit(&mut fam, None).unwrap();
+    hat.commit(&mut fam).unwrap();
     hat.meta_commit().unwrap();
     hat.data_flush().unwrap();
 
@@ -650,7 +776,7 @@ fn non_utf8_filename_roundtrip_vfs_and_recover() {
     fam.snapshot_direct(link_entry, false, None).unwrap();
 
     fam.flush().unwrap();
-    hat.commit(&mut fam, None).unwrap();
+    hat.commit(&mut fam).unwrap();
     hat.meta_commit().unwrap();
     hat.data_flush().unwrap();
     hat.check().unwrap();
@@ -742,7 +868,7 @@ fn checkout_rejects_path_traversal_entry_names() {
         )
         .unwrap();
         fam.flush().unwrap();
-        hat.commit(&mut fam, None).unwrap();
+        hat.commit(&mut fam).unwrap();
 
         let td = tempfile::tempdir().unwrap();
         let restore = td.path().join("restore");
@@ -752,11 +878,6 @@ fn checkout_rejects_path_traversal_entry_names() {
             hat.checkout_in_dir("familyname".into(), restore.clone())
                 .is_err(),
             "Hat::checkout_in_dir must reject unsafe entry name {:?}",
-            bad
-        );
-        assert!(
-            fam.checkout_in_dir(restore.clone(), None).is_err(),
-            "Family::checkout_in_dir must reject unsafe entry name {:?}",
             bad
         );
         assert!(!td.path().join("escape.txt").exists());
@@ -798,34 +919,27 @@ fn checkout_does_not_chmod_symlink_targets_or_fail_on_broken_symlink() {
     fam.snapshot_direct(broken_entry, false, None).unwrap();
 
     fam.flush().unwrap();
-    hat.commit(&mut fam, None).unwrap();
+    hat.commit(&mut fam).unwrap();
 
-    // Test both Hat::checkout_in_dir and Family::checkout_in_dir.
-    for (label, use_family) in [("hat", false), ("family", true)] {
-        let restore = td.path().join(format!("restore_{}", label));
-        fs::create_dir_all(&restore).unwrap();
-        if use_family {
-            fam.checkout_in_dir(restore.clone(), None).unwrap();
-        } else {
-            hat.checkout_in_dir("familyname".into(), restore.clone())
-                .unwrap();
-        }
+    let restore = td.path().join("restore_hat");
+    fs::create_dir_all(&restore).unwrap();
+    hat.checkout_in_dir("familyname".into(), restore.clone())
+        .unwrap();
 
-        let outside_mode = fs::metadata(&outside).unwrap().permissions().mode() & 0o777;
-        assert_eq!(
-            outside_mode, 0o600,
-            "{} checkout must not chmod symlink target (got {:o})",
-            label, outside_mode
-        );
-        assert_eq!(
-            fs::read_link(restore.join("link_outside")).unwrap(),
-            outside
-        );
-        assert_eq!(
-            fs::read_link(restore.join("broken_link")).unwrap(),
-            PathBuf::from("nonexistent_target_xyz")
-        );
-    }
+    let outside_mode = fs::metadata(&outside).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        outside_mode, 0o600,
+        "checkout must not chmod symlink target (got {:o})",
+        outside_mode
+    );
+    assert_eq!(
+        fs::read_link(restore.join("link_outside")).unwrap(),
+        outside
+    );
+    assert_eq!(
+        fs::read_link(restore.join("broken_link")).unwrap(),
+        PathBuf::from("nonexistent_target_xyz")
+    );
 }
 
 #[test]
@@ -851,7 +965,7 @@ fn meta_commit_chunks_large_snapshot_list_and_recovers() {
         fam.snapshot_direct(entry, false, Some(FileIterator::from_bytes(payload)))
             .unwrap();
         fam.flush().unwrap();
-        hat.commit(&mut fam, None).unwrap();
+        hat.commit(&mut fam).unwrap();
     }
 
     hat.meta_commit().unwrap();
@@ -879,4 +993,97 @@ fn meta_commit_chunks_large_snapshot_list_and_recovers() {
         recovered_snaps, expected_snaps,
         "all chunked SnapshotList entries must survive recover()"
     );
+}
+
+#[test]
+fn gc_fails_closed_on_corrupt_index_missing_child_hash() {
+    let (_, mut hat, mut fam) = setup_family();
+    snapshot_files(&fam, vec![("a.txt", b"hello-fail-closed".to_vec())]).unwrap();
+    hat.commit(&mut fam).unwrap();
+    hat.meta_commit().unwrap();
+    hat.data_flush().unwrap();
+
+    // Find the root TreeList hash id and its child file hash id.
+    let snap = hat
+        .list_snapshots()
+        .into_iter()
+        .find(|s| s.family_name == "familyname")
+        .unwrap();
+    let root_id = hat.hash_index.get_id(&snap.hash.unwrap()).unwrap();
+    let edges = hat.db.lock().tree_edges_get(root_id).unwrap();
+    assert_eq!(edges.len(), 1);
+    let child_id = edges[0];
+
+    // Case 1: tree_edges still present, but the referenced child hash row is missing -> fail closed.
+    hat.hash_index.delete(child_id);
+    let err1 = hat
+        .gc()
+        .expect_err("gc must fail closed when live tree_edges points to missing hash id");
+    assert!(
+        format!("{}", err1).contains("missing from hash index"),
+        "unexpected error: {}",
+        err1
+    );
+
+    // Case 2: tree_edges entry also cleared, forcing backend fallback -> must fail closed
+    // and must NOT persist a truncated tree_edges row.
+    hat.db.lock().tree_edges_delete(root_id);
+    let err2 = hat
+        .gc()
+        .expect_err("gc fallback must fail closed when TreeList child hash is missing from index");
+    assert!(
+        format!("{}", err2).contains("missing from hash index"),
+        "unexpected error: {}",
+        err2
+    );
+    assert_eq!(
+        hat.db.lock().tree_edges_get(root_id),
+        None,
+        "failed fallback must not persist truncated tree_edges"
+    );
+}
+
+#[test]
+fn stat_cache_prunes_deleted_files_on_commit_and_deleted_families_on_gc() {
+    use std::fs;
+    let td = tempfile::tempdir().unwrap();
+    let dir1 = td.path().join("dir1");
+    let dir2 = td.path().join("dir2");
+    fs::create_dir_all(&dir1).unwrap();
+    fs::create_dir_all(&dir2).unwrap();
+    fs::write(dir1.join("keep.txt"), b"keep").unwrap();
+    fs::write(dir1.join("removed.txt"), b"gone-soon").unwrap();
+    fs::write(dir2.join("other.txt"), b"other-family").unwrap();
+
+    let (_, mut hat, mut fam1) = setup_family();
+    let mut fam2 = hat.open_family("other_family".into()).unwrap();
+    let fam1_id = fam1.key_store.family_id();
+    let fam2_id = fam2.key_store.family_id();
+
+    fam1.snapshot_dir(dir1.clone()).unwrap();
+    hat.commit(&mut fam1).unwrap();
+    fam2.snapshot_dir(dir2.clone()).unwrap();
+    hat.commit(&mut fam2).unwrap();
+
+    assert_eq!(hat.db.lock().stat_cache_count_for_family(fam1_id), 2);
+    assert_eq!(hat.db.lock().stat_cache_count_for_family(fam2_id), 1);
+
+    // Remove a file in dir1, but abort commit before publish: stat_cache must NOT prune yet.
+    fs::remove_file(dir1.join("removed.txt")).unwrap();
+    fam1.snapshot_dir(dir1.clone()).unwrap();
+    hat.inject_commit_fault(CommitFault::BeforePublish);
+    assert!(hat.commit(&mut fam1).is_err());
+    assert_eq!(hat.db.lock().stat_cache_count_for_family(fam1_id), 2);
+
+    // Now complete commit on dir1: removed.txt is pruned from fam1, fam2 untouched.
+    fam1.snapshot_dir(dir1.clone()).unwrap();
+    hat.commit(&mut fam1).unwrap();
+    assert_eq!(hat.db.lock().stat_cache_count_for_family(fam1_id), 1);
+    assert_eq!(hat.db.lock().stat_cache_count_for_family(fam2_id), 1);
+
+    // Delete fam2's only snapshot and run GC: fam2's stat_cache rows are reclaimed, fam1 untouched.
+    hat.deregister(&fam2, 1).unwrap();
+    hat.gc().unwrap();
+    assert_eq!(hat.db.lock().stat_cache_count_for_family(fam2_id), 0);
+    assert_eq!(hat.db.lock().stat_cache_count_for_family(fam1_id), 1);
 }

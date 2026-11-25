@@ -42,48 +42,21 @@ impl SnapshotIndex {
         self.index.lock().snapshot_lookup(family_name, snapshot_id)
     }
 
-    pub fn reserve(&mut self, family: String) -> db::SnapshotInfo {
-        self.index.lock().snapshot_reserve(family)
-    }
-
-    /// Update existing snapshot.
-    pub fn update(
+    /// Atomically insert a completed snapshot row.
+    pub fn insert_done(
         &mut self,
-        snapshot: &db::SnapshotInfo,
+        family: String,
         hash: &hash::Hash,
         hash_ref: &hash::tree::HashRef,
-    ) {
+    ) -> db::SnapshotInfo {
         self.index
             .lock()
-            .snapshot_update(snapshot, "anonymous", hash, hash_ref);
+            .snapshot_insert_done(family, "anonymous", hash, hash_ref)
     }
 
-    /// ReadyCommit.
-    pub fn ready_commit(&mut self, snapshot: &db::SnapshotInfo) {
-        self.index
-            .lock()
-            .snapshot_set_tag(snapshot, tags::Tag::Complete)
-    }
-
-    /// Register a new snapshot by its family name, hash and persistent reference.
-    pub fn commit(&mut self, snapshot: &db::SnapshotInfo) {
-        self.index
-            .lock()
-            .snapshot_set_tag(snapshot, tags::Tag::Done)
-    }
-
-    /// We are deleting this snapshot.
-    pub fn will_delete(&mut self, snapshot: &db::SnapshotInfo) {
-        self.index
-            .lock()
-            .snapshot_set_tag(snapshot, tags::Tag::WillDelete)
-    }
-
-    /// We are ready to delete of this snapshot.
-    pub fn ready_delete(&mut self, snapshot: &db::SnapshotInfo) {
-        self.index
-            .lock()
-            .snapshot_set_tag(snapshot, tags::Tag::ReadyDelete)
+    /// Delete any stale incomplete snapshot rows left by older versions.
+    pub fn delete_incomplete(&mut self) -> usize {
+        self.index.lock().snapshot_delete_incomplete()
     }
 
     /// Extract latest snapshot data for family.

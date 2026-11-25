@@ -65,7 +65,7 @@ fn do_commit<B: StoreBackend>(mut hat: HatRc<B>, name: String, path: PathBuf) {
         .open_family(name.clone())
         .unwrap_or_else(|e| fail(format!("could not open family '{}': {}", name, e)));
     family.snapshot_dir(path).unwrap_or_else(|e| fail(e));
-    hat.commit(&mut family, None).unwrap_or_else(|e| fail(e));
+    hat.commit(&mut family).unwrap_or_else(|e| fail(e));
     hat.meta_commit().unwrap_or_else(|e| fail(e));
     hat.data_flush().unwrap_or_else(|e| fail(e));
 }
@@ -235,7 +235,10 @@ fn main() {
                 ),
         )
         .subcommand(Command::new("check").about("Verify live hash chunks against the backend"))
-        .subcommand(Command::new("resume").about("Resume previous failed command."))
+        .subcommand(
+            Command::new("resume")
+                .about("Clean up incomplete local state and republish snapshot metadata"),
+        )
         .subcommand(
             Command::new("mount")
                 .about("Mount Hat snapshots on a mountpoint path using FUSE")

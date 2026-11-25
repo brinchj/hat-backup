@@ -36,7 +36,6 @@ mod blob;
 pub mod crypto;
 mod db;
 mod errors;
-mod gc;
 mod hash;
 pub mod hat;
 mod key;

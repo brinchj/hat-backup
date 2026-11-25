@@ -117,7 +117,7 @@ fn configure_io_group(group: &mut criterion::BenchmarkGroup<'_, criterion::measu
 fn commit_tree(hat: &mut hat::hat::HatRc<FileBackend>, family: &str, fixture: &Path) {
     let mut fam = hat.open_family(family.to_string()).unwrap();
     fam.snapshot_dir(fixture.to_path_buf()).unwrap();
-    hat.commit(&mut fam, None).unwrap();
+    hat.commit(&mut fam).unwrap();
     hat.meta_commit().unwrap();
     hat.data_flush().unwrap();
 }

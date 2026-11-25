@@ -608,7 +608,7 @@ fn corrupt_local_sqlite_cache_returns_err() {
         commit_tree(&mut hat, "family", &sb.fixture);
     }
 
-    let db_path = sb.repo.join("cache").join("hash_index.sqlite3");
+    let db_path = sb.repo.join("cache").join("index.sqlite3");
     fs::write(&db_path, b"not a valid sqlite database file at all!!!").unwrap();
 
     let backend = Arc::new(FileBackend::new(sb.backend.clone()));

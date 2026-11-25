@@ -243,7 +243,6 @@ fn identity() {
         let mut fs = rng_filesystem(size as usize);
         insert_and_update_fs(&mut fs, &ks);
         let fs = fs;
-        ks.commit_reserved_nodes(None).unwrap();
         ks.flush().unwrap();
 
         verify_filesystem(&fs, &ks);
@@ -386,7 +385,6 @@ fn mid_read_io_error_and_failed_open_do_not_commit_corrupt_entries() {
     let res = ks.insert::<FailingReader, _>(open_fail_entry, Some(|| None));
     assert!(res.is_err(), "failed file open must fail insert");
 
-    ks.commit_reserved_nodes(None).unwrap();
     ks.flush().unwrap();
 
     let entries = ks.list_dir(None).unwrap();

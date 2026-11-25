@@ -1,5 +1,5 @@
 //! Test helper: commit or delete against an on-disk repo, optionally hanging at a fault barrier.
-//! Used by `tests/process_crash.rs` (SIGKILL + reopen).
+//! Used by `tests/process_crash.rs` and `tests/cli_e2e.rs` (SIGKILL + reopen).
 
 #![forbid(unsafe_code)]
 
@@ -12,10 +12,18 @@ use std::sync::Arc;
 fn usage() -> ! {
     eprintln!(
         "usage: hat-crash-worker commit <repo> <backend> <family> <fixture>\n\
-         usage: hat-crash-worker delete <repo> <backend> <family> <snapshot_id>\n\
-         usage: hat-crash-worker done-barrier <repo> <backend> <family> <fixture> <barrier>"
+         usage: hat-crash-worker commit-before-meta <repo> <backend> <family> <fixture> <barrier>\n\
+         usage: hat-crash-worker done-barrier <repo> <backend> <family> <fixture> <barrier>\n\
+         usage: hat-crash-worker delete-before-meta <repo> <backend> <family> <snapshot_id> <barrier>"
     );
     std::process::exit(2);
+}
+
+fn hang_at_barrier(barrier: &PathBuf) -> ! {
+    std::fs::write(barrier, b"ready").expect("barrier");
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    }
 }
 
 fn main() {
@@ -35,11 +43,8 @@ fn main() {
             let fixture = PathBuf::from(args.next().unwrap_or_else(|| usage()));
             let mut fam = hat.open_family(family).expect("open_family");
             fam.snapshot_dir(fixture).expect("snapshot_dir");
-            // Durability before commit stages: process-kill tests need blobs on disk.
-            fam.flush().expect("family flush");
-            hat.data_flush().expect("data_flush before commit");
             // Fault env (HAT_TEST_FAULT / HAT_TEST_BARRIER) is honored inside commit.
-            match hat.commit(&mut fam, None) {
+            match hat.commit(&mut fam) {
                 Ok(()) => {
                     hat.meta_commit().expect("meta_commit");
                     hat.data_flush().expect("data_flush");
@@ -50,32 +55,35 @@ fn main() {
                 }
             }
         }
+        "commit-before-meta" => {
+            let fixture = PathBuf::from(args.next().unwrap_or_else(|| usage()));
+            let barrier = PathBuf::from(args.next().unwrap_or_else(|| usage()));
+            let mut fam = hat.open_family(family).expect("open_family");
+            fam.snapshot_dir(fixture).expect("snapshot_dir");
+            hat.commit(&mut fam).expect("commit");
+            // Killed after local atomic commit, before meta_commit publishes the new root.
+            hang_at_barrier(&barrier);
+        }
         "done-barrier" => {
             let fixture = PathBuf::from(args.next().unwrap_or_else(|| usage()));
             let barrier = PathBuf::from(args.next().unwrap_or_else(|| usage()));
             let mut fam = hat.open_family(family).expect("open_family");
             fam.snapshot_dir(fixture).expect("snapshot_dir");
-            hat.commit(&mut fam, None).expect("commit");
+            hat.commit(&mut fam).expect("commit");
             hat.meta_commit().expect("meta_commit");
             hat.data_flush().expect("data_flush");
-            std::fs::write(&barrier, b"ready").expect("barrier");
-            loop {
-                std::thread::sleep(std::time::Duration::from_secs(60));
-            }
+            hang_at_barrier(&barrier);
         }
-        "delete" => {
+        "delete-before-meta" => {
             let id: u64 = args
                 .next()
                 .unwrap_or_else(|| usage())
                 .parse()
                 .expect("snapshot id");
-            match hat.deregister_by_name(family, id) {
-                Ok(()) => {}
-                Err(e) => {
-                    eprintln!("delete stopped: {}", e);
-                    std::process::exit(1);
-                }
-            }
+            let barrier = PathBuf::from(args.next().unwrap_or_else(|| usage()));
+            hat.deregister_by_name(family, id).expect("deregister");
+            // Killed after local O(1) snapshot delete, before meta_commit / gc.
+            hang_at_barrier(&barrier);
         }
         _ => usage(),
     }

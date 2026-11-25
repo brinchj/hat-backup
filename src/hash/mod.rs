@@ -21,7 +21,6 @@ use crate::db;
 use crate::errors::{DieselError, RetryError};
 
 use std::sync::{Arc, Mutex, MutexGuard};
-use crate::tags;
 use crate::util::UniquePriorityQueue;
 
 pub mod tree;
@@ -316,75 +315,19 @@ impl HashIndex {
         self.0.index.lock().hash_list()
     }
 
-    /// Permanently delete hash by its ID.
+    /// Permanently delete hash by its ID (and any cached tree edges).
     pub fn delete(&self, id: u64) {
         self.0.index.lock().hash_delete(id)
     }
 
-    /// API related to tagging, which is useful to indicate state during operation stages.
-    /// It operates directly on the underlying IDs.
-    pub fn set_tag(&self, id: u64, tag: tags::Tag) {
-        self.0.index.lock().hash_set_tag(Some(id), tag);
+    /// List all hash IDs currently in the index.
+    pub fn all_ids(&self) -> Vec<u64> {
+        self.0.index.lock().hash_all_ids()
     }
 
-    /// API related to tagging, which is useful to indicate state during operation stages.
-    /// It operates directly on the underlying IDs.
-    pub fn set_all_tags(&self, tag: tags::Tag) {
-        self.0.index.lock().hash_set_tag(None, tag)
-    }
-
-    /// API related to tagging, which is useful to indicate state during operation stages.
-    /// It operates directly on the underlying IDs.
-    pub fn get_tag(&self, id: u64) -> Option<tags::Tag> {
-        {
-            if let Some(ref q) = self.0.queue_lock().find_mut_value_of_priority(&id) {
-                return q.tag;
-            }
-        }
-        self.0.index.lock().hash_get_tag(id)
-    }
-
-    /// API related to tagging, which is useful to indicate state during operation stages.
-    /// It operates directly on the underlying IDs.
-    pub fn get_ids_by_tag(&self, tag: u64) -> Vec<u64> {
-        self.0.index.lock().hash_list_ids_by_tag(tag)
-    }
-
-    /// API related to garbage collector metadata tied to (hash id, family id) pairs.
-    pub fn read_gc_data(&self, hash_id: u64, family_id: u64) -> db::GcData {
-        self.0.index.lock().hash_read_gc_data(hash_id, family_id)
-    }
-
-    /// API related to garbage collector metadata tied to (hash id, family id) pairs.
-    pub fn update_gc_data<F: db::UpdateFn>(
-        &self,
-        hash_id: u64,
-        family_id: u64,
-        update_fn: F,
-    ) -> db::GcData {
-        self.0
-            .index
-            .lock()
-            .hash_update_gc_data(hash_id, family_id, update_fn)
-    }
-
-    /// API related to garbage collector metadata tied to (hash id, family id) pairs.
-    pub fn update_family_gc_data<F: db::UpdateFn, I: Iterator<Item = F>>(
-        &self,
-        family_id: u64,
-        update_fns: I,
-    ) {
-        self.0
-            .index
-            .lock()
-            .hash_update_family_gc_data(family_id, update_fns)
-    }
-
-    /// Manual commit. This also disables automatic periodic commit.
-    pub fn manual_commit(&self) {
-        let mut guard = self.0.index.lock();
-        guard.flush();
-        guard.set_auto_flush(false);
+    /// Fetch full hash metadata by ID (used during mark-and-sweep GC).
+    pub fn locate_by_id(&self, id: u64) -> Option<db::Entry> {
+        self.0.index.lock().hash_locate_by_id(id)
     }
 
     /// Flush the hash index to clear internal buffers and commit the underlying database.

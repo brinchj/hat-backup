@@ -94,24 +94,15 @@ fn cli_resume_after_kill() {
     write_fixture(&sb.fixture, &basic_fixture());
     init_repo(&sb.repo);
 
-    {
-        let mut hat = open_hat(&sb.repo, &sb.backend);
-        let fam = hat.open_family("family".into()).unwrap();
-        fam.snapshot_dir(sb.fixture.clone()).unwrap();
-        fam.flush().unwrap();
-        hat.data_flush().unwrap();
-    }
-
     let barrier = sb.root.path().join("barrier");
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_hat-crash-worker"))
-        .env("HAT_TEST_FAULT", "AfterHashUpdate")
-        .env("HAT_TEST_BARRIER", &barrier)
         .args([
-            "commit",
+            "commit-before-meta",
             sb.repo.to_str().unwrap(),
             sb.backend.to_str().unwrap(),
             "family",
             sb.fixture.to_str().unwrap(),
+            barrier.to_str().unwrap(),
         ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -202,25 +193,38 @@ fn cli_init_sets_restrictive_permissions_and_refuses_overwrite() {
         .failure();
     assert_eq!(fs::read(&key_path).unwrap(), orig_key);
 
-    // Committing creates SQLite indexes (hash_index.sqlite3 + family index + WAL/SHM);
+    // Committing multiple families uses a single SQLite cache file (`index.sqlite3` + WAL/SHM);
     // every file inside cache/ must be 0600 and cache/ must remain 0700.
     write_fixture(&sb.fixture, &[("hello.txt", FileSpec::file(b"secret-ish".to_vec()))]);
-    let mut cmd = hatbin();
-    with_file_backend(&mut cmd, &sb)
-        .args(["commit", "family", sb.fixture.to_str().unwrap()])
-        .assert()
-        .success();
+    for fam in ["family", "family2"] {
+        let mut cmd = hatbin();
+        with_file_backend(&mut cmd, &sb)
+            .args(["commit", fam, sb.fixture.to_str().unwrap()])
+            .assert()
+            .success();
+    }
+
+    let cache = sb.repo.join("cache");
+    assert!(cache.join("index.sqlite3").is_file(), "expected single cache/index.sqlite3");
+    let sqlite_files: Vec<_> = fs::read_dir(&cache)
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("sqlite3"))
+        .collect();
+    assert_eq!(
+        sqlite_files.len(),
+        1,
+        "expected exactly one .sqlite3 cache file across multiple families, found: {:?}",
+        sqlite_files
+    );
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let cache = sb.repo.join("cache");
         assert_eq!(fs::metadata(&cache).unwrap().permissions().mode() & 0o777, 0o700);
-        let mut seen_files = 0usize;
         for entry in fs::read_dir(&cache).unwrap() {
             let path = entry.unwrap().path();
             if path.is_file() {
-                seen_files += 1;
                 let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
                 assert_eq!(
                     mode,
@@ -231,7 +235,6 @@ fn cli_init_sets_restrictive_permissions_and_refuses_overwrite() {
                 );
             }
         }
-        assert!(seen_files >= 2, "expected hash_index.sqlite3 and family index in cache/");
     }
 }
 
