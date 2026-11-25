@@ -17,6 +17,7 @@ use crate::crypto::{CipherText, CipherTextRef, PlainTextRef};
 use crate::hash::tree::HashRef;
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::io::Read;
 use std::mem;
 use std::sync::Arc;
@@ -26,6 +27,13 @@ use super::{BlobError, Compression, Packing};
 /// Upper bound on a single decompressed chunk to guard against corrupt or
 /// malicious zstd frames expanding without limit.
 pub const MAX_DECOMPRESSED_CHUNK_BYTES: usize = 16 * 1024 * 1024;
+
+thread_local! {
+    /// Per-thread reusable zstd compressor so worker threads avoid allocating
+    /// and freeing a `ZSTD_CCtx` on every chunk.
+    static ZSTD_COMPRESSOR: RefCell<Option<(i32, zstd::bulk::Compressor<'static>)>> =
+        const { RefCell::new(None) };
+}
 
 /// Compress `chunk` according to `compression`, returning the payload bytes to
 /// seal and the resulting wire `Packing`. If compression does not strictly
@@ -40,8 +48,21 @@ pub(crate) fn compress_chunk(
     match compression {
         Compression::None => Ok((Cow::Borrowed(chunk), None)),
         Compression::Zstd(level) => {
-            let compressed = zstd::bulk::compress(chunk, level)
-                .map_err(|e| BlobError::from(format!("zstd compress failed: {}", e)))?;
+            let compressed = ZSTD_COMPRESSOR.with(|cell| {
+                let mut slot = cell.borrow_mut();
+                let need_new = match slot.as_ref() {
+                    Some((cached_level, _)) => *cached_level != level,
+                    None => true,
+                };
+                if need_new {
+                    let comp = zstd::bulk::Compressor::new(level)
+                        .map_err(|e| BlobError::from(format!("zstd init failed: {}", e)))?;
+                    *slot = Some((level, comp));
+                }
+                let (_, comp) = slot.as_mut().expect("compressor initialized");
+                comp.compress(chunk)
+                    .map_err(|e| BlobError::from(format!("zstd compress failed: {}", e)))
+            })?;
             if compressed.len() < chunk.len() {
                 Ok((Cow::Owned(compressed), Some(Packing::Zstd)))
             } else {
@@ -98,10 +119,6 @@ impl Blob {
             overhead: crypto::sealed::desc::overhead() + crypto::authed::hash::DIGESTBYTES,
             max_len,
         }
-    }
-
-    pub fn max_len(&self) -> usize {
-        self.max_len
     }
 
     pub fn upperbound_len(&self) -> usize {

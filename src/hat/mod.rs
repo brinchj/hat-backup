@@ -53,8 +53,6 @@ pub struct Hat<B: StoreBackend> {
     db: Arc<db::Index>,
     snapshot_index: snapshot::SnapshotIndex,
     hash_index: Arc<hash::HashIndex>,
-    backend: Arc<B>,
-    blob_index: Arc<blob::BlobIndex>,
     blob_store: Arc<blob::BlobStore<B>>,
     blob_max_size: usize,
     commit_fault: Option<CommitFault>,
@@ -374,8 +372,6 @@ impl<B: StoreBackend> Hat<B> {
             db: db_p,
             snapshot_index: si_p,
             hash_index: hi_p,
-            backend,
-            blob_index: bi_p,
             blob_store: bs_p,
             blob_max_size: max_blob_size,
             commit_fault: None,
@@ -409,10 +405,8 @@ impl<B: StoreBackend> Hat<B> {
             db: db_p,
             snapshot_index: si_p,
             hash_index: hi_p,
-            blob_index: bi_p,
             blob_store: bs_p,
             blob_max_size: max_blob_size,
-            backend,
             commit_fault: None,
         };
 
@@ -495,25 +489,13 @@ impl<B: StoreBackend> Hat<B> {
         let family_id = self.db.lock().get_or_create_family_id(&name);
         let staged = Arc::new(Mutex::new(key::StagedTree::default()));
 
-        let mut kss = vec![];
-        for _ in 0..2 {
-            // To avoid mixing chunks from different files, each worker store gets its own
-            // dedicated BlobStore while sharing the single local SQLite cache DB.
-            let bs = Arc::new(blob::BlobStore::new(
-                self.keys.clone(),
-                self.blob_index.clone(),
-                self.backend.clone(),
-                self.blob_max_size,
-            ));
-            kss.push(key::Store::new(
-                family_id,
-                self.db.clone(),
-                staged.clone(),
-                self.hash_index.clone(),
-                bs,
-                self.keys.clone(),
-            ));
-        }
+        // Give `walk_pool` up to 8 concurrent `key::Store` workers sharing `self.blob_store`:
+        // BlobStore compresses chunks and runs Blob::finish() + backend.store() outside its
+        // packing mutex, while sharing one BlobStore avoids partial tail-blob amplification.
+        let worker_count = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .clamp(4, 8);
 
         let ks = key::Store::new(
             family_id,
@@ -523,7 +505,7 @@ impl<B: StoreBackend> Hat<B> {
             self.blob_store.clone(),
             self.keys.clone(),
         );
-        kss.push(ks.clone());
+        let kss = vec![ks.clone(); worker_count];
 
         let family = Family {
             name,

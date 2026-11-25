@@ -22,7 +22,8 @@ use crate::errors::{DieselError, RetryError};
 use crate::hash;
 use crate::hash::tree::{LeafIterator, SimpleHashTreeWriter};
 use std::borrow::Cow;
-use std::io;
+use std::cell::RefCell;
+use std::io::{self, Read};
 use std::sync::{Arc, Mutex};
 
 mod hash_store_backend;
@@ -285,27 +286,67 @@ impl<B: StoreBackend> Store<B> {
         let mut file_len = 0u64;
         let max_blob_size = self.blob_store.max_blob_size();
         if let Some((min_size, avg_size, max_size)) = fastcdc_params(max_blob_size) {
-            let chunker = fastcdc::v2020::StreamCDC::with_level_and_seed(
-                RetryOnInterrupt(reader),
-                min_size,
-                avg_size,
-                max_size,
-                fastcdc::v2020::Normalization::Level1,
-                self.keys.chunker_seed(),
-            );
-            for chunk_res in chunker {
-                let chunk = chunk_res.map_err(|e| {
-                    MsgError::from(format!(
-                        "failed reading file {:?}: {}",
-                        insert_entry.info.name.utf8(),
-                        e
-                    ))
-                })?;
-                if chunk.data.is_empty() {
-                    continue;
+            let mut reader = RetryOnInterrupt(reader);
+            // Fast path for files <= min_size (FastCDC never cuts before min_size):
+            // probe up to min_size + 1 bytes into a reused per-thread buffer to skip
+            // allocating StreamCDC's 256 KiB window for small files.
+            let overflow_prefix: Option<Vec<u8>> = SMALL_FILE_BUF.with(|cell| {
+                let mut buf = cell.borrow_mut();
+                // Keep >= 4 KiB headroom past `min_size` so every read() passes a
+                // comfortably sized buffer and detects >min_size in a single syscall.
+                let probe_len = min_size + 4096;
+                if buf.len() < probe_len {
+                    buf.resize(probe_len, 0);
                 }
-                file_len += chunk.data.len() as u64;
-                tree.append(&chunk.data)?;
+                let mut filled = 0usize;
+                while filled <= min_size {
+                    match reader.read(&mut buf[filled..probe_len]) {
+                        Ok(0) => break,
+                        Ok(n) => filled += n,
+                        Err(e) => {
+                            return Err(MsgError::from(format!(
+                                "failed reading file {:?}: {}",
+                                insert_entry.info.name.utf8(),
+                                e
+                            )));
+                        }
+                    }
+                }
+                if filled == 0 {
+                    Ok(None)
+                } else if filled <= min_size {
+                    file_len += filled as u64;
+                    tree.append(&buf[..filled])?;
+                    Ok(None)
+                } else {
+                    Ok(Some(buf[..filled].to_vec()))
+                }
+            })?;
+
+            if let Some(prefix) = overflow_prefix {
+                let chained = io::Cursor::new(prefix).chain(reader);
+                let chunker = fastcdc::v2020::StreamCDC::with_level_and_seed(
+                    chained,
+                    min_size,
+                    avg_size,
+                    max_size,
+                    fastcdc::v2020::Normalization::Level1,
+                    self.keys.chunker_seed(),
+                );
+                for chunk_res in chunker {
+                    let chunk = chunk_res.map_err(|e| {
+                        MsgError::from(format!(
+                            "failed reading file {:?}: {}",
+                            insert_entry.info.name.utf8(),
+                            e
+                        ))
+                    })?;
+                    if chunk.data.is_empty() {
+                        continue;
+                    }
+                    file_len += chunk.data.len() as u64;
+                    tree.append(&chunk.data)?;
+                }
             }
         } else {
             let max_chunk_len = (max_blob_size / 4).max(1);
@@ -377,6 +418,12 @@ fn file_size_warning(name: &str, wanted: u64, got: u64) {
 pub const FASTCDC_MIN_CHUNK_SIZE: usize = 16 * 1024;
 pub const FASTCDC_AVG_CHUNK_SIZE: usize = 64 * 1024;
 pub const FASTCDC_MAX_CHUNK_SIZE: usize = 256 * 1024;
+
+thread_local! {
+    /// Reused per-thread read buffer for files up to `FASTCDC_MIN_CHUNK_SIZE`
+    /// so small files skip allocating FastCDC's 256 KiB streaming window.
+    static SMALL_FILE_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
 
 /// Choose FastCDC `(min, avg, max)` chunk sizes for a given `max_blob_size`.
 ///

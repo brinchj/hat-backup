@@ -467,3 +467,110 @@ fn corrupt_zstd_payload_returns_error() {
         err
     );
 }
+
+#[test]
+fn concurrent_flushes_overlap_and_flush_waits_for_in_flight_writes() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Barrier;
+
+    struct BlockingStoreBackend {
+        inner: MemoryBackend,
+        in_store: AtomicUsize,
+        max_concurrent: AtomicUsize,
+        entered: AtomicUsize,
+        barrier: Barrier,
+    }
+
+    impl StoreBackend for BlockingStoreBackend {
+        fn store(
+            &self,
+            name: &[u8],
+            data: crypto::CipherText,
+            done_callback: Box<dyn FnOnce() + Send>,
+        ) -> Result<(), String> {
+            let cur = self.in_store.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_concurrent.fetch_max(cur, Ordering::SeqCst);
+            // Synchronize the exact first two concurrent blob stores to prove they overlap.
+            if self.entered.fetch_add(1, Ordering::SeqCst) < 2 {
+                self.barrier.wait();
+            }
+            let res = self.inner.store(name, data, done_callback);
+            self.in_store.fetch_sub(1, Ordering::SeqCst);
+            res
+        }
+        fn retrieve(&self, name: &[u8]) -> Result<Option<Vec<u8>>, String> {
+            self.inner.retrieve(name)
+        }
+        fn delete(&self, name: &[u8]) -> Result<(), String> {
+            self.inner.delete(name)
+        }
+        fn list(&self) -> Result<Vec<Box<[u8]>>, String> {
+            self.inner.list()
+        }
+        fn flush(&self) -> Result<(), String> {
+            self.inner.flush()
+        }
+    }
+
+    let backend = Arc::new(BlockingStoreBackend {
+        inner: MemoryBackend::new(),
+        in_store: AtomicUsize::new(0),
+        max_concurrent: AtomicUsize::new(0),
+        entered: AtomicUsize::new(0),
+        barrier: Barrier::new(2),
+    });
+    let keys = Arc::new(crypto::keys::Keeper::new_for_testing());
+    let db = Arc::new(db::Index::new_for_testing());
+    let blob_index = Arc::new(BlobIndex::new(keys.clone(), db).unwrap());
+    // Small blob size (4 KiB) + Compression::None so every 2.5 KiB chunk fills a blob.
+    let bs = Arc::new(BlobStore::new(
+        keys.clone(),
+        blob_index,
+        backend.clone(),
+        4096,
+    ));
+    bs.set_compression(Compression::None);
+
+    let callbacks_ran = Arc::new(AtomicUsize::new(0));
+    let mut handles = Vec::new();
+    for t in 0..4usize {
+        let bs = bs.clone();
+        let keys = keys.clone();
+        let callbacks_ran = callbacks_ran.clone();
+        handles.push(std::thread::spawn(move || {
+            let mut refs = Vec::new();
+            for i in 0..3usize {
+                let chunk = vec![(t * 16 + i + 1) as u8; 2500];
+                let h = hash::Hash::new(&keys, NodeType::Leaf, LeafType::FileChunk, &chunk);
+                let cb_count = callbacks_ran.clone();
+                let href = bs.store(
+                    &chunk,
+                    h,
+                    NodeType::Leaf,
+                    LeafType::FileChunk,
+                    None,
+                    Box::new(move || {
+                        cb_count.fetch_add(1, Ordering::SeqCst);
+                    }),
+                );
+                refs.push((href, chunk));
+            }
+            refs
+        }));
+    }
+
+    let mut all_refs = Vec::new();
+    for h in handles {
+        all_refs.extend(h.join().unwrap());
+    }
+    bs.flush();
+
+    assert!(
+        backend.max_concurrent.load(Ordering::SeqCst) >= 2,
+        "expected >= 2 overlapping backend.store() calls"
+    );
+    assert_eq!(callbacks_ran.load(Ordering::SeqCst), all_refs.len());
+    for (href, expected) in &all_refs {
+        assert_eq!(bs.retrieve(href).unwrap().unwrap(), *expected);
+    }
+}

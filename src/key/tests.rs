@@ -394,3 +394,45 @@ fn mid_read_io_error_and_failed_open_do_not_commit_corrupt_entries() {
         entries.iter().map(|(e, _, _)| &e.info.name).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn small_file_fast_path_and_fastcdc_boundary_roundtrip() {
+    let backend = Arc::new(MemoryBackend::new());
+    let ks = Store::new_for_testing(backend, 1024 * 1024).unwrap();
+
+    let sizes = [
+        0usize,
+        1,
+        FASTCDC_MIN_CHUNK_SIZE - 1,
+        FASTCDC_MIN_CHUNK_SIZE,
+        FASTCDC_MIN_CHUNK_SIZE + 1,
+        100_000,
+    ];
+    let mut expected = std::collections::HashMap::new();
+    for &sz in &sizes {
+        let name = format!("f_{}.bin", sz);
+        let data: Vec<u8> = (0..sz)
+            .map(|i| ((i.wrapping_mul(31) ^ (sz >> 3)) & 0xff) as u8)
+            .collect();
+        let entry = Entry::new(None, name.clone().into(), Data::FilePlaceholder, None);
+        let cloned = data.clone();
+        ks.insert(entry, Some(move || Some(io::Cursor::new(cloned))))
+            .unwrap();
+        expected.insert(name, data);
+    }
+    ks.flush().unwrap();
+
+    let listed = ks.list_dir(None).unwrap();
+    assert_eq!(listed.len(), sizes.len());
+    for (entry, _href, reader_init) in listed {
+        let name = entry.info.name.utf8().to_string();
+        let mut got = Vec::new();
+        if let Some(it) = reader_init.unwrap().init().unwrap() {
+            for chunk in it {
+                got.extend_from_slice(&chunk.unwrap());
+            }
+        }
+        assert_eq!(got, expected[&name], "roundtrip mismatch for {}", name);
+        assert_eq!(entry.info.byte_length, Some(expected[&name].len() as u64));
+    }
+}

@@ -25,7 +25,8 @@ use crate::cbor_util;
 use std::borrow::Cow;
 use std::mem;
 use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use crate::tags;
 
@@ -67,7 +68,76 @@ impl From<String> for BlobError {
     }
 }
 
-pub struct BlobStore<B>(Arc<Mutex<StoreInner<B>>>);
+fn compression_to_raw(c: Compression) -> i32 {
+    match c {
+        Compression::None => 0,
+        Compression::Zstd(level) => level,
+    }
+}
+
+fn raw_to_compression(raw: i32) -> Compression {
+    if raw <= 0 {
+        Compression::None
+    } else {
+        Compression::Zstd(raw)
+    }
+}
+
+struct FlushTracker {
+    in_flight: Mutex<usize>,
+    done: Condvar,
+}
+
+impl FlushTracker {
+    fn new() -> Self {
+        FlushTracker {
+            in_flight: Mutex::new(0),
+            done: Condvar::new(),
+        }
+    }
+
+    fn begin(&self) -> InFlightGuard<'_> {
+        let mut count = self.in_flight.lock().expect("FlushTracker poisoned");
+        *count += 1;
+        InFlightGuard { tracker: self }
+    }
+
+    fn wait_idle(&self) {
+        let mut count = self.in_flight.lock().expect("FlushTracker poisoned");
+        while *count > 0 {
+            count = self.done.wait(count).expect("FlushTracker poisoned");
+        }
+    }
+}
+
+struct InFlightGuard<'a> {
+    tracker: &'a FlushTracker,
+}
+
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        let mut count = self.tracker.in_flight.lock().expect("FlushTracker poisoned");
+        *count -= 1;
+        if *count == 0 {
+            self.tracker.done.notify_all();
+        }
+    }
+}
+
+struct PreparedFlush {
+    blob: Blob,
+    desc: BlobDesc,
+    callbacks: Vec<Box<dyn FnOnce() + Send>>,
+}
+
+pub struct BlobStore<B> {
+    inner: Arc<Mutex<StoreInner<B>>>,
+    backend: Arc<B>,
+    blob_index: Arc<BlobIndex>,
+    flushes: FlushTracker,
+    compression: AtomicI32,
+    max_blob_size: usize,
+}
 
 pub struct StoreInner<B> {
     keys: Arc<crypto::keys::Keeper>,
@@ -76,7 +146,6 @@ pub struct StoreInner<B> {
     blob_desc: BlobDesc,
     blob_refs: Vec<Box<dyn FnOnce() + Send>>,
     blob: Blob,
-    compression: Compression,
     read_cache: LruCache<Vec<u8>, BlobReader>,
 }
 
@@ -101,7 +170,6 @@ impl<B: StoreBackend> StoreInner<B> {
             blob_desc: Default::default(),
             blob_refs: Vec::new(),
             blob: Blob::new(keys, max_blob_size),
-            compression: Compression::default(),
             read_cache: LruCache::new(NonZeroUsize::new(64).unwrap()),
         };
         bs.reserve_new_blob();
@@ -112,78 +180,18 @@ impl<B: StoreBackend> StoreInner<B> {
         mem::replace(&mut self.blob_desc, self.blob_index.reserve())
     }
 
-    fn flush(&mut self) {
-        let ct = match self.blob.finish(&self.blob_desc.name[..]) {
-            None => return,
-            Some(ct) => ct,
-        };
-
-        // Replace blob id
-        let old_blob_desc = self.reserve_new_blob();
-
-        let callbacks = mem::take(&mut self.blob_refs);
-        let done_callback = Box::new(move || {
-            callbacks.into_iter().for_each(|c| c());
-        });
-
-        self.blob_index.in_air(&old_blob_desc);
-        self.backend
-            .store(&old_blob_desc.name[..], ct, done_callback)
-            .expect("Store operation failed");
-
-        self.blob_index.commit_done(&old_blob_desc);
-    }
-
-    fn store(
-        &mut self,
-        chunk: &[u8],
-        hash: Hash,
-        node: NodeType,
-        leaf: LeafType,
-        info: Option<&key::Info>,
-        callback: Box<dyn FnOnce() + Send>,
-    ) -> HashRef {
-        let mut href = HashRef {
-            hash,
-            node,
-            leaf,
-            info: info.cloned(),
-            persistent_ref: ChunkRef {
-                blob_id: Some(0),
-                blob_name: vec![0],
-                packing: None,
-                // Updated by try_append.
-                offset: 0,
-                length: 0,
-                key: None,
-            },
-        };
-
-        if chunk.is_empty() {
-            // We are not going to store an empty chunk, so commit it ASAP.
-            thread::spawn(callback);
-        } else {
-            let (payload, packing) =
-                blob::compress_chunk(chunk, self.compression).expect("chunk compression failed");
-            href.persistent_ref.packing = packing;
-            href.persistent_ref.blob_id = Some(self.blob_desc.id);
-            href.persistent_ref.blob_name = self.blob_desc.name.clone();
-            if let Err(()) = self.blob.try_append(&payload, &mut href) {
-                self.flush();
-                href.persistent_ref.blob_id = Some(self.blob_desc.id);
-                href.persistent_ref.blob_name = self.blob_desc.name.clone();
-
-                self.blob.try_append(&payload, &mut href).unwrap();
-            }
-
-            // Queue the callback; we will trigger it when the blob has been pushed.
-            self.blob_refs.push(callback);
+    fn take_for_flush(&mut self, max_blob_size: usize) -> Option<PreparedFlush> {
+        if self.blob.upperbound_len() == 0 {
+            return None;
         }
-
-        // Info is internal to the blob only.
-        href.info = None;
-        // To avoid unnecessary blocking, we reply with the ID *before* possibly flushing.
-        href
+        let blob = mem::replace(&mut self.blob, Blob::new(self.keys.clone(), max_blob_size));
+        let desc = self.reserve_new_blob();
+        let callbacks = mem::take(&mut self.blob_refs);
+        Some(PreparedFlush {
+            blob,
+            desc,
+            callbacks,
+        })
     }
 
     fn retrieve(&mut self, href: &HashRef) -> Result<Option<Vec<u8>>, BlobError> {
@@ -278,16 +286,42 @@ impl<B: StoreBackend> BlobStore<B> {
         backend: Arc<B>,
         max_blob_size: usize,
     ) -> BlobStore<B> {
-        BlobStore(Arc::new(Mutex::new(StoreInner::new(
-            keys,
-            index,
+        BlobStore {
+            inner: Arc::new(Mutex::new(StoreInner::new(
+                keys,
+                index.clone(),
+                backend.clone(),
+                max_blob_size,
+            ))),
             backend,
+            blob_index: index,
+            flushes: FlushTracker::new(),
+            compression: AtomicI32::new(compression_to_raw(Compression::default())),
             max_blob_size,
-        ))))
+        }
     }
 
     fn lock(&self) -> MutexGuard<'_, StoreInner<B>> {
-        self.0.lock().expect("Blob store was poisoned")
+        self.inner.lock().expect("Blob store was poisoned")
+    }
+
+    /// Finalize (pad, seal footer, MAC) and durably store a detached blob outside
+    /// the packing mutex so other worker threads can pack and flush concurrently.
+    fn finish_and_store(&self, mut prepared: PreparedFlush, _guard: InFlightGuard<'_>) {
+        let ct = match prepared.blob.finish(&prepared.desc.name[..]) {
+            None => return,
+            Some(ct) => ct,
+        };
+        let callbacks = prepared.callbacks;
+        let done_callback = Box::new(move || {
+            callbacks.into_iter().for_each(|c| c());
+        });
+
+        self.blob_index.in_air(&prepared.desc);
+        self.backend
+            .store(&prepared.desc.name[..], ct, done_callback)
+            .expect("Store operation failed");
+        self.blob_index.commit_done(&prepared.desc);
     }
 
     /// Store a new data chunk into the current blob. The callback is triggered after the blob
@@ -302,22 +336,89 @@ impl<B: StoreBackend> BlobStore<B> {
         info: Option<&key::Info>,
         callback: Box<dyn FnOnce() + Send>,
     ) -> HashRef {
-        let mut guard = self.lock();
-        guard.store(chunk, hash, node, leaf, info, callback)
+        if chunk.is_empty() {
+            // We are not going to store an empty chunk, so commit it ASAP.
+            thread::spawn(callback);
+            return HashRef {
+                hash,
+                node,
+                leaf,
+                info: None,
+                persistent_ref: ChunkRef {
+                    blob_id: Some(0),
+                    blob_name: vec![0],
+                    packing: None,
+                    offset: 0,
+                    length: 0,
+                    key: None,
+                },
+            };
+        }
+
+        // Compress on the calling worker thread before acquiring the blob-packing mutex
+        // so parallel workers do not serialize on zstd compression.
+        let (payload, packing) =
+            blob::compress_chunk(chunk, self.compression()).expect("chunk compression failed");
+
+        let mut href = HashRef {
+            hash,
+            node,
+            leaf,
+            info: info.cloned(),
+            persistent_ref: ChunkRef {
+                blob_id: Some(0),
+                blob_name: vec![0],
+                packing,
+                // Updated by try_append.
+                offset: 0,
+                length: 0,
+                key: None,
+            },
+        };
+
+        loop {
+            let pending_flush = {
+                let mut guard = self.lock();
+                href.persistent_ref.blob_id = Some(guard.blob_desc.id);
+                href.persistent_ref.blob_name = guard.blob_desc.name.clone();
+                match guard.blob.try_append(&payload, &mut href) {
+                    Ok(()) => {
+                        // Queue the callback; we will trigger it when the blob has been pushed.
+                        guard.blob_refs.push(callback);
+                        href.info = None;
+                        return href;
+                    }
+                    Err(()) => {
+                        // Current blob is full: detach it and register in-flight BEFORE
+                        // dropping the lock so concurrent `flush()` waits for it.
+                        let prepared = guard
+                            .take_for_flush(self.max_blob_size)
+                            .expect("full blob must be non-empty");
+                        let in_flight = self.flushes.begin();
+                        (prepared, in_flight)
+                    }
+                }
+            };
+
+            self.finish_and_store(pending_flush.0, pending_flush.1);
+        }
     }
 
     /// Retrieve the data chunk identified by `ChunkRef`.
     pub fn retrieve(&self, href: &HashRef) -> Result<Option<Vec<u8>>, BlobError> {
+        self.flushes.wait_idle();
         self.lock().retrieve(href)
     }
 
     /// Fetch a blob and recover the HashRefs for its contents.
     pub fn retrieve_refs(&self, blob: BlobDesc) -> Result<Option<Vec<HashRef>>, BlobError> {
+        self.flushes.wait_idle();
         self.lock().retrieve_refs(blob)
     }
 
     /// Reinstall a blob recovered from external storage.
     pub fn recover(&self) -> Result<(), String> {
+        self.flushes.wait_idle();
         self.lock().recover()
     }
 
@@ -330,6 +431,7 @@ impl<B: StoreBackend> BlobStore<B> {
     }
 
     pub fn delete_by_tag(&self, tag: tags::Tag) -> Result<(), String> {
+        self.flushes.wait_idle();
         self.lock().delete_by_tag(tag)
     }
 
@@ -348,23 +450,33 @@ impl<B: StoreBackend> BlobStore<B> {
         }
     }
 
-    /// Flush the current blob, independent of its size.
+    /// Flush the current blob, independent of its size, and wait until all
+    /// in-flight blob writes have durably completed.
     #[cfg_attr(feature = "flame_it", flame)]
     pub fn flush(&self) {
-        let mut guard = self.lock();
-        guard.flush();
-        guard.blob_index.flush();
+        let pending = {
+            let mut guard = self.lock();
+            guard
+                .take_for_flush(self.max_blob_size)
+                .map(|prepared| (prepared, self.flushes.begin()))
+        };
+        if let Some((prepared, in_flight)) = pending {
+            self.finish_and_store(prepared, in_flight);
+        }
+        self.flushes.wait_idle();
+        self.blob_index.flush();
     }
 
     pub fn max_blob_size(&self) -> usize {
-        self.lock().blob.max_len()
+        self.max_blob_size
     }
 
     pub fn compression(&self) -> Compression {
-        self.lock().compression
+        raw_to_compression(self.compression.load(Ordering::Relaxed))
     }
 
     pub fn set_compression(&self, compression: Compression) {
-        self.lock().compression = compression;
+        self.compression
+            .store(compression_to_raw(compression), Ordering::Relaxed);
     }
 }
