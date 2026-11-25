@@ -17,7 +17,6 @@ mod file_iterator;
 mod listdir;
 mod ordered_collection;
 mod periodic_timer;
-mod process;
 mod sync_pool;
 mod unique_priority_queue;
 
@@ -25,7 +24,6 @@ pub use self::counter::Counter;
 pub use self::file_iterator::FileIterator;
 pub use self::listdir::{HasPath, PathHandler};
 pub use self::periodic_timer::PeriodicTimer;
-pub use self::process::{MsgHandler, Process};
 pub use self::sync_pool::{SyncPool, SyncPoolGuard};
 pub use self::unique_priority_queue::UniquePriorityQueue;
 

@@ -32,7 +32,6 @@ use std::path::PathBuf;
 use std::str;
 use std::sync::{mpsc, Arc};
 use crate::tags;
-use crate::util::Process;
 use std::convert::Infallible;
 
 mod family;
@@ -485,12 +484,12 @@ impl<B: StoreBackend> HatRc<B> {
                 self.backend.clone(),
                 self.blob_max_size,
             ));
-            kss.push(Process::new(key::Store::new(
+            kss.push(key::Store::new(
                 ki_p.clone(),
                 self.hash_index.clone(),
                 bs,
                 self.keys.clone(),
-            )));
+            ));
         }
 
         let ks = key::Store::new(
@@ -499,12 +498,12 @@ impl<B: StoreBackend> HatRc<B> {
             self.blob_store.clone(),
             self.keys.clone(),
         );
-        kss.push(Process::new(ks.clone()));
+        kss.push(ks.clone());
 
         let family = Family {
             name: name.clone(),
             key_store: ks,
-            key_store_process: kss,
+            key_stores: kss,
         };
         self.families.push(family.clone());
 

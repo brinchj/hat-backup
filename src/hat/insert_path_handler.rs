@@ -66,11 +66,11 @@ impl FileEntry {
 pub struct InsertPathHandler<B: StoreBackend> {
     count: atomic::AtomicIsize,
     last_print: Mutex<Instant>,
-    key_store: SyncPool<key::StoreProcess<FileIterator, B>>,
+    key_store: SyncPool<key::Store<B>>,
 }
 
 impl<B: StoreBackend> InsertPathHandler<B> {
-    pub fn new(key_stores: Vec<key::StoreProcess<FileIterator, B>>) -> InsertPathHandler<B> {
+    pub fn new(key_stores: Vec<key::Store<B>>) -> InsertPathHandler<B> {
         InsertPathHandler {
             count: atomic::AtomicIsize::new(0),
             last_print: Mutex::new(Instant::now()),
@@ -111,33 +111,28 @@ impl<B: StoreBackend> PathHandler<Option<u64>> for InsertPathHandler<B> {
                 let full_path = file_entry.full_path.clone();
 
                 let ks = self.key_store.lock().unwrap();
-                match ks.send_reply(key::Msg::Insert(
-                    file_entry.key_entry,
-                    if is_file {
-                        Some(Box::new(move || match FileIterator::new(&full_path) {
+                let res = if is_file {
+                    ks.insert(
+                        file_entry.key_entry,
+                        Some(move || match FileIterator::new(&full_path) {
                             Err(e) => {
                                 println!("Skipping '{}': {}", local_root.display(), e);
                                 None
                             }
                             Ok(it) => Some(it),
-                        }))
-                    } else {
-                        None
-                    },
-                )) {
-                    Ok(key::Reply::Id(id)) => {
+                        }),
+                    )
+                } else {
+                    ks.insert_entry(file_entry.key_entry)
+                };
+                match res {
+                    Ok(id) => {
                         if is_directory {
                             return Some(Some(id));
                         }
                     }
                     Err(e) => {
                         warn!("Skipping '{}': error from key store: {:?}", path.display(), e);
-                    }
-                    _ => {
-                        warn!(
-                            "Skipping '{}': unexpected reply from key store",
-                            path.display()
-                        );
                     }
                 }
             }

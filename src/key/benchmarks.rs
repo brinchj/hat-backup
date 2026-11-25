@@ -17,13 +17,11 @@ use crate::key::tests::*;
 use crate::key::*;
 use std::sync::Arc;
 use test::Bencher;
-use crate::util::Process;
 
 #[bench]
 fn insert_1_key_x_128000_zeros(bench: &mut Bencher) {
     let backend = Arc::new(DevNullBackend);
-    let ks_p: StoreProcess<EntryStub, _> =
-        Process::new(Store::new_for_testing(backend, 4 * 1024 * 1024).unwrap());
+    let ks = Store::new_for_testing(backend, 4 * 1024 * 1024).unwrap();
 
     let bytes = vec![0u8; 128 * 1024];
 
@@ -33,24 +31,21 @@ fn insert_1_key_x_128000_zeros(bench: &mut Bencher) {
 
         let entry = EntryStub {
             data: Some(vec![bytes.clone()]),
-            key_entry: Entry::new(None, format!("{}", i), Data::FilePlaceholder, None),
+            key_entry: Entry::new(None, format!("{}", i).into(), Data::FilePlaceholder, None),
         };
 
-        ks_p.send_reply(Msg::Insert(
-            entry.key_entry.clone(),
-            Some(Box::new(move || Some(entry))),
-        )).unwrap();
+        ks.insert(entry.key_entry.clone(), Some(move || Some(entry)))
+            .unwrap();
     });
 
-    ks_p.send_reply(Msg::Flush).unwrap();
+    ks.flush().unwrap();
     bench.bytes = 128 * 1024;
 }
 
 #[bench]
 fn insert_1_key_x_128000_unique(bench: &mut Bencher) {
     let backend = Arc::new(DevNullBackend);
-    let ks_p: StoreProcess<EntryStub, _> =
-        Process::new(Store::new_for_testing(backend, 4 * 1024 * 1024).unwrap());
+    let ks = Store::new_for_testing(backend, 4 * 1024 * 1024).unwrap();
 
     let bytes = vec![0u8; 128 * 1024];
 
@@ -65,52 +60,42 @@ fn insert_1_key_x_128000_unique(bench: &mut Bencher) {
 
         let entry = EntryStub {
             data: Some(vec![my_bytes]),
-            key_entry: Entry::new(None, format!("{}", i), Data::FilePlaceholder, None),
+            key_entry: Entry::new(None, format!("{}", i).into(), Data::FilePlaceholder, None),
         };
 
-        ks_p.send_reply(Msg::Insert(
-            entry.key_entry.clone(),
-            Some(Box::new(move || Some(entry))),
-        )).unwrap();
+        ks.insert(entry.key_entry.clone(), Some(move || Some(entry)))
+            .unwrap();
     });
 
-    ks_p.send_reply(Msg::Flush).unwrap();
+    ks.flush().unwrap();
     bench.bytes = 128 * 1024;
 }
 
 #[bench]
 fn insert_1_key_x_16_x_128000_zeros(bench: &mut Bencher) {
     let backend = Arc::new(DevNullBackend);
-    let ks_p: StoreProcess<EntryStub, _> =
-        Process::new(Store::new_for_testing(backend, 4 * 1024 * 1024).unwrap());
+    let ks = Store::new_for_testing(backend, 4 * 1024 * 1024).unwrap();
 
     bench.iter(|| {
         let bytes = vec![0u8; 128 * 1024];
 
         let entry = EntryStub {
             data: Some(vec![bytes; 16]),
-            key_entry: Entry::new(None, "abc".to_string(), Data::FilePlaceholder, None),
+            key_entry: Entry::new(None, "abc".to_string().into(), Data::FilePlaceholder, None),
         };
-        ks_p.send_reply(Msg::Insert(
-            entry.key_entry.clone(),
-            Some(Box::new(move || Some(entry))),
-        )).unwrap();
-
-        match ks_p.send_reply(Msg::Flush).unwrap() {
-            Reply::FlushOk => (),
-            _ => panic!("Unexpected result from key store."),
-        }
+        ks.insert(entry.key_entry.clone(), Some(move || Some(entry)))
+            .unwrap();
+        ks.flush().unwrap();
     });
 
-    ks_p.send_reply(Msg::Flush).unwrap();
+    ks.flush().unwrap();
     bench.bytes = 16 * (128 * 1024);
 }
 
 #[bench]
 fn insert_1_key_x_16_x_128000_unique(bench: &mut Bencher) {
     let backend = Arc::new(DevNullBackend);
-    let ks_p: StoreProcess<EntryStub, _> =
-        Process::new(Store::new_for_testing(backend, 4 * 1024 * 1024).unwrap());
+    let ks = Store::new_for_testing(backend, 4 * 1024 * 1024).unwrap();
 
     let bytes = vec![0u8; 128 * 1024];
     let mut i = 0i32;
@@ -132,18 +117,12 @@ fn insert_1_key_x_16_x_128000_unique(bench: &mut Bencher) {
 
         let entry = EntryStub {
             data: Some(chunks),
-            key_entry: Entry::new(None, "abc".to_string(), Data::FilePlaceholder, None),
+            key_entry: Entry::new(None, "abc".to_string().into(), Data::FilePlaceholder, None),
         };
 
-        ks_p.send_reply(Msg::Insert(
-            entry.key_entry.clone(),
-            Some(Box::new(move || Some(entry))),
-        )).unwrap();
-
-        match ks_p.send_reply(Msg::Flush).unwrap() {
-            Reply::FlushOk => (),
-            _ => panic!("Unexpected result from key store."),
-        }
+        ks.insert(entry.key_entry.clone(), Some(move || Some(entry)))
+            .unwrap();
+        ks.flush().unwrap();
     });
 
     bench.bytes = 16 * (128 * 1024);
@@ -152,26 +131,23 @@ fn insert_1_key_x_16_x_128000_unique(bench: &mut Bencher) {
 #[bench]
 fn insert_1_key_unchanged_empty(bench: &mut Bencher) {
     let backend = Arc::new(DevNullBackend);
-    let ks_p: StoreProcess<EntryStub, _> =
-        Process::new(Store::new_for_testing(backend, 4 * 1024 * 1024).unwrap());
+    let ks = Store::new_for_testing(backend, 4 * 1024 * 1024).unwrap();
 
     bench.iter(|| {
         let entry = EntryStub {
             data: None,
-            key_entry: Entry::new(None, "abc".to_string(), Data::FilePlaceholder, None),
+            key_entry: Entry::new(None, "abc".to_string().into(), Data::FilePlaceholder, None),
         };
-        ks_p.send_reply(Msg::Insert(entry.key_entry.clone(), None))
-            .unwrap();
+        ks.insert_entry(entry.key_entry.clone()).unwrap();
     });
 
-    ks_p.send_reply(Msg::Flush).unwrap();
+    ks.flush().unwrap();
 }
 
 #[bench]
 fn insert_1_key_updated_empty(bench: &mut Bencher) {
     let backend = Arc::new(DevNullBackend);
-    let ks_p: StoreProcess<EntryStub, _> =
-        Process::new(Store::new_for_testing(backend, 4 * 1024 * 1024).unwrap());
+    let ks = Store::new_for_testing(backend, 4 * 1024 * 1024).unwrap();
 
     let mut i = 0;
     bench.iter(|| {
@@ -183,7 +159,7 @@ fn insert_1_key_updated_empty(bench: &mut Bencher) {
                 node_id: None,
                 data: Data::DirPlaceholder,
                 info: Info {
-                    name: "abc".to_string(),
+                    name: "abc".to_string().into(),
                     created_ts_secs: Some(i),
                     modified_ts_secs: Some(i),
                     accessed_ts_secs: Some(i),
@@ -200,29 +176,26 @@ fn insert_1_key_updated_empty(bench: &mut Bencher) {
                 },
             },
         };
-        ks_p.send_reply(Msg::Insert(entry.key_entry.clone(), None))
-            .unwrap();
+        ks.insert_entry(entry.key_entry.clone()).unwrap();
     });
 
-    ks_p.send_reply(Msg::Flush).unwrap();
+    ks.flush().unwrap();
 }
 
 #[bench]
 fn insert_1_key_unique_empty(bench: &mut Bencher) {
     let backend = Arc::new(DevNullBackend);
-    let ks_p: StoreProcess<EntryStub, _> =
-        Process::new(Store::new_for_testing(backend, 4 * 1024 * 1024).unwrap());
+    let ks = Store::new_for_testing(backend, 4 * 1024 * 1024).unwrap();
 
     let mut i = 0;
     bench.iter(|| {
         i += 1;
         let entry = EntryStub {
             data: None,
-            key_entry: Entry::new(None, format!("{}", i), Data::DirPlaceholder, None),
+            key_entry: Entry::new(None, format!("{}", i).into(), Data::DirPlaceholder, None),
         };
-        ks_p.send_reply(Msg::Insert(entry.key_entry.clone(), None))
-            .unwrap();
+        ks.insert_entry(entry.key_entry.clone()).unwrap();
     });
 
-    ks_p.send_reply(Msg::Flush).unwrap();
+    ks.flush().unwrap();
 }

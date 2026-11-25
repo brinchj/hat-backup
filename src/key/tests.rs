@@ -21,7 +21,6 @@ use rand::thread_rng;
 use rand::Rng;
 use std::io;
 use std::sync::Arc;
-use crate::util::Process;
 
 fn random_string() -> String {
     Alphanumeric.sample_string(&mut thread_rng(), 32)
@@ -155,37 +154,25 @@ fn rng_filesystem(size: usize) -> FileSystem {
     }
 }
 
-fn insert_and_update_fs<B: StoreBackend>(fs: &mut FileSystem, ks_p: &StoreProcess<EntryStub, B>) {
+fn insert_and_update_fs<B: StoreBackend>(fs: &mut FileSystem, ks: &Store<B>) {
     let local_file = fs.file.clone();
-    fs.file.key_entry.node_id = match ks_p
-        .send_reply(Msg::Insert(
-            fs.file.key_entry.clone(),
-            if fs.file.data.is_some() {
-                Some(Box::new(move || Some(local_file)))
-            } else {
-                None
-            },
-        ))
-        .unwrap()
-    {
-        Reply::Id(id) => Some(id),
-        _ => panic!("unexpected reply from key store"),
-    };
+    fs.file.key_entry.node_id = Some(
+        if fs.file.data.is_some() {
+            ks.insert(fs.file.key_entry.clone(), Some(move || Some(local_file)))
+        } else {
+            ks.insert_entry(fs.file.key_entry.clone())
+        }
+        .unwrap(),
+    );
 
     for f in fs.filelist.iter_mut() {
         f.file.key_entry.parent_id = fs.file.key_entry.node_id;
-        insert_and_update_fs(f, ks_p);
+        insert_and_update_fs(f, ks);
     }
 }
 
-fn verify_filesystem<B: StoreBackend>(fs: &FileSystem, ks_p: &StoreProcess<EntryStub, B>) -> usize {
-    let listing = match ks_p
-        .send_reply(Msg::ListDir(fs.file.key_entry.node_id))
-        .unwrap()
-    {
-        Reply::ListResult(ls) => ls,
-        _ => panic!("Unexpected result from key store."),
-    };
+fn verify_filesystem<B: StoreBackend>(fs: &FileSystem, ks: &Store<B>) -> usize {
+    let listing = ks.list_dir(fs.file.key_entry.node_id).unwrap();
 
     assert_eq!(fs.filelist.len(), listing.len());
 
@@ -241,7 +228,7 @@ fn verify_filesystem<B: StoreBackend>(fs: &FileSystem, ks_p: &StoreProcess<Entry
 
     let mut count = fs.filelist.len();
     for dir in fs.filelist.iter() {
-        count += verify_filesystem(dir, ks_p);
+        count += verify_filesystem(dir, ks);
     }
 
     count
@@ -251,22 +238,15 @@ fn verify_filesystem<B: StoreBackend>(fs: &FileSystem, ks_p: &StoreProcess<Entry
 fn identity() {
     fn prop(size: u8) -> bool {
         let backend = Arc::new(MemoryBackend::new());
-        let ks_p = Process::new(Store::new_for_testing(backend, 4096).unwrap());
+        let ks = Store::new_for_testing(backend, 4096).unwrap();
 
         let mut fs = rng_filesystem(size as usize);
-        insert_and_update_fs(&mut fs, &ks_p);
+        insert_and_update_fs(&mut fs, &ks);
         let fs = fs;
-        match ks_p.send_reply(Msg::CommitReservedNodes(None)).unwrap() {
-            Reply::Ok => (),
-            _ => panic!("Unexpected result from key store."),
-        }
+        ks.commit_reserved_nodes(None).unwrap();
+        ks.flush().unwrap();
 
-        match ks_p.send_reply(Msg::Flush).unwrap() {
-            Reply::FlushOk => (),
-            _ => panic!("Unexpected result from key store."),
-        }
-
-        verify_filesystem(&fs, &ks_p);
+        verify_filesystem(&fs, &ks);
         true
     }
     quickcheck::quickcheck(prop as fn(u8) -> bool);
@@ -386,16 +366,15 @@ fn mid_read_io_error_and_failed_open_do_not_commit_corrupt_entries() {
     }
 
     let backend = Arc::new(MemoryBackend::new());
-    let ks_p: StoreProcess<FailingReader, MemoryBackend> =
-        Process::new(Store::new_for_testing(backend, 4096).unwrap());
+    let ks = Store::new_for_testing(backend, 4096).unwrap();
 
     // 1. Mid-read I/O error must return Err and NOT commit a truncated file.
     let eio_entry = Entry::new(None, "eio.bin".to_string().into(), Data::FilePlaceholder, None);
-    let res = ks_p.send_reply(Msg::Insert(
+    let res = ks.insert(
         eio_entry,
-        Some(Box::new(|| Some(FailingReader { yielded_once: false }))),
-    ));
-    assert!(res.is_err(), "mid-read I/O error must fail Msg::Insert");
+        Some(|| Some(FailingReader { yielded_once: false })),
+    );
+    assert!(res.is_err(), "mid-read I/O error must fail insert");
 
     // 2. Failed file open (Some closure returning None) must return Err, not forge a directory.
     let open_fail_entry = Entry::new(
@@ -404,20 +383,16 @@ fn mid_read_io_error_and_failed_open_do_not_commit_corrupt_entries() {
         Data::FilePlaceholder,
         None,
     );
-    let res = ks_p.send_reply(Msg::Insert(open_fail_entry, Some(Box::new(|| None))));
-    assert!(res.is_err(), "failed file open must fail Msg::Insert");
+    let res = ks.insert::<FailingReader, _>(open_fail_entry, Some(|| None));
+    assert!(res.is_err(), "failed file open must fail insert");
 
-    ks_p.send_reply(Msg::CommitReservedNodes(None)).unwrap();
-    ks_p.send_reply(Msg::Flush).unwrap();
+    ks.commit_reserved_nodes(None).unwrap();
+    ks.flush().unwrap();
 
-    match ks_p.send_reply(Msg::ListDir(None)).unwrap() {
-        Reply::ListResult(entries) => {
-            assert!(
-                entries.is_empty(),
-                "failed inserts must not leave truncated files or fake dirs in index: {:?}",
-                entries.iter().map(|(e, _, _)| &e.info.name).collect::<Vec<_>>()
-            );
-        }
-        _ => panic!("unexpected reply from key store"),
-    }
+    let entries = ks.list_dir(None).unwrap();
+    assert!(
+        entries.is_empty(),
+        "failed inserts must not leave truncated files or fake dirs in index: {:?}",
+        entries.iter().map(|(e, _, _)| &e.info.name).collect::<Vec<_>>()
+    );
 }

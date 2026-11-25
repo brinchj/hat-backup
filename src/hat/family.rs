@@ -204,21 +204,21 @@ fn parse_dir_data(chunk: &[u8], out: &mut Vec<walker::FileEntry>) -> Result<(), 
 pub struct Family<B> {
     pub name: String,
     pub key_store: key::Store<B>,
-    pub key_store_process: Vec<key::StoreProcess<FileIterator, B>>,
+    pub key_stores: Vec<key::Store<B>>,
 }
 impl<B: StoreBackend> Clone for Family<B> {
     fn clone(&self) -> Family<B> {
         Family {
             name: self.name.clone(),
             key_store: self.key_store.clone(),
-            key_store_process: self.key_store_process.clone(),
+            key_stores: self.key_stores.clone(),
         }
     }
 }
 
 impl<B: StoreBackend> Family<B> {
     pub fn snapshot_dir(&self, dir: PathBuf) -> Result<(), HatError> {
-        let handler = InsertPathHandler::new(self.key_store_process.clone());
+        let handler = InsertPathHandler::new(self.key_stores.clone());
 
         let dir = fs::canonicalize(dir)?;
         info!("Committing: {}", dir.display());
@@ -227,30 +227,17 @@ impl<B: StoreBackend> Family<B> {
         // Snapshot the directory *contents* at the family key-tree root.
         // Do not insert absolute path prefixes (/private/var/folders/...), which
         // inflated every commit/checkout with junk parent directories.
-        match self.key_store_process[0].send_reply(key::Msg::<FileIterator>::ResetEntryTags)? {
-            key::Reply::Ok => {}
-            _ => return Err(From::from("Unexpected reply from keystore")),
-        }
+        self.key_store.reset_entry_tags()?;
 
         if dir.is_dir() {
             handler.recurse(dir, None);
-
-            match self.key_store_process[0].send_reply(
-                key::Msg::<FileIterator>::CommitReservedNodes(Some(None)),
-            )? {
-                key::Reply::Ok => Ok(()),
-                _ => Err(From::from("Unexpected reply from keystore")),
-            }
         } else {
             // Single file: insert under the key-tree root (returns None = non-dir).
             let _ = handler.handle_path(&None, &dir);
-            match self.key_store_process[0]
-                .send_reply(key::Msg::<FileIterator>::CommitReservedNodes(Some(None)))?
-            {
-                key::Reply::Ok => Ok(()),
-                _ => Err(From::from("Unexpected reply from keystore")),
-            }
         }
+
+        self.key_store.commit_reserved_nodes(Some(None))?;
+        Ok(())
     }
 
     pub fn snapshot_direct(
@@ -260,11 +247,7 @@ impl<B: StoreBackend> Family<B> {
         contents: Option<FileIterator>,
     ) -> Result<u64, HatError> {
         let id = self.snapshot_direct_no_commit(file, is_directory, contents)?;
-        let ks = self.key_store_process.iter().last().unwrap();
-        match ks.send_reply(key::Msg::<FileIterator>::CommitReservedNodes(None)) {
-            Ok(key::Reply::Ok) => (),
-            _ => return Err(From::from("Unexpected reply from keystore")),
-        }
+        self.key_store.commit_reserved_nodes(None)?;
         Ok(id)
     }
 
@@ -274,25 +257,18 @@ impl<B: StoreBackend> Family<B> {
         is_directory: bool,
         contents: Option<FileIterator>,
     ) -> Result<u64, HatError> {
-        let f = if is_directory {
-            None
+        let id = if is_directory {
+            self.key_store.insert_entry(file)?
         } else {
-            contents.map(|c| Box::new(move || Some(c)) as Box<dyn FnOnce() -> Option<FileIterator> + Send>)
-        };
-        let ks = self.key_store_process.iter().last().unwrap();
-        let id = match ks.send_reply(key::Msg::Insert(file, f))? {
-            key::Reply::Id(id) => id,
-            _ => return Err(From::from("Unexpected reply from key store")),
+            self.key_store
+                .insert(file, contents.map(|c| move || Some(c)))?
         };
         Ok(id)
     }
 
     pub fn flush(&self) -> Result<(), HatError> {
-        for ks in &self.key_store_process {
-            if let key::Reply::FlushOk = ks.send_reply(key::Msg::<FileIterator>::Flush)? {
-                continue;
-            }
-            return Err(From::from("Unexpected reply from key store"));
+        for ks in &self.key_stores {
+            ks.flush()?;
         }
         Ok(())
     }
@@ -368,16 +344,7 @@ impl<B: StoreBackend> Family<B> {
         &self,
         dir_id: Option<u64>,
     ) -> Result<Vec<key::DirElem<B>>, HatError> {
-        match self
-            .key_store_process
-            .iter()
-            .last()
-            .unwrap()
-            .send_reply(key::Msg::<FileIterator>::ListDir(dir_id))?
-        {
-            key::Reply::ListResult(ls) => Ok(ls),
-            _ => Err(From::from("Unexpected result from key store")),
-        }
+        Ok(self.key_store.list_dir(dir_id)?)
     }
 
     pub fn fetch_dir_data<HTB: hash::tree::HashTreeBackend<Err = key::MsgError>>(
