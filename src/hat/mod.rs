@@ -921,6 +921,226 @@ impl<B: StoreBackend> Hat<B> {
         self.checkout_dir_ref(&mut output_dir, dir_ref)
     }
 
+    /// Checkout a snapshot path resembling `ls` paths into `output_dir`:
+    /// - `<family>` or `/<family>` (latest snapshot, or `snapshot_id_override` if given)
+    /// - `<family>/<id|latest>` (full snapshot)
+    /// - `<family>/<id|latest>/<subpath>` (directory contents or single file/symlink)
+    pub fn checkout_path_in_dir(
+        &mut self,
+        snapshot_path: &std::path::Path,
+        snapshot_id_override: Option<u64>,
+        output_dir: PathBuf,
+    ) -> Result<(), HatError> {
+        use std::path::Component;
+
+        let mut components = Vec::new();
+        let mut started = false;
+        for comp in snapshot_path.components() {
+            match comp {
+                Component::RootDir | Component::CurDir if !started => continue,
+                Component::CurDir => continue,
+                Component::ParentDir | Component::Prefix(_) | Component::RootDir => {
+                    return Err(format!(
+                        "Invalid snapshot path '{}'",
+                        snapshot_path.display()
+                    )
+                    .into());
+                }
+                Component::Normal(s) => {
+                    started = true;
+                    components.push(s.to_owned());
+                }
+            }
+        }
+
+        let family_name = match components.first() {
+            Some(f) => f.to_string_lossy().into_owned(),
+            None => {
+                return Err(
+                    "Snapshot path must specify a family (e.g. 'family', 'family/1', or 'family/1/subdir')"
+                        .into(),
+                )
+            }
+        };
+
+        let (resolved_label, root_ref) = match components.get(1) {
+            None => match snapshot_id_override {
+                Some(id) => {
+                    let (_info, _h, dir_ref) = match self.snapshot_index.lookup(&family_name, id) {
+                        Some((i, h, Some(r))) => (i, h, r),
+                        _ => {
+                            return Err(format!(
+                                "No complete snapshot found for family '{}' with id {}",
+                                family_name, id
+                            )
+                            .into())
+                        }
+                    };
+                    (id.to_string(), dir_ref)
+                }
+                None => {
+                    let (info, _h, dir_ref) = match self.snapshot_index.latest(&family_name) {
+                        Some((i, h, Some(r))) => (i, h, r),
+                        _ => {
+                            return Err(format!(
+                                "Tried to checkout family '{}' before first completed commit",
+                                family_name
+                            )
+                            .into())
+                        }
+                    };
+                    (info.snapshot_id.to_string(), dir_ref)
+                }
+            },
+            Some(id_os) => {
+                if snapshot_id_override.is_some() {
+                    return Err(format!(
+                        "Cannot specify snapshot ID both in '{}' and via --id",
+                        snapshot_path.display()
+                    )
+                    .into());
+                }
+                let id_str = id_os.to_string_lossy();
+                if id_str == "latest" {
+                    let (info, _h, dir_ref) = match self.snapshot_index.latest(&family_name) {
+                        Some((i, h, Some(r))) => (i, h, r),
+                        _ => {
+                            return Err(format!(
+                                "Tried to checkout family '{}' before first completed commit",
+                                family_name
+                            )
+                            .into())
+                        }
+                    };
+                    (info.snapshot_id.to_string(), dir_ref)
+                } else {
+                    let id: u64 = id_str.parse().map_err(|_| {
+                        format!(
+                            "Invalid snapshot ID '{}' in '{}' (expected a numeric ID or 'latest')",
+                            id_str,
+                            snapshot_path.display()
+                        )
+                    })?;
+                    let (_info, _h, dir_ref) = match self.snapshot_index.lookup(&family_name, id) {
+                        Some((i, h, Some(r))) => (i, h, r),
+                        _ => {
+                            return Err(format!(
+                                "No complete snapshot found for family '{}' with id {}",
+                                family_name, id
+                            )
+                            .into())
+                        }
+                    };
+                    (id.to_string(), dir_ref)
+                }
+            }
+        };
+
+        let sub_components = if components.len() > 2 {
+            &components[2..]
+        } else {
+            &[]
+        };
+
+        let mut output = output_dir;
+        if sub_components.is_empty() {
+            return self.checkout_dir_ref(&mut output, root_ref);
+        }
+
+        // Walk down the TreeList to locate the requested subpath.
+        let mut current_dir_ref = root_ref;
+        for (idx, comp) in sub_components.iter().enumerate() {
+            let is_last = idx + 1 == sub_components.len();
+            let target_name: models::FileName = comp.clone().into();
+            let entries =
+                family::Family::<B>::fetch_dir_data(current_dir_ref, self.hash_backend())?;
+            let found = entries
+                .into_iter()
+                .find(|(e, _)| e.info.name == target_name);
+            let Some((entry, content)) = found else {
+                return Err(format!(
+                    "Path '{}' not found in snapshot '{}/{}'",
+                    snapshot_path.display(),
+                    family_name,
+                    resolved_label
+                )
+                .into());
+            };
+
+            if is_last {
+                match content {
+                    walker::Content::Dir(dir_ref) => {
+                        return self.checkout_dir_ref(&mut output, dir_ref);
+                    }
+                    other => {
+                        fs::create_dir_all(&output)?;
+                        return self.checkout_entry(&mut output, entry, other);
+                    }
+                }
+            } else {
+                match content {
+                    walker::Content::Dir(dir_ref) => current_dir_ref = dir_ref,
+                    _ => {
+                        return Err(format!(
+                            "Path component '{}' is not a directory in snapshot '{}/{}'",
+                            comp.to_string_lossy(),
+                            family_name,
+                            resolved_label
+                        )
+                        .into());
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn checkout_entry(
+        &self,
+        output: &mut PathBuf,
+        entry: key::Entry,
+        content: walker::Content,
+    ) -> Result<(), HatError> {
+        let name_os_string: ffi::OsString = entry.info.name.into();
+        crate::util::validate_entry_name(&name_os_string)?;
+        output.push(&name_os_string);
+
+        let is_symlink = matches!(content, walker::Content::Link(_));
+        match content {
+            walker::Content::Data(hash_ref) => {
+                let mut fd = fs::File::create(&output)?;
+                let tree_opt = hash::tree::LeafIterator::new(self.hash_backend(), hash_ref)?;
+                if let Some(tree) = tree_opt {
+                    family::Family::<B>::write_file_chunks(&mut fd, tree)?;
+                }
+            }
+            walker::Content::Dir(hash_ref) => {
+                self.checkout_dir_ref(output, hash_ref)?;
+            }
+            walker::Content::Link(link_path) => {
+                use std::os::unix::fs::symlink;
+                symlink(link_path, &output)?
+            }
+        }
+
+        if !is_symlink {
+            if let Some(perms) = entry.info.permissions {
+                let current = fs::symlink_metadata(&output)?.permissions();
+                if current != perms {
+                    fs::set_permissions(&output, perms)?;
+                }
+            }
+        }
+
+        if let (Some(m), Some(a)) = (entry.info.modified_ts_secs, entry.info.accessed_ts_secs) {
+            crate::util::set_times_nofollow(output, a, m)?;
+        }
+
+        output.pop();
+        Ok(())
+    }
+
     fn checkout_dir_ref(
         &self,
         output: &mut PathBuf,
@@ -930,42 +1150,7 @@ impl<B: StoreBackend> Hat<B> {
         for (entry, hash_ref) in
             family::Family::<B>::fetch_dir_data(dir_hash, self.hash_backend())?
         {
-            let name_os_string: ffi::OsString = entry.info.name.into();
-            crate::util::validate_entry_name(&name_os_string)?;
-            output.push(&name_os_string);
-
-            let is_symlink = matches!(hash_ref, walker::Content::Link(_));
-            match hash_ref {
-                walker::Content::Data(hash_ref) => {
-                    let mut fd = fs::File::create(&output)?;
-                    let tree_opt = hash::tree::LeafIterator::new(self.hash_backend(), hash_ref)?;
-                    if let Some(tree) = tree_opt {
-                        family::Family::<B>::write_file_chunks(&mut fd, tree)?;
-                    }
-                }
-                walker::Content::Dir(hash_ref) => {
-                    self.checkout_dir_ref(output, hash_ref)?;
-                }
-                walker::Content::Link(link_path) => {
-                    use std::os::unix::fs::symlink;
-                    symlink(link_path, &output)?
-                }
-            }
-
-            if !is_symlink {
-                if let Some(perms) = entry.info.permissions {
-                    let current = fs::symlink_metadata(&output)?.permissions();
-                    if current != perms {
-                        fs::set_permissions(&output, perms)?;
-                    }
-                }
-            }
-
-            if let (Some(m), Some(a)) = (entry.info.modified_ts_secs, entry.info.accessed_ts_secs) {
-                crate::util::set_times_nofollow(output, a, m)?;
-            }
-
-            output.pop();
+            self.checkout_entry(output, entry, hash_ref)?;
         }
         Ok(())
     }

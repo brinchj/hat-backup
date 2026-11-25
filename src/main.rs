@@ -70,15 +70,14 @@ fn do_commit<B: StoreBackend>(mut hat: HatRc<B>, name: String, path: PathBuf) {
     hat.data_flush().unwrap_or_else(|e| fail(e));
 }
 
-fn do_checkout<B: StoreBackend>(mut hat: HatRc<B>, name: String, id: Option<u64>, path: PathBuf) {
-    match id {
-        Some(snapshot_id) => hat
-            .checkout_snapshot_in_dir(name, snapshot_id, path)
-            .unwrap_or_else(|e| fail(e)),
-        None => hat
-            .checkout_in_dir(name, path)
-            .unwrap_or_else(|e| fail(e)),
-    }
+fn do_checkout<B: StoreBackend>(
+    mut hat: HatRc<B>,
+    snapshot_path: PathBuf,
+    id: Option<u64>,
+    dest_dir: PathBuf,
+) {
+    hat.checkout_path_in_dir(&snapshot_path, id, dest_dir)
+        .unwrap_or_else(|e| fail(e));
 }
 
 fn do_recover<B: StoreBackend>(mut hat: HatRc<B>) {
@@ -206,14 +205,22 @@ fn main() {
         )
         .subcommand(
             Command::new("checkout")
-                .about("Checkout a snapshot")
-                .arg(Arg::new("NAME").required(true).help("Name of the snapshot"))
-                .arg(Arg::new("PATH").required(true).help("The path of the snapshot"))
+                .about("Checkout a snapshot or subpath into a local destination directory")
+                .arg(
+                    Arg::new("SNAPSHOT_PATH")
+                        .required(true)
+                        .help("Snapshot path: <family>, <family>/<id|latest>, or <family>/<id|latest>/<subpath>"),
+                )
+                .arg(
+                    Arg::new("DEST_DIR")
+                        .required(true)
+                        .help("Local destination directory to restore into"),
+                )
                 .arg(
                     Arg::new("id")
                         .long("id")
                         .value_name("ID")
-                        .help("Snapshot ID to checkout (defaults to latest)"),
+                        .help("Snapshot ID to checkout when SNAPSHOT_PATH is a family name"),
                 ),
         )
         .subcommand(Command::new("recover").about("Recover list of commit'ed snapshots"))
@@ -246,8 +253,12 @@ fn main() {
         )
         .subcommand(
             Command::new("ls")
-                .about("List Hat snapshots paths")
-                .arg(Arg::new("PATH").required(true).help("Path to list inside hat")),
+                .about("List Hat snapshot paths")
+                .arg(
+                    Arg::new("PATH")
+                        .default_value("/")
+                        .help("Path to list inside Hat"),
+                ),
         )
         .get_matches();
 
@@ -316,15 +327,15 @@ fn main() {
             }
         }
         Some(("checkout", cmd)) => {
-            let name = cmd.get_one::<String>("NAME").unwrap().to_owned();
-            let path = PathBuf::from(cmd.get_one::<String>("PATH").unwrap());
+            let snapshot_path = PathBuf::from(cmd.get_one::<String>("SNAPSHOT_PATH").unwrap());
+            let dest_dir = PathBuf::from(cmd.get_one::<String>("DEST_DIR").unwrap());
             let id = cmd.get_one::<String>("id").map(|s| {
                 s.parse::<u64>()
                     .unwrap_or_else(|e| fail(format!("invalid snapshot id '{}': {}", s, e)))
             });
             match kind {
-                "file" => do_checkout(open_hat_file(cache_dir, &matches), name, id, path),
-                _ => do_checkout(open_hat_cmd(cache_dir), name, id, path),
+                "file" => do_checkout(open_hat_file(cache_dir, &matches), snapshot_path, id, dest_dir),
+                _ => do_checkout(open_hat_cmd(cache_dir), snapshot_path, id, dest_dir),
             }
         }
         Some(("recover", _)) => match kind {

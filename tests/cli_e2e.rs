@@ -296,12 +296,26 @@ fn cli_ls_lists_families_and_snapshots() {
         .assert()
         .success();
 
+    // `ls` with no path argument defaults to `/`.
+    let out_default = with_file_backend(&mut hatbin(), &sb)
+        .arg("ls")
+        .output()
+        .unwrap();
+    assert!(out_default.status.success());
+    let default_stdout = String::from_utf8_lossy(&out_default.stdout);
+    assert!(
+        default_stdout.lines().any(|l| l.trim() == "alpha"),
+        "expected 'alpha' in bare ls output: {:?}",
+        default_stdout
+    );
+
     let out_root = with_file_backend(&mut hatbin(), &sb)
         .args(["ls", "/"])
         .output()
         .unwrap();
     assert!(out_root.status.success());
     let root_stdout = String::from_utf8_lossy(&out_root.stdout);
+    assert_eq!(default_stdout, root_stdout);
     assert!(
         root_stdout.lines().any(|l| l.trim() == "alpha"),
         "expected 'alpha' in ls / output: {:?}",
@@ -669,4 +683,113 @@ fn cli_fails_fast_when_repository_is_locked() {
         .arg("check")
         .assert()
         .success();
+}
+
+#[test]
+fn cli_checkout_by_snapshot_path_and_subpath() {
+    let sb = sandbox();
+    hatbin()
+        .args(["init", sb.repo.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let fix1 = sb.root.path().join("fix1");
+    let fix2 = sb.root.path().join("fix2");
+    fs::create_dir_all(&fix1).unwrap();
+    fs::create_dir_all(&fix2).unwrap();
+    write_fixture(
+        &fix1,
+        &[
+            ("top.txt", FileSpec::file(b"v1-top".to_vec())),
+            ("sub/a.txt", FileSpec::file(b"v1-a".to_vec())),
+            ("sub/deep/b.txt", FileSpec::file(b"v1-b".to_vec())),
+        ],
+    );
+    write_fixture(
+        &fix2,
+        &[
+            ("top.txt", FileSpec::file(b"v2-top".to_vec())),
+            ("sub/a.txt", FileSpec::file(b"v2-a".to_vec())),
+            ("sub/deep/b.txt", FileSpec::file(b"v2-b".to_vec())),
+        ],
+    );
+
+    with_file_backend(&mut hatbin(), &sb)
+        .args(["commit", "myfam", fix1.to_str().unwrap()])
+        .assert()
+        .success();
+    with_file_backend(&mut hatbin(), &sb)
+        .args(["commit", "myfam", fix2.to_str().unwrap()])
+        .assert()
+        .success();
+
+    // 1. Checkout snapshot 1 via `myfam/1` (and with leading `/`).
+    let r_snap1 = sb.root.path().join("r_snap1");
+    with_file_backend(&mut hatbin(), &sb)
+        .args(["checkout", "/myfam/1", r_snap1.to_str().unwrap()])
+        .assert()
+        .success();
+    assert_tree_eq(&fix1, &r_snap1);
+
+    // 2. Checkout a subdirectory via `myfam/1/sub` into a local destination dir.
+    let r_sub1 = sb.root.path().join("r_sub1");
+    with_file_backend(&mut hatbin(), &sb)
+        .args(["checkout", "myfam/1/sub", r_sub1.to_str().unwrap()])
+        .assert()
+        .success();
+    assert_eq!(fs::read(r_sub1.join("a.txt")).unwrap(), b"v1-a");
+    assert_eq!(fs::read(r_sub1.join("deep/b.txt")).unwrap(), b"v1-b");
+    assert!(!r_sub1.join("top.txt").exists());
+
+    // 3. Checkout a subdirectory from latest via `myfam/latest/sub/deep`.
+    let r_latest_deep = sb.root.path().join("r_latest_deep");
+    with_file_backend(&mut hatbin(), &sb)
+        .args([
+            "checkout",
+            "myfam/latest/sub/deep",
+            r_latest_deep.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert_eq!(fs::read(r_latest_deep.join("b.txt")).unwrap(), b"v2-b");
+
+    // 4. Checkout a single file via `myfam/1/sub/a.txt`.
+    let r_single = sb.root.path().join("r_single");
+    with_file_backend(&mut hatbin(), &sb)
+        .args(["checkout", "myfam/1/sub/a.txt", r_single.to_str().unwrap()])
+        .assert()
+        .success();
+    assert_eq!(fs::read(r_single.join("a.txt")).unwrap(), b"v1-a");
+    assert!(!r_single.join("deep").exists());
+
+    // 5. Usage text clearly names SNAPSHOT_PATH and DEST_DIR when args are missing.
+    let missing = hatbin().args(["checkout", "myfam"]).output().unwrap();
+    assert!(!missing.status.success());
+    let missing_stderr = String::from_utf8_lossy(&missing.stderr);
+    assert!(
+        missing_stderr.contains("<DEST_DIR>") && missing_stderr.contains("<SNAPSHOT_PATH>"),
+        "expected <SNAPSHOT_PATH> and <DEST_DIR> in usage, got: {:?}",
+        missing_stderr
+    );
+
+    // 6. Conflicting snapshot IDs, bad IDs, and nonexistent subpaths fail cleanly.
+    let r_err = sb.root.path().join("r_err");
+    for args in [
+        vec!["checkout", "myfam/1", r_err.to_str().unwrap(), "--id", "1"],
+        vec!["checkout", "myfam/notanid", r_err.to_str().unwrap()],
+        vec!["checkout", "myfam/1/missing", r_err.to_str().unwrap()],
+        vec!["checkout", "/", r_err.to_str().unwrap()],
+    ] {
+        let out = with_file_backend(&mut hatbin(), &sb)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("Error:") && !stderr.contains("panicked at"),
+            "expected clean Error without panic, got: {:?}",
+            stderr
+        );
+    }
 }

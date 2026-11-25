@@ -70,15 +70,17 @@ hatbin --hat_state_dir /path/to/hat-state \
        --backend file --backend-path /path/to/blobs \
        commit docs /path/to/source-dir
 
-# List families, snapshots, or directory contents inside snapshots
+# List families, snapshots, or directory contents inside snapshots (defaults to `/`)
 hatbin --hat_state_dir /path/to/hat-state --backend file --backend-path /path/to/blobs \
-       ls /
+       ls
 
-# Checkout latest snapshot (or pass --id <ID> for a specific snapshot)
+# Checkout latest snapshot, a specific snapshot, or a subpath into a local destination directory
 hatbin --hat_state_dir /path/to/hat-state --backend file --backend-path /path/to/blobs \
        checkout docs /path/to/restore-dir
 hatbin --hat_state_dir /path/to/hat-state --backend file --backend-path /path/to/blobs \
-       checkout docs /path/to/restore-dir --id 1
+       checkout docs/1 /path/to/restore-dir
+hatbin --hat_state_dir /path/to/hat-state --backend file --backend-path /path/to/blobs \
+       checkout docs/1/subdir /path/to/restore-dir
 
 # Verify every indexed hash chunk against the backend
 hatbin --hat_state_dir /path/to/hat-state --backend file --backend-path /path/to/blobs \
