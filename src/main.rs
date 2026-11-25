@@ -264,6 +264,12 @@ fn do_commit<B: StoreBackend>(
     source_dir: PathBuf,
     out: &OutputConfig,
 ) {
+    if family_name == hat::hat::SYNTHETIC_ROOTS_FAMILY {
+        fail(format!(
+            "family name '{}' is reserved for internal metadata",
+            family_name
+        ));
+    }
     let mut family = hat
         .open_family(family_name.clone())
         .unwrap_or_else(|e| fail(format!("could not open family '{}': {}", family_name, e)));
@@ -273,7 +279,7 @@ fn do_commit<B: StoreBackend>(
     hat.data_flush().unwrap_or_else(|e| fail(e));
 
     let snapshot_id = hat
-        .list_snapshots()
+        .list_user_snapshots()
         .into_iter()
         .filter(|s| s.family_name == family_name)
         .map(|s| s.info.snapshot_id)
@@ -319,7 +325,7 @@ fn do_checkout<B: StoreBackend>(
 
 fn do_recover<B: StoreBackend>(mut hat: HatRc<B>, out: &OutputConfig) {
     hat.recover().unwrap_or_else(|e| fail(e));
-    let snapshots = hat.list_snapshots();
+    let snapshots = hat.list_user_snapshots();
     let family_count = snapshots
         .iter()
         .map(|s| s.family_name.as_str())
@@ -391,9 +397,12 @@ fn do_delete<B: StoreBackend>(
     dry_run: bool,
     out: &OutputConfig,
 ) {
+    if family == hat::hat::SYNTHETIC_ROOTS_FAMILY {
+        fail(format!("snapshot '{}/{}' not found", family, id));
+    }
     if dry_run {
         let exists = hat
-            .list_snapshots()
+            .list_user_snapshots()
             .into_iter()
             .any(|s| s.family_name == family && s.info.snapshot_id == id);
         if !exists {
@@ -482,11 +491,11 @@ fn do_check<B: StoreBackend>(hat: HatRc<B>, out: &OutputConfig) {
 fn do_resume<B: StoreBackend>(mut hat: HatRc<B>, out: &OutputConfig) {
     // open_repository() already ran hat.resume(). Publish an updated root listing
     // and flush pending blobs so resumed commits/deletes survive cache loss.
-    let snapshot_count = hat.list_snapshots().len();
-    if snapshot_count > 0 {
+    if !hat.list_snapshots().is_empty() {
         hat.meta_commit().unwrap_or_else(|e| fail(e));
         hat.data_flush().unwrap_or_else(|e| fail(e));
     }
+    let snapshot_count = hat.list_user_snapshots().len();
 
     if out.json {
         print_json(&serde_json::json!({

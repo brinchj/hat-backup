@@ -321,6 +321,29 @@ fn cli_ls_lists_families_and_snapshots() {
         "expected 'alpha' in ls / output: {:?}",
         root_stdout
     );
+    assert!(
+        !root_stdout.lines().any(|l| l.contains("__hat__roots__")),
+        "ls / must not expose internal __hat__roots__ family: {:?}",
+        root_stdout
+    );
+
+    // Direct access to internal __hat__roots__ must fail cleanly.
+    with_file_backend(&mut hatbin(), &sb)
+        .args(["ls", "__hat__roots__"])
+        .assert()
+        .failure();
+    with_file_backend(&mut hatbin(), &sb)
+        .args(["checkout", "__hat__roots__", sb.restore.to_str().unwrap()])
+        .assert()
+        .failure();
+    with_file_backend(&mut hatbin(), &sb)
+        .args(["delete", "__hat__roots__/1"])
+        .assert()
+        .failure();
+    with_file_backend(&mut hatbin(), &sb)
+        .args(["commit", "__hat__roots__", sb.fixture.to_str().unwrap()])
+        .assert()
+        .failure();
 
     let out_fam = with_file_backend(&mut hatbin(), &sb)
         .args(["ls", "alpha"])
@@ -1115,11 +1138,10 @@ fn cli_json_output_across_commands() {
         .unwrap();
     assert!(ls_root.status.success());
     let root_arr: serde_json::Value = serde_json::from_slice(&ls_root.stdout).unwrap();
-    assert!(root_arr
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|v| v["kind"] == "family" && v["name"] == "docs"));
+    let root_items = root_arr.as_array().unwrap();
+    assert_eq!(root_items.len(), 1);
+    assert_eq!(root_items[0]["kind"], "family");
+    assert_eq!(root_items[0]["name"], "docs");
 
     let ls_fam = hatbin()
         .args([

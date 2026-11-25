@@ -122,7 +122,7 @@ impl<B: StoreBackend> Filesystem<B> {
     }
 
     pub fn ls(&mut self, path: &Path) -> Result<Option<List>, HatError> {
-        let snapshots = self.hat.list_snapshots();
+        let snapshots = self.hat.list_user_snapshots();
 
         // Skip leading `/` or `.` so `/family/1/dir` and `family/1/dir` resolve identically,
         // while `/` and `.` list root families.

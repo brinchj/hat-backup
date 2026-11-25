@@ -131,8 +131,10 @@ fn index_db_path(root: PathBuf) -> String {
     concat_filename(root, "index.sqlite3")
 }
 
+pub const SYNTHETIC_ROOTS_FAMILY: &str = "__hat__roots__";
+
 fn synthetic_roots_family() -> String {
-    "__hat__roots__".to_string()
+    SYNTHETIC_ROOTS_FAMILY.to_string()
 }
 
 /// Visitor that collects every branch/leaf node of a hash tree without reading leaf payloads.
@@ -879,6 +881,14 @@ impl<B: StoreBackend> Hat<B> {
         self.snapshot_index.list_all()
     }
 
+    pub fn list_user_snapshots(&mut self) -> Vec<db::SnapshotStatus> {
+        self.snapshot_index
+            .list_all()
+            .into_iter()
+            .filter(|s| s.family_name != SYNTHETIC_ROOTS_FAMILY)
+            .collect()
+    }
+
     pub fn checkout_in_dir(
         &mut self,
         family_name: String,
@@ -962,6 +972,9 @@ impl<B: StoreBackend> Hat<B> {
                 )
             }
         };
+        if family_name == SYNTHETIC_ROOTS_FAMILY {
+            return Err(format!("No complete snapshot found for family '{}'", family_name).into());
+        }
 
         let (resolved_label, root_ref) = match components.get(1) {
             None => match snapshot_id_override {

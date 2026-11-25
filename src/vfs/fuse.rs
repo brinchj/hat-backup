@@ -105,7 +105,7 @@ impl<B: backend::StoreBackend> Fuse<B> {
         });
 
         let mut snapshots = HashMap::new();
-        for si in self.hat.lock().unwrap().list_snapshots() {
+        for si in self.hat.lock().unwrap().list_user_snapshots() {
             if !snapshots.contains_key(&si.family_name) {
                 snapshots.insert(si.family_name.clone(), vec![]);
             }
@@ -113,9 +113,6 @@ impl<B: backend::StoreBackend> Fuse<B> {
         }
 
         for (family_name, snapshots) in snapshots {
-            if family_name == "__hat__roots__" {
-                continue;
-            }
 
             let family_ino = self.add_file(File {
                 name: family_name.into(),
