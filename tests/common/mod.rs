@@ -9,6 +9,8 @@ use hat::backend::FileBackend;
 use hat::crypto::keys::Keeper;
 use hat::hat::HatRc;
 use hat::Hat;
+use rand::rngs::StdRng;
+use rand::{RngCore, SeedableRng};
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
@@ -224,4 +226,28 @@ pub fn basic_fixture() -> Vec<(&'static str, FileSpec)> {
             FileSpec::file_mode(b"#!/bin/sh\necho hi\n".to_vec(), 0o755),
         ),
     ]
+}
+
+pub fn backend_files(backend: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<_> = fs::read_dir(backend)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.is_file())
+        .collect();
+    files.sort();
+    files
+}
+
+pub fn backend_total_bytes(backend: &Path) -> u64 {
+    backend_files(backend)
+        .iter()
+        .map(|p| fs::metadata(p).unwrap().len())
+        .sum()
+}
+
+pub fn random_bytes_seeded(seed: u64, len: usize) -> Vec<u8> {
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut buf = vec![0u8; len];
+    rng.fill_bytes(&mut buf);
+    buf
 }

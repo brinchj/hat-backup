@@ -54,6 +54,7 @@ fn kill_after_full_commit_reopen_ok() {
 
     let mut hat = open_hat(&sb.repo, &sb.backend);
     assert_eq!(hat.unfinished_snapshot_count(), 0);
+    hat.check().unwrap();
     let leaf = checkout_and_leaf(&mut hat, "family", &sb.fixture, &sb.restore);
     assert_tree_eq(&sb.fixture, &leaf);
 }
@@ -98,8 +99,14 @@ fn kill_mid_commit_at(fault: &str) {
         "resume should clear unfinished work after fault {}",
         fault
     );
+    hat.check().unwrap();
     let leaf = checkout_and_leaf(&mut hat, "family", &sb.fixture, &sb.restore);
     assert_tree_eq(&sb.fixture, &leaf);
+}
+
+#[test]
+fn kill_mid_commit_resume_repairs_after_reserve() {
+    kill_mid_commit_at("AfterReserve");
 }
 
 #[test]
@@ -117,8 +124,7 @@ fn kill_mid_commit_resume_repairs_after_ready_commit() {
     kill_mid_commit_at("AfterReadyCommit");
 }
 
-#[test]
-fn kill_mid_delete_resume_then_gc() {
+fn kill_mid_delete_at(fault: &str) {
     let sb = sandbox();
     init_repo(&sb.repo);
 
@@ -139,7 +145,7 @@ fn kill_mid_delete_resume_then_gc() {
 
     let barrier = sb.root.path().join("barrier");
     let mut child = worker()
-        .env("HAT_TEST_FAULT", "AfterGcDeregister")
+        .env("HAT_TEST_FAULT", fault)
         .env("HAT_TEST_BARRIER", &barrier)
         .args([
             "delete",
@@ -158,10 +164,22 @@ fn kill_mid_delete_resume_then_gc() {
 
     let mut hat = open_hat(&sb.repo, &sb.backend);
     assert_eq!(hat.unfinished_snapshot_count(), 0);
-    let (_deleted, live) = hat.gc().unwrap();
+    let (deleted, live) = hat.gc().unwrap();
+    assert!(deleted > 0, "gc must delete snap1 hashes after delete fault {}", fault);
     assert!(live > 0);
+    hat.check().unwrap();
 
     let restore = sb.root.path().join("restore_b");
     let leaf = checkout_and_leaf(&mut hat, "family", &fix2, &restore);
     assert_tree_eq(&fix2, &leaf);
+}
+
+#[test]
+fn kill_mid_delete_resume_after_mark_then_gc() {
+    kill_mid_delete_at("AfterMark");
+}
+
+#[test]
+fn kill_mid_delete_resume_then_gc() {
+    kill_mid_delete_at("AfterGcDeregister");
 }

@@ -131,15 +131,38 @@ fn cli_resume_after_kill() {
         .assert()
         .success();
 
-    // Resume finishes unfinished commit; flush meta/data like a normal commit end.
-    {
-        let mut hat = open_hat(&sb.repo, &sb.backend);
-        assert_eq!(hat.unfinished_snapshot_count(), 0);
-        hat.meta_commit().unwrap();
-        hat.data_flush().unwrap();
-        let leaf = checkout_and_leaf(&mut hat, "family", &sb.fixture, &sb.restore);
-        assert_tree_eq(&sb.fixture, &leaf);
+    with_file_backend(&mut hatbin(), &sb)
+        .arg("check")
+        .assert()
+        .success();
+
+    with_file_backend(&mut hatbin(), &sb)
+        .args(["checkout", "family", sb.restore.to_str().unwrap()])
+        .assert()
+        .success();
+
+    assert_tree_eq(&sb.fixture, &restored_tree_path(&sb.fixture, &sb.restore));
+
+    // Verify `hatbin resume` also published meta_commit() so the resumed snapshot survives cache wipe.
+    for entry in fs::read_dir(sb.repo.join("cache")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            fs::remove_dir_all(&path).unwrap();
+        } else {
+            fs::remove_file(&path).unwrap();
+        }
     }
+    let restore2 = sb.root.path().join("restore_after_recover");
+    fs::create_dir_all(&restore2).unwrap();
+    with_file_backend(&mut hatbin(), &sb)
+        .arg("recover")
+        .assert()
+        .success();
+    with_file_backend(&mut hatbin(), &sb)
+        .args(["checkout", "family", restore2.to_str().unwrap()])
+        .assert()
+        .success();
+    assert_tree_eq(&sb.fixture, &restored_tree_path(&sb.fixture, &restore2));
 }
 
 #[test]
@@ -210,4 +233,137 @@ fn cli_init_sets_restrictive_permissions_and_refuses_overwrite() {
         }
         assert!(seen_files >= 2, "expected hash_index.sqlite3 and family index in cache/");
     }
+}
+
+#[test]
+fn cli_recover_and_checkout_after_cache_wipe() {
+    let sb = sandbox();
+    write_fixture(&sb.fixture, &basic_fixture());
+
+    hatbin()
+        .args(["init", sb.repo.to_str().unwrap()])
+        .assert()
+        .success();
+
+    with_file_backend(&mut hatbin(), &sb)
+        .args(["commit", "family", sb.fixture.to_str().unwrap()])
+        .assert()
+        .success();
+
+    // Wipe local cache while keeping universal key and backend.
+    for entry in fs::read_dir(sb.repo.join("cache")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            fs::remove_dir_all(&path).unwrap();
+        } else {
+            fs::remove_file(&path).unwrap();
+        }
+    }
+
+    with_file_backend(&mut hatbin(), &sb)
+        .arg("recover")
+        .assert()
+        .success();
+
+    with_file_backend(&mut hatbin(), &sb)
+        .arg("check")
+        .assert()
+        .success();
+
+    with_file_backend(&mut hatbin(), &sb)
+        .args(["checkout", "family", sb.restore.to_str().unwrap()])
+        .assert()
+        .success();
+
+    assert_tree_eq(&sb.fixture, &restored_tree_path(&sb.fixture, &sb.restore));
+}
+
+#[test]
+fn cli_ls_lists_families_and_snapshots() {
+    let sb = sandbox();
+    write_fixture(&sb.fixture, &basic_fixture());
+
+    hatbin()
+        .args(["init", sb.repo.to_str().unwrap()])
+        .assert()
+        .success();
+
+    with_file_backend(&mut hatbin(), &sb)
+        .args(["commit", "alpha", sb.fixture.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let out_root = with_file_backend(&mut hatbin(), &sb)
+        .args(["ls", "/"])
+        .output()
+        .unwrap();
+    assert!(out_root.status.success());
+    let root_stdout = String::from_utf8_lossy(&out_root.stdout);
+    assert!(
+        root_stdout.lines().any(|l| l.trim() == "alpha"),
+        "expected 'alpha' in ls / output: {:?}",
+        root_stdout
+    );
+
+    let out_fam = with_file_backend(&mut hatbin(), &sb)
+        .args(["ls", "alpha"])
+        .output()
+        .unwrap();
+    assert!(out_fam.status.success());
+    let fam_stdout = String::from_utf8_lossy(&out_fam.stdout);
+    assert!(
+        fam_stdout.lines().any(|l| l.starts_with("alpha/")),
+        "expected 'alpha/<id>' in ls alpha output: {:?}",
+        fam_stdout
+    );
+}
+
+#[test]
+fn cli_fails_nonzero_on_bad_usage_and_corrupt_backend() {
+    let sb = sandbox();
+    write_fixture(&sb.fixture, &basic_fixture());
+
+    // Missing HAT_STATE_DIR fails non-zero.
+    hatbin()
+        .env_remove("HAT_STATE_DIR")
+        .arg("check")
+        .assert()
+        .failure();
+
+    hatbin()
+        .args(["init", sb.repo.to_str().unwrap()])
+        .assert()
+        .success();
+
+    // Missing HAT_BACKEND_PATH with file backend fails non-zero.
+    hatbin()
+        .env("HAT_STATE_DIR", &sb.repo)
+        .env("HAT_BACKEND", "file")
+        .env_remove("HAT_BACKEND_PATH")
+        .arg("check")
+        .assert()
+        .failure();
+
+    // Checkout of nonexistent family fails non-zero.
+    with_file_backend(&mut hatbin(), &sb)
+        .args(["checkout", "no_such_family", sb.restore.to_str().unwrap()])
+        .assert()
+        .failure();
+
+    // Commit, corrupt a blob, verify `hatbin check` exits non-zero.
+    with_file_backend(&mut hatbin(), &sb)
+        .args(["commit", "family", sb.fixture.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let blobs = backend_files(&sb.backend);
+    assert!(!blobs.is_empty());
+    let mut data = fs::read(&blobs[0]).unwrap();
+    data[0] ^= 0xFF;
+    fs::write(&blobs[0], &data).unwrap();
+
+    with_file_backend(&mut hatbin(), &sb)
+        .arg("check")
+        .assert()
+        .failure();
 }
