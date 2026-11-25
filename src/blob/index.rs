@@ -134,6 +134,11 @@ impl BlobIndex {
         self.0.recover(name)
     }
 
+    /// Refresh the in-memory blob ID counter from the database (e.g. after recovery).
+    pub fn refresh_id_counter(&self) {
+        self.0.index.lock().blob_refresh_id_counter();
+    }
+
     pub fn find(&self, name: &[u8]) -> Option<BlobDesc> {
         self.0.index.lock().blob_id_from_name(name).map(|id| BlobDesc {
                 name: name.to_vec(),

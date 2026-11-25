@@ -43,6 +43,7 @@ table! {
         file_size -> Nullable<BigInt>,
         hash -> Nullable<Binary>,
         hash_ref -> Nullable<Binary>,
+        snapshot_ts_utc -> Nullable<BigInt>,
     }
 }
 
@@ -92,6 +93,7 @@ pub struct KeyData {
     pub file_size: Option<i64>,
     pub hash: Option<Vec<u8>>,
     pub hash_ref: Option<Vec<u8>>,
+    pub snapshot_ts_utc: Option<i64>,
 }
 
 #[derive(Insertable)]
@@ -114,4 +116,5 @@ pub struct NewKeyData<'a> {
     pub file_size: Option<i64>,
     pub hash: Option<&'a [u8]>,
     pub hash_ref: Option<&'a [u8]>,
+    pub snapshot_ts_utc: Option<i64>,
 }

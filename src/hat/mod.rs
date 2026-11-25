@@ -577,6 +577,8 @@ impl<B: StoreBackend> HatRc<B> {
         expected_root_hash: Option<&[u8]>,
     ) -> Result<(), HatError> {
         self.blob_store.recover()?;
+        // Drop any cached Family handles whose worker BlobStores may hold pre-recovery blob IDs.
+        self.families.clear();
         let root_href = self
             .recover_root()?
             .ok_or("Failed to find a commit-ed root")?;

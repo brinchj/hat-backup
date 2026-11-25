@@ -261,3 +261,54 @@ fn identity() {
     }
     quickcheck::quickcheck(prop as fn(u8) -> bool);
 }
+
+#[test]
+fn data_looks_unchanged_checks_kind_metadata_and_racily_clean_window() {
+    use std::fs::Permissions;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+
+    let make = |data: Data, mtime: i64, snapshot_ts: i64, len: u64, mode: u32| Entry {
+        node_id: Some(1),
+        parent_id: None,
+        data,
+        info: Info {
+            name: "item".to_string().into(),
+            created_ts_secs: Some(900),
+            modified_ts_secs: Some(mtime),
+            accessed_ts_secs: Some(950),
+            permissions: Some(Permissions::from_mode(mode)),
+            user_id: Some(1000),
+            group_id: Some(1000),
+            byte_length: Some(len),
+            snapshot_ts_utc: snapshot_ts,
+        },
+    };
+
+    // Clean old file: mtime strictly before both scans -> fast-path skip allowed.
+    let stored = make(Data::FileHash(vec![1, 2, 3]), 1000, 1005, 8, 0o644);
+    let fresh = make(Data::FilePlaceholder, 1000, 1006, 8, 0o644);
+    assert!(fresh.data_looks_unchanged(&stored));
+
+    // Delayed-v2 racily-clean: stored scan happened in the same second as mtime (1000 == 1000),
+    // even though v2 runs later (1005 > 1000) -> must NOT skip.
+    let stored_racy = make(Data::FileHash(vec![1, 2, 3]), 1000, 1000, 8, 0o644);
+    assert!(!fresh.data_looks_unchanged(&stored_racy));
+
+    // Current-second racily-clean: mtime == current scan second -> must NOT skip.
+    let fresh_same_sec = make(Data::FilePlaceholder, 1006, 1006, 8, 0o644);
+    let stored_same_sec = make(Data::FileHash(vec![1, 2, 3]), 1006, 1005, 8, 0o644);
+    assert!(!fresh_same_sec.data_looks_unchanged(&stored_same_sec));
+
+    // Metadata and kind mutations must NOT skip even with clean old mtime.
+    assert!(!make(Data::FilePlaceholder, 1000, 1006, 9, 0o644).data_looks_unchanged(&stored));
+    assert!(!make(Data::FilePlaceholder, 1000, 1006, 8, 0o755).data_looks_unchanged(&stored));
+    assert!(!make(Data::DirPlaceholder, 1000, 1006, 8, 0o644).data_looks_unchanged(&stored));
+
+    // Symlinks: identical target with clean old mtime skips; changed target does not.
+    let stored_link = make(Data::Symlink(PathBuf::from("a")), 1000, 1005, 1, 0o777);
+    assert!(make(Data::Symlink(PathBuf::from("a")), 1000, 1006, 1, 0o777)
+        .data_looks_unchanged(&stored_link));
+    assert!(!make(Data::Symlink(PathBuf::from("b")), 1000, 1006, 1, 0o777)
+        .data_looks_unchanged(&stored_link));
+}

@@ -233,6 +233,12 @@ impl<B: StoreBackend> StoreInner<B> {
                 warn!("Skipping unrecognized backend object during recover: {}", e);
             }
         }
+        // Advance the blob ID counter past all recovered blobs and re-reserve the
+        // pre-allocated blob_desc so subsequent commits never collide on blobs.id.
+        self.blob_index.refresh_id_counter();
+        if self.blob.upperbound_len() == 0 {
+            self.reserve_new_blob();
+        }
         Ok(())
     }
 

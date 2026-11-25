@@ -278,8 +278,10 @@ impl<IT: io::Read, B: StoreBackend> MsgHandler<Msg<IT>, Reply<B>> for Store<B> {
                     .lookup(insert_entry.parent_id, insert_entry.info.name.clone())?
                 {
                     Some(ref stored_entry) if insert_entry.data_looks_unchanged(stored_entry) => {
-                        match stored_entry.data {
-                            Data::FileHash(ref hash_bytes) if chunk_it_opt.is_some() => {
+                        match (&stored_entry.data, &insert_entry.data) {
+                            (Data::FileHash(ref hash_bytes), Data::FilePlaceholder)
+                                if chunk_it_opt.is_some() =>
+                            {
                                 let hash = hash::Hash {
                                     bytes: hash_bytes.to_vec(),
                                 };
@@ -290,9 +292,19 @@ impl<IT: io::Read, B: StoreBackend> MsgHandler<Msg<IT>, Reply<B>> for Store<B> {
                                     return reply_ok!(Reply::Id(stored_entry.node_id.unwrap()));
                                 }
                             }
-                            _ if chunk_it_opt.is_none() => {
+                            (Data::DirPlaceholder, Data::DirPlaceholder)
+                                if chunk_it_opt.is_none() =>
+                            {
                                 // Short-circuit: No data needed.
-                                debug!("Skip empty entry: {:?}", stored_entry.info.name);
+                                debug!("Skip unchanged dir: {:?}", stored_entry.info.name);
+                                self.index.mark_reserved(stored_entry)?;
+                                return reply_ok!(Reply::Id(stored_entry.node_id.unwrap()));
+                            }
+                            (Data::Symlink(a), Data::Symlink(b))
+                                if a == b && chunk_it_opt.is_none() =>
+                            {
+                                // Short-circuit: Unchanged symlink.
+                                debug!("Skip unchanged symlink: {:?}", stored_entry.info.name);
                                 self.index.mark_reserved(stored_entry)?;
                                 return reply_ok!(Reply::Id(stored_entry.node_id.unwrap()));
                             }

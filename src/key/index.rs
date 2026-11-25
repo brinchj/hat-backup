@@ -83,9 +83,44 @@ impl Entry {
     }
 
     pub fn data_looks_unchanged(&self, them: &Entry) -> bool {
-        self.info.modified_ts_secs.is_some()
-            && ((self.parent_id, &self.info.name, self.info.modified_ts_secs)
-                == (them.parent_id, &them.info.name, them.info.modified_ts_secs))
+        let same_kind = match (&self.data, &them.data) {
+            (Data::FilePlaceholder, Data::FileHash(_))
+            | (Data::FilePlaceholder, Data::FilePlaceholder)
+            | (Data::DirPlaceholder, Data::DirPlaceholder) => true,
+            (Data::Symlink(a), Data::Symlink(b)) => a == b,
+            (Data::FileHash(a), Data::FileHash(b)) => a == b,
+            _ => false,
+        };
+        if !same_kind {
+            return false;
+        }
+        let Some(mtime) = self.info.modified_ts_secs else {
+            return false;
+        };
+        // Racily-clean guard: mtime is stored at 1-second resolution, so never short-circuit
+        // if the entry was modified in the same second as either scan (or in the future).
+        if mtime >= them.info.snapshot_ts_utc || mtime >= self.info.snapshot_ts_utc {
+            return false;
+        }
+        (
+            self.parent_id,
+            &self.info.name,
+            self.info.modified_ts_secs,
+            self.info.byte_length,
+            &self.info.permissions,
+            self.info.user_id,
+            self.info.group_id,
+            self.info.created_ts_secs,
+        ) == (
+            them.parent_id,
+            &them.info.name,
+            them.info.modified_ts_secs,
+            them.info.byte_length,
+            &them.info.permissions,
+            them.info.user_id,
+            them.info.group_id,
+            them.info.created_ts_secs,
+        )
     }
 }
 
@@ -292,6 +327,7 @@ impl InternalKeyIndex {
                 symbolic_link_path: link_path.map(|s| s.as_bytes()),
                 hash: hash_ref_opt.map(|h| &h.hash.bytes[..]),
                 hash_ref: hash_ref_bytes.as_ref().map(|v| &v[..]),
+                snapshot_ts_utc: Some(entry.info.snapshot_ts_utc),
             };
 
             // Insert replaces when (node_id, committed) already exists.
@@ -338,10 +374,16 @@ impl InternalKeyIndex {
             Ok(Some(Entry {
                 node_id: node.node_id.map(|n| n as u64),
                 parent_id: node.parent_id.map(|p| p as u64),
-                data: data
-                    .hash
-                    .map(Data::FileHash)
-                    .unwrap_or(Data::DirPlaceholder),
+                data: match (data.hash, data.symbolic_link_path) {
+                    (Some(h), None) => Data::FileHash(h),
+                    (None, None) => Data::DirPlaceholder,
+                    (None, Some(path)) => {
+                        Data::Symlink(PathBuf::from(str::from_utf8(&path[..]).unwrap()))
+                    }
+                    (Some(_), Some(lp)) => {
+                        unreachable!("Cannot have both file data and link path: {:?}", lp)
+                    }
+                },
 
                 info: Info {
                     name: name_,
@@ -354,7 +396,7 @@ impl InternalKeyIndex {
                     user_id: data.user_id.map(|x| x as u64),
                     group_id: data.group_id.map(|x| x as u64),
                     byte_length: data.file_size.map(|x| x as u64),
-                    snapshot_ts_utc: 0,
+                    snapshot_ts_utc: data.snapshot_ts_utc.unwrap_or(0),
                 },
             }))
         } else {
@@ -413,7 +455,7 @@ impl InternalKeyIndex {
                             user_id: data.user_id.map(|x| x as u64),
                             group_id: data.group_id.map(|x| x as u64),
                             byte_length: data.file_size.map(|x| x as u64),
-                            snapshot_ts_utc: 0,
+                            snapshot_ts_utc: data.snapshot_ts_utc.unwrap_or(0),
                         },
                     },
                     data.hash_ref

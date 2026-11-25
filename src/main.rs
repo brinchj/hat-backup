@@ -97,6 +97,15 @@ fn do_check<B: StoreBackend>(hat: HatRc<B>) {
     }
 }
 
+fn do_resume<B: StoreBackend>(mut hat: HatRc<B>) {
+    // open_repository() already ran hat.resume(). Publish an updated root listing
+    // and flush pending blobs so resumed commits/deletes survive cache loss.
+    if !hat.list_snapshots().is_empty() {
+        hat.meta_commit().unwrap();
+        hat.data_flush().unwrap();
+    }
+}
+
 fn do_ls<B: StoreBackend>(hat: HatRc<B>, path: PathBuf) {
     if let Some(f) = hat::vfs::Filesystem::new(hat).ls(&path).unwrap() {
         match f {
@@ -264,12 +273,8 @@ fn main() {
 
     match matches.subcommand() {
         Some(("resume", _)) => match kind {
-            "file" => {
-                let _ = open_hat_file(cache_dir, &matches);
-            }
-            _ => {
-                let _ = open_hat_cmd(cache_dir);
-            }
+            "file" => do_resume(open_hat_file(cache_dir, &matches)),
+            _ => do_resume(open_hat_cmd(cache_dir)),
         },
         Some(("commit", cmd)) => {
             let name = cmd.get_one::<String>("NAME").unwrap().to_owned();
